@@ -83,6 +83,7 @@ class AlphaBot:
         self._scheduler.add_job(self._analysis_cycle, "interval", seconds=config.trading.analysis_interval_sec)
         self._scheduler.add_job(self._daily_reset, "cron", hour=0, minute=0)
         self._scheduler.add_job(self._save_status, "interval", minutes=5)
+        self._scheduler.add_job(self._poll_commands, "interval", seconds=10)
         self._scheduler.start()
 
         # Notify
@@ -217,11 +218,94 @@ class AlphaBot:
         self.risk_manager.reset_daily()
 
     async def _save_status(self) -> None:
-        """Persist bot state to Supabase for crash recovery."""
-        status = self.risk_manager.get_status()
-        status["active_strategy"] = self._active_strategy.name.value if self._active_strategy else None
-        status["pair"] = config.trading.pair
+        """Persist bot state to Supabase for crash recovery + dashboard display."""
+        rm = self.risk_manager
+        last = self.analyzer.last_analysis if self.analyzer else None
+        status = {
+            "total_pnl": rm.capital - config.trading.starting_capital,
+            "daily_pnl": rm.daily_pnl,
+            "daily_loss_pct": rm.daily_loss_pct,
+            "win_rate": rm.win_rate,
+            "total_trades": len(rm.trade_results),
+            "open_positions": len(rm.open_positions),
+            "active_strategy": self._active_strategy.name.value if self._active_strategy else None,
+            "market_condition": last.condition.value if last else None,
+            "capital": rm.capital,
+            "pair": config.trading.pair,
+            "is_running": self._running,
+            "is_paused": rm.is_paused,
+            "pause_reason": rm._pause_reason or None,
+        }
         await self.db.save_bot_status(status)
+
+    async def _poll_commands(self) -> None:
+        """Check Supabase for pending dashboard commands and execute them."""
+        try:
+            commands = await self.db.poll_pending_commands()
+            for cmd in commands:
+                await self._handle_command(cmd)
+        except Exception:
+            logger.exception("Error polling commands")
+
+    async def _handle_command(self, cmd: dict) -> None:
+        """Process a single dashboard command."""
+        cmd_id: int = cmd["id"]
+        command: str = cmd["command"]
+        params: dict = cmd.get("params") or {}
+        result_msg = "ok"
+
+        logger.info("Processing command %d: %s %s", cmd_id, command, params)
+
+        try:
+            if command == "pause":
+                self.risk_manager.is_paused = True
+                self.risk_manager._pause_reason = params.get("reason", "Paused via dashboard")
+                if self._active_strategy:
+                    await self._active_strategy.stop()
+                    self._active_strategy = None
+                await self.alerts.send_risk_alert("Bot paused via dashboard")
+                result_msg = "Bot paused"
+
+            elif command == "resume":
+                self.risk_manager.unpause()
+                await self._analysis_cycle()  # re-evaluate and start strategy
+                await self.alerts.send_risk_alert("Bot resumed via dashboard")
+                result_msg = "Bot resumed"
+
+            elif command == "force_strategy":
+                strategy_name = params.get("strategy")
+                if strategy_name:
+                    try:
+                        target = StrategyName(strategy_name)
+                        self.risk_manager.unpause()
+                        await self._switch_strategy(target)
+                        result_msg = f"Forced strategy: {strategy_name}"
+                    except ValueError:
+                        result_msg = f"Unknown strategy: {strategy_name}"
+                else:
+                    result_msg = "Missing 'strategy' param"
+
+            elif command == "update_config":
+                # Apply runtime config overrides (non-persistent)
+                if "pair" in params:
+                    logger.info("Pair override not supported at runtime (restart required)")
+                    result_msg = "Pair change requires restart"
+                elif "max_position_pct" in params:
+                    self.risk_manager.max_position_pct = float(params["max_position_pct"])
+                    result_msg = f"max_position_pct → {params['max_position_pct']}"
+                elif "daily_loss_limit_pct" in params:
+                    self.risk_manager.daily_loss_limit_pct = float(params["daily_loss_limit_pct"])
+                    result_msg = f"daily_loss_limit_pct → {params['daily_loss_limit_pct']}"
+                else:
+                    result_msg = f"Config updated: {params}"
+            else:
+                result_msg = f"Unknown command: {command}"
+
+        except Exception as e:
+            result_msg = f"Error: {e}"
+            logger.exception("Failed to handle command %d", cmd_id)
+
+        await self.db.mark_command_executed(cmd_id, result_msg)
 
     async def _restore_state(self) -> None:
         """Restore capital and state from last saved status."""

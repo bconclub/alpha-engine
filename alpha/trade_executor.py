@@ -107,14 +107,19 @@ class TradeExecutor:
         if self.db is None:
             return
         try:
+            fill_price = order.get("average") or order.get("price") or signal.price
+            filled_amount = order.get("filled") or signal.amount
+            cost = fill_price * filled_amount
+
             await self.db.log_trade({
-                "timestamp": iso_now(),
                 "pair": signal.pair,
                 "side": signal.side,
-                "price": order.get("average") or order.get("price") or signal.price,
-                "amount": order.get("filled") or signal.amount,
+                "entry_price": fill_price,
+                "amount": filled_amount,
+                "cost": cost,
                 "strategy": signal.strategy.value,
-                "pnl": 0.0,  # P&L calculated on close
+                "order_type": signal.order_type,
+                "exchange": signal.metadata.get("buy_exchange", "binance"),
                 "status": "open" if signal.side == "buy" else "closed",
                 "reason": signal.reason,
                 "order_id": order.get("id"),

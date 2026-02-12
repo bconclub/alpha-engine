@@ -98,6 +98,8 @@ class StrategySelector:
                 "adx": analysis.adx,
                 "atr": analysis.atr,
                 "bb_width": analysis.bb_width,
+                "rsi": analysis.rsi,
+                "volume_ratio": analysis.volume_ratio,
                 "strategy_selected": strategy.value if strategy else "paused",
                 "reason": reason,
             })
