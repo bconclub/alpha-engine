@@ -654,13 +654,14 @@ class AlphaBot:
                 "options": {"defaultType": "swap"},
                 "session": delta_session,
             })
-            # Override to India endpoint
-            self.delta.urls["api"] = config.delta.base_url
+            # Set sandbox FIRST, then override to India endpoint
+            # (sandbox mode resets URLs, so our override must come after)
             if config.delta.testnet:
                 self.delta.set_sandbox_mode(True)
+            self.delta.urls["api"] = config.delta.base_url
             logger.info(
-                "Delta Exchange India initialized (futures enabled, testnet=%s, leverage=%dx)",
-                config.delta.testnet, config.delta.leverage,
+                "Delta Exchange India initialized (futures enabled, testnet=%s, leverage=%dx, url=%s)",
+                config.delta.testnet, config.delta.leverage, config.delta.base_url,
             )
         else:
             self.delta_pairs = []  # no Delta pairs if no credentials
@@ -698,7 +699,7 @@ class AlphaBot:
             logger.warning("No %s balance found on %s. Available: %s", currency, ex_id, available)
             return 0.0
         except Exception as e:
-            logger.warning("Could not fetch balance from %s: %s", ex_id, e)
+            logger.warning("Could not fetch balance from %s: %s (type: %s)", ex_id, e, type(e).__name__)
             return None
 
 
