@@ -66,6 +66,9 @@ class AlphaBot:
         # Suppress strategy-change alerts on the very first analysis cycle
         self._has_run_first_cycle: bool = False
 
+        # Latest analysis data — cached for hourly market update
+        self._latest_analyses: list[dict[str, Any]] = []
+
         # Hourly tracking
         self._hourly_pnl: float = 0.0
         self._hourly_wins: int = 0
@@ -310,23 +313,12 @@ class AlphaBot:
                         "reason": analysis.reason,
                     })
 
-            # 4b. Build active strategies map for the market update
-            active_map: dict[str, str | None] = {}
-            for pair in self.all_pairs:
-                strat = self._active_strategies.get(pair)
-                active_map[pair] = strat.name.value if strat else None
-
             rm = self.risk_manager
 
-            # 4c. Send consolidated market update (every cycle)
-            await self.alerts.send_market_update(
-                analyses=all_analysis_dicts,
-                active_strategies=active_map,
-                capital=rm.capital,
-                open_position_count=len(rm.open_positions),
-            )
+            # 4b. Cache latest analysis data for the hourly market update
+            self._latest_analyses = all_analysis_dicts
 
-            # 4d. Send batched strategy changes (only when something changed)
+            # 4c. Send batched strategy changes (only when something changed)
             if strategy_changes:
                 await self.alerts.send_strategy_changes(strategy_changes)
 
@@ -470,15 +462,9 @@ class AlphaBot:
         self._hourly_losses = 0
 
     async def _hourly_report(self) -> None:
-        """Send hourly summary to Telegram, then reset hourly counters."""
+        """Send hourly market update + summary to Telegram, then reset hourly counters."""
         try:
             rm = self.risk_manager
-
-            # Build open positions list for the alert
-            open_pos = [
-                {"pair": p.pair, "position_type": p.position_type, "exchange": p.exchange}
-                for p in rm.open_positions
-            ]
 
             # Build active strategies map
             active_map: dict[str, str | None] = {}
@@ -492,6 +478,21 @@ class AlphaBot:
 
             # Capital = sum of actual exchange balances
             total_capital = (binance_bal or 0) + (delta_bal or 0)
+
+            # Send hourly market update (all pairs grouped by exchange)
+            if self._latest_analyses:
+                await self.alerts.send_market_update(
+                    analyses=self._latest_analyses,
+                    active_strategies=active_map,
+                    capital=total_capital,
+                    open_position_count=len(rm.open_positions),
+                )
+
+            # Build open positions list for the summary
+            open_pos = [
+                {"pair": p.pair, "position_type": p.position_type, "exchange": p.exchange}
+                for p in rm.open_positions
+            ]
 
             await self.alerts.send_hourly_summary(
                 open_positions=open_pos,
@@ -519,12 +520,27 @@ class AlphaBot:
 
         # Build per-pair info
         active_map: dict[str, str | None] = {}
+        active_count = 0
         for pair in self.all_pairs:
             strat = self._active_strategies.get(pair)
             active_map[pair] = strat.name.value if strat else None
+            if strat is not None:
+                active_count += 1
 
         # Use primary pair's analysis for condition
         last = self.analyzer.last_analysis if self.analyzer else None
+
+        # Fetch exchange balances
+        binance_bal = await self._fetch_portfolio_usd(self.binance)
+        delta_bal = await self._fetch_portfolio_usd(self.delta) if self.delta else None
+
+        # Determine bot state
+        if rm.is_paused:
+            bot_state = "paused"
+        elif not self._running:
+            bot_state = "error"
+        else:
+            bot_state = "running"
 
         status = {
             "total_pnl": rm.capital - config.trading.starting_capital,
@@ -540,6 +556,15 @@ class AlphaBot:
             "is_running": self._running,
             "is_paused": rm.is_paused,
             "pause_reason": rm._pause_reason or None,
+            # New fields
+            "binance_balance": binance_bal,
+            "delta_balance": delta_bal,
+            "binance_connected": self.binance is not None and binance_bal is not None,
+            "delta_connected": self.delta is not None and delta_bal is not None,
+            "bot_state": bot_state,
+            "shorting_enabled": config.delta.enable_shorting,
+            "leverage": config.delta.leverage,
+            "active_strategy_count": active_count,
         }
         await self.db.save_bot_status(status)
 

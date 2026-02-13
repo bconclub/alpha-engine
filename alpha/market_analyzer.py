@@ -29,6 +29,15 @@ class MarketAnalysis:
     reason: str
     timestamp: str
     direction: str = "neutral"  # "bullish", "bearish", or "neutral"
+    # MACD values
+    macd_value: float = 0.0
+    macd_signal: float = 0.0
+    macd_histogram: float = 0.0
+    # Directional indicators
+    plus_di: float = 0.0
+    minus_di: float = 0.0
+    # Price snapshot
+    current_price: float = 0.0
 
 
 class MarketAnalyzer:
@@ -85,6 +94,7 @@ class MarketAnalyzer:
         high = df["high"]
         low = df["low"]
         volume = df["volume"]
+        current_price = float(close.iloc[-1])
 
         # ADX — trend strength
         adx_indicator = ta.trend.ADXIndicator(high, low, close, window=14)
@@ -95,7 +105,7 @@ class MarketAnalyzer:
         # ATR — volatility
         atr_indicator = ta.volatility.AverageTrueRange(high, low, close, window=14)
         atr = atr_indicator.average_true_range().iloc[-1]
-        atr_pct = (atr / close.iloc[-1]) * 100  # ATR as % of price
+        atr_pct = (atr / current_price) * 100  # ATR as % of price
 
         # Bollinger Band width
         bb = ta.volatility.BollingerBands(close, window=20, window_dev=2)
@@ -106,6 +116,12 @@ class MarketAnalyzer:
 
         # RSI
         rsi = ta.momentum.RSIIndicator(close, window=14).rsi().iloc[-1]
+
+        # MACD (12, 26, 9)
+        macd_indicator = ta.trend.MACD(close, window_slow=26, window_fast=12, window_sign=9)
+        macd_value = macd_indicator.macd().iloc[-1]
+        macd_signal = macd_indicator.macd_signal().iloc[-1]
+        macd_histogram = macd_indicator.macd_diff().iloc[-1]
 
         # Volume ratio (current vs 20-bar average)
         vol_avg = volume.rolling(20).mean().iloc[-1]
@@ -158,6 +174,12 @@ class MarketAnalyzer:
             reason=reason,
             timestamp=iso_now(),
             direction=direction,
+            macd_value=macd_value,
+            macd_signal=macd_signal,
+            macd_histogram=macd_histogram,
+            plus_di=plus_di,
+            minus_di=minus_di,
+            current_price=current_price,
         )
 
 

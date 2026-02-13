@@ -166,15 +166,33 @@ class StrategySelector:
         if self.db is None:
             return
         try:
+            exchange = "delta" if analysis.pair in self.futures_pairs else "binance"
+
+            # entry_distance_pct: how far RSI is from the momentum entry
+            # threshold (RSI > 55 for bullish, RSI < 45 for bearish).
+            if analysis.rsi >= 50:
+                entry_distance_pct = analysis.rsi - 55.0
+            else:
+                entry_distance_pct = 45.0 - analysis.rsi
+
             await self.db.log_strategy_selection({
                 "timestamp": iso_now(),
                 "pair": analysis.pair,
+                "exchange": exchange,
                 "market_condition": analysis.condition.value,
                 "adx": analysis.adx,
                 "atr": analysis.atr,
                 "bb_width": analysis.bb_width,
                 "rsi": analysis.rsi,
                 "volume_ratio": analysis.volume_ratio,
+                "signal_strength": analysis.signal_strength,
+                "macd_value": analysis.macd_value,
+                "macd_signal": analysis.macd_signal,
+                "macd_histogram": analysis.macd_histogram,
+                "current_price": analysis.current_price,
+                "entry_distance_pct": entry_distance_pct,
+                "plus_di": analysis.plus_di,
+                "minus_di": analysis.minus_di,
                 "strategy_selected": strategy.value if strategy else "paused",
                 "reason": reason,
             })
