@@ -655,22 +655,28 @@ class AlphaBot:
 
         # Delta Exchange India (optional, for futures)
         if config.delta.api_key:
+            # Validate credentials are plain strings
+            delta_key = str(config.delta.api_key).strip()
+            delta_secret = str(config.delta.secret).strip()
+            logger.info(
+                "Delta credentials: key_len=%d, secret_len=%d, key_type=%s, secret_type=%s",
+                len(delta_key), len(delta_secret),
+                type(config.delta.api_key).__name__, type(config.delta.secret).__name__,
+            )
+
             delta_session = aiohttp.ClientSession(
                 connector=aiohttp.TCPConnector(
                     resolver=aiohttp.resolver.ThreadedResolver(), ssl=True,
                 )
             )
             self.delta = ccxt.delta({
-                "apiKey": config.delta.api_key,
-                "secret": config.delta.secret,
+                "apiKey": delta_key,
+                "secret": delta_secret,
                 "enableRateLimit": True,
-                "options": {"defaultType": "swap"},
+                "options": {"defaultType": "future"},
                 "session": delta_session,
             })
-            # Set sandbox FIRST, then override to India endpoint
-            # (sandbox mode resets URLs, so our override must come after)
-            if config.delta.testnet:
-                self.delta.set_sandbox_mode(True)
+            # Override to India endpoint (do NOT use sandbox mode — it breaks URLs)
             self.delta.urls["api"] = config.delta.base_url
             logger.info(
                 "Delta Exchange India initialized (futures enabled, testnet=%s, leverage=%dx, url=%s)",
