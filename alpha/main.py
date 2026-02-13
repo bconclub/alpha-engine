@@ -63,6 +63,9 @@ class AlphaBot:
         # Shutdown flag
         self._running = False
 
+        # Suppress strategy-change alerts on the very first analysis cycle
+        self._has_run_first_cycle: bool = False
+
         # Hourly tracking
         self._hourly_pnl: float = 0.0
         self._hourly_wins: int = 0
@@ -270,6 +273,8 @@ class AlphaBot:
 
             # 4. Select strategy per pair, switch, and collect changes for alert
             strategy_changes: list[dict[str, Any]] = []
+            all_analysis_dicts: list[dict[str, Any]] = []
+
             for analysis in analyses:
                 pair = analysis.pair
 
@@ -285,30 +290,53 @@ class AlphaBot:
                 selected = await self.selector.select(analysis, arb_opportunity)  # type: ignore[union-attr]
                 await self._switch_strategy(pair, selected)
 
-                # Detect change
                 new_name = selected.value if selected else None
-                if new_name != old_name:
-                    exchange = "Delta" if (self.delta and pair in self.delta_pairs) else "Binance"
+
+                # Collect analysis data for market update (ALL pairs)
+                all_analysis_dicts.append({
+                    "pair": pair,
+                    "condition": analysis.condition.value,
+                    "adx": analysis.adx,
+                    "rsi": analysis.rsi,
+                    "direction": analysis.direction,
+                })
+
+                # Detect change (skip initial assignment on startup)
+                if new_name != old_name and self._has_run_first_cycle:
                     strategy_changes.append({
                         "pair": pair,
-                        "condition": analysis.condition.value,
-                        "adx": analysis.adx,
-                        "rsi": analysis.rsi,
                         "old_strategy": old_name,
                         "new_strategy": new_name,
-                        "direction": analysis.direction,
-                        "exchange": exchange,
+                        "reason": analysis.reason,
                     })
 
-            # 4b. Send market update alert (only if strategies changed)
+            # 4b. Build active strategies map for the market update
+            active_map: dict[str, str | None] = {}
+            for pair in self.all_pairs:
+                strat = self._active_strategies.get(pair)
+                active_map[pair] = strat.name.value if strat else None
+
+            rm = self.risk_manager
+
+            # 4c. Send consolidated market update (every cycle)
+            await self.alerts.send_market_update(
+                analyses=all_analysis_dicts,
+                active_strategies=active_map,
+                capital=rm.capital,
+                open_position_count=len(rm.open_positions),
+            )
+
+            # 4d. Send batched strategy changes (only when something changed)
             if strategy_changes:
-                await self.alerts.send_market_update(strategy_changes)
+                await self.alerts.send_strategy_changes(strategy_changes)
+
+            # Mark first cycle complete (suppress strategy change spam on startup)
+            self._has_run_first_cycle = True
 
             # 5. Check liquidation risk for futures positions
             await self._check_liquidation_risks()
 
             # 6. Check daily loss warning (alert once when > 80% of limit)
-            rm = self.risk_manager
             loss_threshold = rm.daily_loss_limit_pct * 0.8
             if rm.daily_loss_pct >= loss_threshold and not self._daily_loss_warned:
                 self._daily_loss_warned = True
@@ -345,21 +373,8 @@ class AlphaBot:
 
         self._active_strategies[pair] = strategy
         await strategy.start()
-
-        # Alert
-        last = None
-        if self.analyzer:
-            last = self.analyzer.last_analysis_for(pair)  # type: ignore[union-attr]
-        if last is None and self.delta_analyzer:
-            last = self.delta_analyzer.last_analysis_for(pair)
-        exchange = "Delta" if (self.delta and pair in self.delta_pairs) else "Binance"
-        await self.alerts.send_strategy_switch(
-            pair=pair,
-            old=current_name.value if current_name else None,
-            new=name.value,
-            reason=last.reason if last else "initial",
-            exchange=exchange,
-        )
+        # Strategy change alerts are now batched in _analysis_cycle
+        # via send_strategy_changes -- no per-pair alert here.
 
     async def _check_arb_opportunity(self, pair: str) -> bool:
         """Quick check if there's a cross-exchange spread for a pair."""
