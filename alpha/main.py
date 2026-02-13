@@ -676,8 +676,11 @@ class AlphaBot:
                 "options": {"defaultType": "future"},
                 "session": delta_session,
             })
-            # Override to India endpoint (do NOT use sandbox mode — it breaks URLs)
-            self.delta.urls["api"] = config.delta.base_url
+            # Override to India endpoint — urls['api'] must be a dict with public/private keys
+            self.delta.urls["api"] = {
+                "public": config.delta.base_url,
+                "private": config.delta.base_url,
+            }
             logger.info(
                 "Delta Exchange India initialized (futures enabled, testnet=%s, leverage=%dx, url=%s)",
                 config.delta.testnet, config.delta.leverage, config.delta.base_url,
