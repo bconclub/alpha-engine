@@ -420,6 +420,10 @@ class AlphaBot:
             best_trade = {"pair": best_pair, "pnl": pnl_map[best_pair]}
             worst_trade = {"pair": worst_pair, "pnl": pnl_map[worst_pair]}
 
+        # Fetch live exchange balances
+        binance_bal = await self._fetch_balance(self.binance, "USDT")
+        delta_bal = await self._fetch_balance(self.delta, "USDT") if self.delta else None
+
         await self.alerts.send_daily_summary(
             total_trades=total,
             wins=wins,
@@ -430,6 +434,8 @@ class AlphaBot:
             pnl_by_pair=pnl_map,
             best_trade=best_trade,
             worst_trade=worst_trade,
+            binance_balance=binance_bal,
+            delta_balance=delta_bal,
         )
         rm.reset_daily()
         self._daily_loss_warned = False
@@ -455,6 +461,10 @@ class AlphaBot:
                 strat = self._active_strategies.get(pair)
                 active_map[pair] = strat.name.value if strat else None
 
+            # Fetch live exchange balances
+            binance_bal = await self._fetch_balance(self.binance, "USDT")
+            delta_bal = await self._fetch_balance(self.delta, "USDT") if self.delta else None
+
             await self.alerts.send_hourly_summary(
                 open_positions=open_pos,
                 hourly_wins=self._hourly_wins,
@@ -464,6 +474,8 @@ class AlphaBot:
                 capital=rm.capital,
                 active_strategies=active_map,
                 win_rate_24h=rm.win_rate,
+                binance_balance=binance_bal,
+                delta_balance=delta_bal,
             )
 
             # Reset hourly counters

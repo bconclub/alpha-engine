@@ -249,6 +249,8 @@ class AlertManager:
         capital: float,
         active_strategies: dict[str, str | None],
         win_rate_24h: float,
+        binance_balance: float | None = None,
+        delta_balance: float | None = None,
     ) -> None:
         """Hourly report with compact position + P&L info."""
         # Open positions description
@@ -286,9 +288,15 @@ class AlertManager:
             f"\U0001f4b0 Hourly P&L: `{'+' if hourly_pnl >= 0 else ''}{format_usd(hourly_pnl)}`",
             f"\U0001f4c8 Daily P&L: `{'+' if daily_pnl >= 0 else ''}{format_usd(daily_pnl)}`",
             f"\U0001f4b5 Capital: `{format_usd(capital)}`",
+        ]
+        if binance_balance is not None:
+            lines.append(f"   \U0001f7e1 Binance: `{format_usd(binance_balance)}`")
+        if delta_balance is not None:
+            lines.append(f"   \U0001f7e0 Delta: `{format_usd(delta_balance)}`")
+        lines.extend([
             f"\U0001f3af Strategies: `{strat_line}`",
             f"\U0001f3c6 Win rate (24h): `{win_rate_24h:.0f}%`",
-        ]
+        ])
         await self._send("\n".join(lines))
 
     # ── 5. DAILY SUMMARY ─────────────────────────────────────────────────────
@@ -304,6 +312,8 @@ class AlertManager:
         pnl_by_pair: dict[str, float] | None = None,
         best_trade: dict[str, Any] | None = None,
         worst_trade: dict[str, Any] | None = None,
+        binance_balance: float | None = None,
+        delta_balance: float | None = None,
         # backward compat — accept old kwargs and ignore
         total_pnl: float | None = None,
         trades_count: int | None = None,
@@ -338,6 +348,10 @@ class AlertManager:
                 lines.append(f"  {icon} `{short}`: `{'+' if pnl >= 0 else ''}{format_usd(pnl)}`")
 
         lines.append(f"\n\U0001f4b5 Capital: `{format_usd(capital)}`")
+        if binance_balance is not None:
+            lines.append(f"   \U0001f7e1 Binance: `{format_usd(binance_balance)}`")
+        if delta_balance is not None:
+            lines.append(f"   \U0001f7e0 Delta: `{format_usd(delta_balance)}`")
 
         # Best / worst trades
         if best_trade:
