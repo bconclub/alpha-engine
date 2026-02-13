@@ -28,6 +28,7 @@ class MarketAnalysis:
     signal_strength: float  # 0-100 — how strong is the signal for trading
     reason: str
     timestamp: str
+    direction: str = "neutral"  # "bullish", "bearish", or "neutral"
 
 
 class MarketAnalyzer:
@@ -114,6 +115,7 @@ class MarketAnalyzer:
         # -- Classification logic --
         condition: MarketCondition
         reason: str
+        direction: str = "neutral"
 
         # Volatile: ATR spike + high volume
         if atr_pct > 2.0 and volume_ratio > 1.5:
@@ -133,6 +135,7 @@ class MarketAnalyzer:
 
         # Default fallback — sideways unless moderate trend
         elif adx >= 20:
+            direction = "bullish" if plus_di > minus_di else "bearish"
             condition = MarketCondition.TRENDING
             reason = f"Moderate trend ADX={adx:.1f}, defaulting to trending"
         else:
@@ -154,6 +157,7 @@ class MarketAnalyzer:
             signal_strength=strength,
             reason=reason,
             timestamp=iso_now(),
+            direction=direction,
         )
 
 

@@ -19,6 +19,7 @@ class StrategyName(str, Enum):
     GRID = "grid"
     MOMENTUM = "momentum"
     ARBITRAGE = "arbitrage"
+    FUTURES_MOMENTUM = "futures_momentum"
 
 
 class MarketCondition(str, Enum):
@@ -40,6 +41,11 @@ class Signal:
     stop_loss: float | None = None
     take_profit: float | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
+    # Futures-specific (defaults keep backward compat for spot strategies)
+    leverage: int = 1                   # 1 = spot, >1 = futures
+    position_type: str = "spot"         # "spot", "long", or "short"
+    reduce_only: bool = False           # True when closing a futures position
+    exchange_id: str = "binance"        # identifies which exchange to route to
 
 
 class BaseStrategy(ABC):

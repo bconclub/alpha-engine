@@ -27,6 +27,11 @@ def _env_int(key: str, default: int = 0) -> int:
     return int(raw) if raw else default
 
 
+def _env_bool(key: str, default: bool = False) -> bool:
+    raw = os.getenv(key, "")
+    return raw.lower() in ("true", "1", "yes") if raw else default
+
+
 def _env_list(key: str, default: str = "") -> list[str]:
     """Parse a comma-separated env var into a list of stripped strings."""
     raw = os.getenv(key, default)
@@ -46,6 +51,22 @@ class KuCoinConfig:
     api_key: str = field(default_factory=lambda: _env("KUCOIN_API_KEY"))
     secret: str = field(default_factory=lambda: _env("KUCOIN_SECRET"))
     passphrase: str = field(default_factory=lambda: _env("KUCOIN_PASSPHRASE"))
+
+
+@dataclass(frozen=True)
+class DeltaConfig:
+    api_key: str = field(default_factory=lambda: _env("DELTA_API_KEY"))
+    secret: str = field(default_factory=lambda: _env("DELTA_SECRET"))
+    testnet: bool = field(default_factory=lambda: _env_bool("DELTA_TESTNET", True))
+    leverage: int = field(default_factory=lambda: _env_int("DELTA_LEVERAGE", 5))
+    pairs: list[str] = field(default_factory=lambda: _env_list("DELTA_PAIRS"))
+    enable_shorting: bool = field(default_factory=lambda: _env_bool("ENABLE_SHORTING", True))
+
+    @property
+    def base_url(self) -> str:
+        if self.testnet:
+            return "https://cdn-ind.testnet.deltaex.org"
+        return "https://api.india.delta.exchange"
 
 
 @dataclass(frozen=True)
@@ -76,6 +97,7 @@ class TradingConfig:
     per_trade_stop_loss_pct: float = 2.0
 
     # Timeframes
+    futures_check_interval_sec: int = 15
     candle_timeframe: str = "15m"
     candle_limit: int = 100
     analysis_interval_sec: int = 300  # 5 minutes
@@ -100,6 +122,7 @@ class TradingConfig:
 class Config:
     binance: BinanceConfig = field(default_factory=BinanceConfig)
     kucoin: KuCoinConfig = field(default_factory=KuCoinConfig)
+    delta: DeltaConfig = field(default_factory=DeltaConfig)
     supabase: SupabaseConfig = field(default_factory=SupabaseConfig)
     telegram: TelegramConfig = field(default_factory=TelegramConfig)
     trading: TradingConfig = field(default_factory=TradingConfig)

@@ -1,6 +1,7 @@
 """Telegram bot notifications for trade alerts and daily summaries.
 
-Multi-pair aware: daily summary includes per-pair P&L breakdown.
+Multi-pair + multi-exchange aware: includes exchange name, leverage info,
+per-pair P&L breakdown, and liquidation warnings for futures positions.
 """
 
 from __future__ import annotations
@@ -26,7 +27,7 @@ class AlertManager:
     async def connect(self) -> None:
         token = config.telegram.bot_token
         if not token or not self._chat_id:
-            logger.warning("Telegram credentials not set — alerts disabled")
+            logger.warning("Telegram credentials not set -- alerts disabled")
             return
         self._bot = Bot(token=token)
         logger.info("Telegram bot initialized")
@@ -46,13 +47,28 @@ class AlertManager:
         value: float,
         strategy: str,
         reason: str,
+        exchange: str = "binance",
+        leverage: int = 1,
+        position_type: str = "spot",
     ) -> None:
-        emoji = "\U0001f7e2" if side == "buy" else "\U0001f534"
+        # Emoji: short gets down triangle, buy green, sell red
+        if position_type == "short":
+            emoji = "\U0001f53b"  # red down-pointing triangle
+        elif side == "buy":
+            emoji = "\U0001f7e2"  # green circle
+        else:
+            emoji = "\U0001f534"  # red circle
+
+        # Position badge for futures
+        pos_label = ""
+        if position_type in ("long", "short"):
+            pos_label = f"\nPosition: `{position_type.upper()} {leverage}x`"
+
         msg = (
-            f"{emoji} *{side.upper()}* {pair}\n"
+            f"{emoji} *{side.upper()}* {pair} [{exchange.upper()}]\n"
             f"Price: `{price:,.2f}`\n"
             f"Amount: `{amount:.8f}`\n"
-            f"Value: `{format_usd(value)}`\n"
+            f"Value: `{format_usd(value)}`{pos_label}\n"
             f"Strategy: `{strategy}`\n"
             f"Reason: _{reason}_"
         )
@@ -107,7 +123,7 @@ class AlertManager:
 
         await self._send("\n".join(lines))
 
-    # -- Bot started (multi-pair) ----------------------------------------------
+    # -- Bot started (multi-pair + multi-exchange) -----------------------------
 
     async def send_bot_started(self, pairs: list[str], capital: float) -> None:
         pairs_str = ", ".join(f"`{p}`" for p in pairs)
@@ -126,6 +142,20 @@ class AlertManager:
 
     async def send_error_alert(self, message: str) -> None:
         msg = f"\u274c *ERROR*\n`{message}`"
+        await self._send(msg)
+
+    # -- Liquidation warning (futures) -----------------------------------------
+
+    async def send_liquidation_warning(
+        self, pair: str, distance_pct: float, position_type: str, leverage: int,
+    ) -> None:
+        msg = (
+            f"\U0001f6a8 *LIQUIDATION WARNING* \U0001f6a8\n"
+            f"Pair: `{pair}`\n"
+            f"Position: `{position_type.upper()} {leverage}x`\n"
+            f"Distance to liquidation: `{distance_pct:.1f}%`\n"
+            f"_Consider reducing position or adding margin_"
+        )
         await self._send(msg)
 
     # -- Bot lifecycle ---------------------------------------------------------

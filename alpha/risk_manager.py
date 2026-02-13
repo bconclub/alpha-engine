@@ -1,7 +1,8 @@
 """Risk manager — position sizing, exposure limits, win-rate circuit breakers.
 
-Multi-pair aware: tracks positions per pair, enforces total exposure cap,
-and prioritises signals by strength when capital is limited.
+Multi-pair + multi-exchange aware: tracks positions per pair, enforces total
+exposure cap (accounting for leverage), and monitors liquidation risk on
+futures positions.
 """
 
 from __future__ import annotations
@@ -23,6 +24,9 @@ class Position:
     amount: float
     strategy: str
     opened_at: str
+    exchange: str = "binance"
+    leverage: int = 1
+    position_type: str = "spot"  # "spot", "long", or "short"
 
 
 class RiskManager:
@@ -30,13 +34,13 @@ class RiskManager:
     Enforces risk rules before any trade is executed.
 
     Rules:
-    - Max 30% of capital per single trade
-    - Max 2 concurrent positions across ALL pairs
+    - Max 30% of capital per single trade (leveraged value counted)
+    - Max 2 concurrent positions across ALL pairs/exchanges
     - Max 1 position per pair at a time
-    - Total exposure capped at 60% of capital
+    - Total exposure capped at 60% of capital (leverage amplifies)
     - Daily loss limit: stop bot at threshold
     - Per-trade stop-loss: 2%
-    - Win-rate circuit breaker: if < 40% over last 20 trades → pause
+    - Win-rate circuit breaker: if < 40% over last 20 trades -> pause
     """
 
     def __init__(self, capital: float | None = None) -> None:
@@ -54,12 +58,12 @@ class RiskManager:
         self.is_paused = False
         self._pause_reason: str = ""
 
-    # ── Properties ────────────────────────────────────────────────────────────
+    # -- Properties ------------------------------------------------------------
 
     @property
     def win_rate(self) -> float:
         if not self.trade_results:
-            return 100.0  # no trades yet — allow trading
+            return 100.0  # no trades yet -- allow trading
         recent = self.trade_results[-20:]
         return (sum(recent) / len(recent)) * 100
 
@@ -71,14 +75,30 @@ class RiskManager:
 
     @property
     def total_exposure(self) -> float:
-        """Sum of all open position values in USD."""
-        return sum(p.entry_price * p.amount for p in self.open_positions)
+        """Sum of all open position values, accounting for leverage."""
+        return sum(p.entry_price * p.amount * p.leverage for p in self.open_positions)
 
     @property
     def total_exposure_pct(self) -> float:
         if self.capital == 0:
             return 0.0
         return (self.total_exposure / self.capital) * 100
+
+    @property
+    def spot_exposure(self) -> float:
+        """Spot positions only."""
+        return sum(
+            p.entry_price * p.amount
+            for p in self.open_positions if p.position_type == "spot"
+        )
+
+    @property
+    def futures_exposure(self) -> float:
+        """Futures positions only (leveraged value)."""
+        return sum(
+            p.entry_price * p.amount * p.leverage
+            for p in self.open_positions if p.position_type in ("long", "short")
+        )
 
     def pairs_with_positions(self) -> set[str]:
         """Return the set of pairs that currently have an open position."""
@@ -88,13 +108,20 @@ class RiskManager:
         """Check if there's already an open position for this pair."""
         return pair in self.pairs_with_positions()
 
-    # ── Signal approval ──────────────────────────────────────────────────────
+    # -- Signal approval -------------------------------------------------------
 
     def approve_signal(self, signal: Signal) -> bool:
         """Return True if the signal passes all risk checks."""
         if self.is_paused:
-            logger.warning("Bot is paused: %s — rejecting %s %s", self._pause_reason, signal.side, signal.pair)
+            logger.warning("Bot is paused: %s -- rejecting %s %s", self._pause_reason, signal.side, signal.pair)
             return False
+
+        # Determine if this signal opens a new position
+        # Spot: only "buy" opens. Futures: any non-reduce_only signal opens.
+        is_opening = (
+            (signal.position_type == "spot" and signal.side == "buy")
+            or (signal.position_type in ("long", "short") and not signal.reduce_only)
+        )
 
         # 1. Daily loss limit
         if self.daily_loss_pct >= self.daily_loss_limit_pct:
@@ -106,47 +133,49 @@ class RiskManager:
             self._pause("win rate too low (%.1f%% over last 20 trades)" % self.win_rate)
             return False
 
-        # 3. Max concurrent positions (across ALL pairs)
-        if signal.side == "buy" and len(self.open_positions) >= self.max_concurrent:
+        # 3. Max concurrent positions (across ALL pairs/exchanges)
+        if is_opening and len(self.open_positions) >= self.max_concurrent:
             logger.info(
-                "Max concurrent positions (%d) reached — rejecting %s buy",
-                self.max_concurrent, signal.pair,
+                "Max concurrent positions (%d) reached -- rejecting %s %s",
+                self.max_concurrent, signal.pair, signal.position_type,
             )
             return False
 
         # 4. Max 1 position per pair
-        if signal.side == "buy" and self.has_position(signal.pair):
-            logger.info("Already have open position on %s — rejecting buy", signal.pair)
+        if is_opening and self.has_position(signal.pair):
+            logger.info("Already have open position on %s -- rejecting", signal.pair)
             return False
 
-        # 5. Position size limit (per trade)
+        # 5. Position size limit (per trade, leverage-adjusted)
         trade_value = signal.price * signal.amount
+        effective_value = trade_value * signal.leverage  # futures amplification
         max_value = self.capital * (self.max_position_pct / 100)
-        if trade_value > max_value * 1.05:  # 5% tolerance
+        if effective_value > max_value * 1.05:  # 5% tolerance
             logger.info(
-                "Trade value $%.2f exceeds max $%.2f (%.0f%% of capital) — rejecting %s",
-                trade_value, max_value, self.max_position_pct, signal.pair,
+                "Effective value $%.2f (%.0fx) exceeds max $%.2f (%.0f%% of capital) -- rejecting %s",
+                effective_value, signal.leverage, max_value, self.max_position_pct, signal.pair,
             )
             return False
 
-        # 6. Total exposure cap (across all pairs)
-        if signal.side == "buy":
-            new_exposure_pct = ((self.total_exposure + trade_value) / self.capital) * 100
+        # 6. Total exposure cap (across all pairs/exchanges, leverage-adjusted)
+        if is_opening:
+            new_exposure = self.total_exposure + effective_value
+            new_exposure_pct = (new_exposure / self.capital) * 100 if self.capital else 0
             if new_exposure_pct > self.max_total_exposure_pct:
                 logger.info(
-                    "Total exposure would be %.1f%% (cap %.1f%%) — rejecting %s buy",
+                    "Total exposure would be %.1f%% (cap %.1f%%) -- rejecting %s",
                     new_exposure_pct, self.max_total_exposure_pct, signal.pair,
                 )
                 return False
 
         logger.info(
-            "Signal approved: %s %s %.6f @ %.2f ($%.2f) | positions=%d, exposure=%.1f%%, daily_pnl=$%.2f",
-            signal.side, signal.pair, signal.amount, signal.price,
-            trade_value, len(self.open_positions), self.total_exposure_pct, self.daily_pnl,
+            "Signal approved: %s %s %s %.6f @ %.2f ($%.2f, %dx) | positions=%d, exposure=%.1f%%, daily_pnl=$%.2f",
+            signal.position_type, signal.side, signal.pair, signal.amount, signal.price,
+            trade_value, signal.leverage, len(self.open_positions), self.total_exposure_pct, self.daily_pnl,
         )
         return True
 
-    # ── Position tracking ────────────────────────────────────────────────────
+    # -- Position tracking -----------------------------------------------------
 
     def record_open(self, signal: Signal) -> None:
         """Track a newly opened position."""
@@ -157,6 +186,9 @@ class RiskManager:
             amount=signal.amount,
             strategy=signal.strategy.value,
             opened_at=utcnow().isoformat(),
+            exchange=signal.exchange_id,
+            leverage=signal.leverage,
+            position_type=signal.position_type,
         ))
 
     def record_close(self, pair: str, pnl: float) -> None:
@@ -179,11 +211,33 @@ class RiskManager:
             pair, pnl, self.daily_pnl, self.capital, self.win_rate,
         )
 
-    # ── Daily reset ──────────────────────────────────────────────────────────
+    # -- Liquidation monitoring ------------------------------------------------
+
+    def check_liquidation_risk(self, pair: str, current_price: float) -> float | None:
+        """Return distance-to-liquidation as a percentage, or None if no futures position.
+
+        For long:  liq_price = entry * (1 - 1/leverage)
+        For short: liq_price = entry * (1 + 1/leverage)
+        """
+        for pos in self.open_positions:
+            if pos.pair != pair or pos.leverage <= 1:
+                continue
+            if pos.position_type == "long":
+                liq_price = pos.entry_price * (1 - 1 / pos.leverage)
+                distance_pct = ((current_price - liq_price) / current_price) * 100
+            elif pos.position_type == "short":
+                liq_price = pos.entry_price * (1 + 1 / pos.leverage)
+                distance_pct = ((liq_price - current_price) / current_price) * 100
+            else:
+                continue
+            return distance_pct
+        return None
+
+    # -- Daily reset -----------------------------------------------------------
 
     def reset_daily(self) -> None:
         """Called at midnight to reset daily counters."""
-        logger.info("Daily reset — previous daily PnL: $%.4f", self.daily_pnl)
+        logger.info("Daily reset -- previous daily PnL: $%.4f", self.daily_pnl)
         self.daily_pnl = 0.0
         self.daily_pnl_by_pair.clear()
         if self.is_paused and "daily loss" in self._pause_reason:
@@ -191,7 +245,7 @@ class RiskManager:
             self._pause_reason = ""
             logger.info("Bot unpaused after daily reset")
 
-    # ── Pause control ────────────────────────────────────────────────────────
+    # -- Pause control ---------------------------------------------------------
 
     def unpause(self) -> None:
         """Manually unpause the bot."""
@@ -204,7 +258,7 @@ class RiskManager:
         self._pause_reason = reason
         logger.warning("BOT PAUSED: %s", reason)
 
-    # ── Status ───────────────────────────────────────────────────────────────
+    # -- Status ----------------------------------------------------------------
 
     def get_status(self) -> dict:
         return {
@@ -213,6 +267,8 @@ class RiskManager:
             "daily_loss_pct": self.daily_loss_pct,
             "open_positions": len(self.open_positions),
             "total_exposure_pct": self.total_exposure_pct,
+            "spot_exposure": self.spot_exposure,
+            "futures_exposure": self.futures_exposure,
             "win_rate": self.win_rate,
             "is_paused": self.is_paused,
             "pause_reason": self._pause_reason,

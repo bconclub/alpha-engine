@@ -1,4 +1,7 @@
-"""Alpha — main entry point. Multi-pair concurrent orchestrator."""
+"""Alpha — main entry point. Multi-pair, multi-exchange concurrent orchestrator.
+
+Supports Binance (spot) and Delta Exchange India (futures) in parallel.
+"""
 
 from __future__ import annotations
 
@@ -18,6 +21,7 @@ from alpha.market_analyzer import MarketAnalyzer
 from alpha.risk_manager import RiskManager
 from alpha.strategies.arbitrage import ArbitrageStrategy
 from alpha.strategies.base import BaseStrategy, StrategyName
+from alpha.strategies.futures_momentum import FuturesMomentumStrategy
 from alpha.strategies.grid import GridStrategy
 from alpha.strategies.momentum import MomentumStrategy
 from alpha.strategy_selector import StrategySelector
@@ -28,25 +32,29 @@ logger = setup_logger("main")
 
 
 class AlphaBot:
-    """Top-level bot orchestrator — runs multiple pairs concurrently."""
+    """Top-level bot orchestrator — runs multiple pairs and exchanges concurrently."""
 
     def __init__(self) -> None:
         # Core components (initialized in start())
         self.binance: ccxt.Exchange | None = None
         self.kucoin: ccxt.Exchange | None = None
+        self.delta: ccxt.Exchange | None = None
         self.db = Database()
         self.alerts = AlertManager()
         self.risk_manager = RiskManager()
         self.executor: TradeExecutor | None = None
         self.analyzer: MarketAnalyzer | None = None
+        self.delta_analyzer: MarketAnalyzer | None = None
         self.selector: StrategySelector | None = None
 
-        # Multi-pair
+        # Multi-pair: Binance spot
         self.pairs: list[str] = config.trading.pairs
+        # Delta futures pairs
+        self.delta_pairs: list[str] = config.delta.pairs
 
-        # Per-pair strategy instances:  pair → {StrategyName → instance}
+        # Per-pair strategy instances:  pair -> {StrategyName -> instance}
         self._strategies: dict[str, dict[StrategyName, BaseStrategy]] = {}
-        # Per-pair active strategy:  pair → running strategy or None
+        # Per-pair active strategy:  pair -> running strategy or None
         self._active_strategies: dict[str, BaseStrategy | None] = {}
 
         # Scheduler
@@ -55,11 +63,18 @@ class AlphaBot:
         # Shutdown flag
         self._running = False
 
+    @property
+    def all_pairs(self) -> list[str]:
+        """All tracked pairs across both exchanges."""
+        return self.pairs + (self.delta_pairs if self.delta else [])
+
     async def start(self) -> None:
         """Initialize all components and start the main loop."""
         logger.info("=" * 60)
-        logger.info("  ALPHA BOT — Starting up (multi-pair)")
-        logger.info("  Pairs: %s", ", ".join(self.pairs))
+        logger.info("  ALPHA BOT -- Starting up (multi-pair, multi-exchange)")
+        logger.info("  Binance pairs: %s", ", ".join(self.pairs))
+        if self.delta_pairs:
+            logger.info("  Delta pairs:   %s", ", ".join(self.delta_pairs))
         logger.info("  Capital: $%.2f", config.trading.starting_capital)
         logger.info("=" * 60)
 
@@ -72,14 +87,30 @@ class AlphaBot:
         await self._restore_state()
 
         # Build components
-        self.executor = TradeExecutor(self.binance, db=self.db, alerts=self.alerts)  # type: ignore[arg-type]
+        self.executor = TradeExecutor(
+            self.binance,  # type: ignore[arg-type]
+            db=self.db,
+            alerts=self.alerts,
+            delta_exchange=self.delta,
+        )
         self.analyzer = MarketAnalyzer(self.binance, pair=self.pairs[0])  # type: ignore[arg-type]
-        self.selector = StrategySelector(db=self.db, arb_enabled=self.kucoin is not None)
+        if self.delta:
+            self.delta_analyzer = MarketAnalyzer(
+                self.delta, pair=self.delta_pairs[0] if self.delta_pairs else None,
+            )
+        self.selector = StrategySelector(
+            db=self.db,
+            arb_enabled=self.kucoin is not None,
+            futures_pairs=set(self.delta_pairs) if self.delta else None,
+        )
 
-        # Load Binance minimum order sizes for all pairs
-        await self.executor.load_market_limits(self.pairs)
+        # Load minimum order sizes for all exchanges
+        await self.executor.load_market_limits(
+            self.pairs,
+            delta_pairs=self.delta_pairs if self.delta else None,
+        )
 
-        # Register strategies per pair
+        # Register strategies per Binance pair
         for pair in self.pairs:
             self._strategies[pair] = {
                 StrategyName.GRID: GridStrategy(pair, self.executor, self.risk_manager),
@@ -89,6 +120,17 @@ class AlphaBot:
                 ),
             }
             self._active_strategies[pair] = None
+
+        # Register strategies per Delta pair
+        if self.delta:
+            for pair in self.delta_pairs:
+                self._strategies[pair] = {
+                    StrategyName.FUTURES_MOMENTUM: FuturesMomentumStrategy(
+                        pair, self.executor, self.risk_manager,
+                        exchange=self.delta,
+                    ),
+                }
+                self._active_strategies[pair] = None
 
         # Schedule periodic tasks
         self._scheduler.add_job(
@@ -101,7 +143,7 @@ class AlphaBot:
         self._scheduler.start()
 
         # Notify
-        await self.alerts.send_bot_started(self.pairs, config.trading.starting_capital)
+        await self.alerts.send_bot_started(self.all_pairs, config.trading.starting_capital)
 
         # Register shutdown signals
         self._running = True
@@ -114,7 +156,10 @@ class AlphaBot:
         await self._analysis_cycle()
 
         # Keep running
-        logger.info("Bot running — %d pairs — press Ctrl+C to stop", len(self.pairs))
+        logger.info(
+            "Bot running -- %d Binance pairs + %d Delta pairs -- press Ctrl+C to stop",
+            len(self.pairs), len(self.delta_pairs) if self.delta else 0,
+        )
         try:
             while self._running:
                 await asyncio.sleep(1)
@@ -122,7 +167,7 @@ class AlphaBot:
             await self.shutdown("KeyboardInterrupt")
 
     async def shutdown(self, reason: str = "Shutdown requested") -> None:
-        """Graceful shutdown — stop all strategies, save state, close connections."""
+        """Graceful shutdown -- stop all strategies, save state, close connections."""
         if not self._running:
             return
         self._running = False
@@ -135,7 +180,7 @@ class AlphaBot:
                 stop_tasks.append(strategy.stop())
         if stop_tasks:
             await asyncio.gather(*stop_tasks, return_exceptions=True)
-        self._active_strategies = {p: None for p in self.pairs}
+        self._active_strategies = {p: None for p in self.all_pairs}
 
         # Save final state
         await self._save_status()
@@ -151,13 +196,15 @@ class AlphaBot:
             await self.binance.close()
         if self.kucoin:
             await self.kucoin.close()
+        if self.delta:
+            await self.delta.close()
 
         logger.info("Shutdown complete")
 
     # -- Core cycle ------------------------------------------------------------
 
     async def _analysis_cycle(self) -> None:
-        """Analyze all pairs concurrently, then switch strategies by signal strength priority."""
+        """Analyze all pairs (both exchanges) concurrently, switch strategies by signal strength."""
         if not self._running:
             return
 
@@ -167,21 +214,27 @@ class AlphaBot:
                 self.analyzer.analyze(pair)  # type: ignore[union-attr]
                 for pair in self.pairs
             ]
+            # Delta pairs use the delta analyzer
+            if self.delta and self.delta_analyzer:
+                for pair in self.delta_pairs:
+                    analysis_tasks.append(self.delta_analyzer.analyze(pair))
+
+            all_tracked = self.all_pairs
             results = await asyncio.gather(*analysis_tasks, return_exceptions=True)
 
             # 2. Collect successful analyses
             analyses = []
-            for pair, result in zip(self.pairs, results):
+            for pair, result in zip(all_tracked, results):
                 if isinstance(result, Exception):
                     logger.error("Analysis failed for %s: %s", pair, result)
                 else:
                     analyses.append(result)
 
-            # 3. Sort by signal_strength descending — best opportunities first
+            # 3. Sort by signal_strength descending -- best opportunities first
             analyses.sort(key=lambda a: a.signal_strength, reverse=True)
 
             logger.info(
-                "Analysis complete — strength ranking: %s",
+                "Analysis complete -- strength ranking: %s",
                 ", ".join(f"{a.pair}={a.signal_strength:.0f}" for a in analyses),
             )
 
@@ -189,13 +242,16 @@ class AlphaBot:
             for analysis in analyses:
                 pair = analysis.pair
 
-                # Check for arb opportunity on this pair
+                # Check for arb opportunity on Binance pairs only
                 arb_opportunity = False
-                if self.kucoin:
+                if self.kucoin and pair in self.pairs:
                     arb_opportunity = await self._check_arb_opportunity(pair)
 
                 selected = await self.selector.select(analysis, arb_opportunity)  # type: ignore[union-attr]
                 await self._switch_strategy(pair, selected)
+
+            # 5. Check liquidation risk for futures positions
+            await self._check_liquidation_risks()
 
         except Exception:
             logger.exception("Error in analysis cycle")
@@ -228,7 +284,11 @@ class AlphaBot:
         await strategy.start()
 
         # Alert
-        last = self.analyzer.last_analysis_for(pair) if self.analyzer else None  # type: ignore[union-attr]
+        last = None
+        if self.analyzer:
+            last = self.analyzer.last_analysis_for(pair)  # type: ignore[union-attr]
+        if last is None and self.delta_analyzer:
+            last = self.delta_analyzer.last_analysis_for(pair)
         await self.alerts.send_strategy_switch(
             pair=pair,
             old=current_name.value if current_name else None,
@@ -250,6 +310,30 @@ class AlphaBot:
         except Exception:
             return False
 
+    async def _check_liquidation_risks(self) -> None:
+        """Monitor futures positions for liquidation proximity."""
+        if not self.delta:
+            return
+        for pair in self.delta_pairs:
+            try:
+                ticker = await self.delta.fetch_ticker(pair)
+                current_price = ticker["last"]
+                distance = self.risk_manager.check_liquidation_risk(pair, current_price)
+                if distance is not None and distance < 10.0:
+                    # Find position info for alert
+                    for pos in self.risk_manager.open_positions:
+                        if pos.pair == pair and pos.leverage > 1:
+                            await self.alerts.send_liquidation_warning(
+                                pair, distance, pos.position_type, pos.leverage,
+                            )
+                            logger.warning(
+                                "[%s] LIQUIDATION WARNING: %.1f%% from liquidation (%s %dx)",
+                                pair, distance, pos.position_type, pos.leverage,
+                            )
+                            break
+            except Exception:
+                logger.debug("Could not check liquidation risk for %s", pair)
+
     # -- Scheduled jobs --------------------------------------------------------
 
     async def _daily_reset(self) -> None:
@@ -258,7 +342,7 @@ class AlphaBot:
 
         # Build active strategies map for summary
         active_map: dict[str, str | None] = {}
-        for pair in self.pairs:
+        for pair in self.all_pairs:
             strat = self._active_strategies.get(pair)
             active_map[pair] = strat.name.value if strat else None
 
@@ -278,7 +362,7 @@ class AlphaBot:
 
         # Build per-pair info
         active_map: dict[str, str | None] = {}
-        for pair in self.pairs:
+        for pair in self.all_pairs:
             strat = self._active_strategies.get(pair)
             active_map[pair] = strat.name.value if strat else None
 
@@ -295,7 +379,7 @@ class AlphaBot:
             "active_strategy": active_map.get(self.pairs[0]) if self.pairs else None,
             "market_condition": last.condition.value if last else None,
             "capital": rm.capital,
-            "pair": ", ".join(self.pairs),
+            "pair": ", ".join(self.all_pairs),
             "is_running": self._running,
             "is_paused": rm.is_paused,
             "pause_reason": rm._pause_reason or None,
@@ -378,9 +462,9 @@ class AlphaBot:
         last = await self.db.get_last_bot_status()
         if last:
             self.risk_manager.capital = last.get("capital", config.trading.starting_capital)
-            logger.info("Restored state from DB — capital: $%.2f", self.risk_manager.capital)
+            logger.info("Restored state from DB -- capital: $%.2f", self.risk_manager.capital)
         else:
-            logger.info("No previous state found — starting fresh")
+            logger.info("No previous state found -- starting fresh")
 
     # -- Exchange init ---------------------------------------------------------
 
@@ -403,7 +487,7 @@ class AlphaBot:
             "session": session,
         })
         if not config.binance.api_key:
-            logger.warning("Binance API key not set — running in sandbox/read-only mode")
+            logger.warning("Binance API key not set -- running in sandbox/read-only mode")
             self.binance.set_sandbox_mode(True)
 
         # KuCoin (optional, for arbitrage)
@@ -420,7 +504,33 @@ class AlphaBot:
             })
             logger.info("KuCoin exchange initialized (arbitrage enabled)")
         else:
-            logger.info("KuCoin credentials not set — arbitrage disabled")
+            logger.info("KuCoin credentials not set -- arbitrage disabled")
+
+        # Delta Exchange India (optional, for futures)
+        if config.delta.api_key:
+            delta_session = aiohttp.ClientSession(
+                connector=aiohttp.TCPConnector(
+                    resolver=aiohttp.resolver.ThreadedResolver(), ssl=True,
+                )
+            )
+            self.delta = ccxt.delta({
+                "apiKey": config.delta.api_key,
+                "secret": config.delta.secret,
+                "enableRateLimit": True,
+                "options": {"defaultType": "swap"},
+                "session": delta_session,
+            })
+            # Override to India endpoint
+            self.delta.urls["api"] = config.delta.base_url
+            if config.delta.testnet:
+                self.delta.set_sandbox_mode(True)
+            logger.info(
+                "Delta Exchange India initialized (futures enabled, testnet=%s, leverage=%dx)",
+                config.delta.testnet, config.delta.leverage,
+            )
+        else:
+            self.delta_pairs = []  # no Delta pairs if no credentials
+            logger.info("Delta credentials not set -- futures disabled")
 
 
 def main() -> None:

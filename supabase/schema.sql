@@ -28,8 +28,8 @@ create table if not exists public.trades (
     cost          numeric(20,8) not null default 0,    -- entry_price * amount (quote value)
 
     -- Classification
-    strategy      text        not null                 -- 'grid', 'momentum', 'arbitrage'
-                  check (strategy in ('grid', 'momentum', 'arbitrage')),
+    strategy      text        not null                 -- 'grid', 'momentum', 'arbitrage', 'futures_momentum'
+                  check (strategy in ('grid', 'momentum', 'arbitrage', 'futures_momentum')),
     order_type    text        not null default 'market'
                   check (order_type in ('market', 'limit')),
     exchange      text        not null default 'binance',
@@ -40,6 +40,11 @@ create table if not exists public.trades (
     status        text        not null default 'open'
                   check (status in ('open', 'closed', 'cancelled')),
     reason        text,                                -- human-readable entry/exit reason
+
+    -- Futures
+    leverage      numeric(5,2) not null default 1,     -- 1 = spot, >1 = futures
+    position_type text        not null default 'spot'  -- 'spot', 'long', 'short'
+                  check (position_type in ('spot', 'long', 'short')),
 
     -- Exchange reference
     order_id      text                                 -- ccxt order id
@@ -55,6 +60,9 @@ create index if not exists idx_trades_pair        on public.trades (pair);
 create index if not exists idx_trades_pair_status on public.trades (pair, status);
 create index if not exists idx_trades_order_id    on public.trades (order_id)
     where order_id is not null;
+create index if not exists idx_trades_position_type on public.trades (position_type);
+create index if not exists idx_trades_leverage      on public.trades (leverage)
+    where leverage > 1;
 
 
 -- ============================================================================
@@ -75,8 +83,8 @@ create table if not exists public.strategy_log (
                         check (market_condition in ('trending', 'sideways', 'volatile')),
 
     -- Decision
-    strategy_selected   text not null                    -- 'grid', 'momentum', 'arbitrage', 'paused'
-                        check (strategy_selected in ('grid', 'momentum', 'arbitrage', 'paused')),
+    strategy_selected   text not null                    -- 'grid', 'momentum', 'arbitrage', 'futures_momentum', 'paused'
+                        check (strategy_selected in ('grid', 'momentum', 'arbitrage', 'futures_momentum', 'paused')),
     reason              text,
 
     -- Indicator snapshot (what the analyzer saw)
