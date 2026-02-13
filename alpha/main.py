@@ -166,9 +166,12 @@ class AlphaBot:
         binance_bal = await self._fetch_balance(self.binance, "USDT")
         delta_bal = await self._fetch_balance(self.delta, "USDT") if self.delta else None
 
+        # Capital = sum of actual exchange balances
+        total_capital = (binance_bal or 0) + (delta_bal or 0)
+
         # Notify
         await self.alerts.send_bot_started(
-            self.all_pairs, config.trading.starting_capital,
+            self.all_pairs, total_capital,
             binance_balance=binance_bal, delta_balance=delta_bal,
         )
 
@@ -424,13 +427,16 @@ class AlphaBot:
         binance_bal = await self._fetch_balance(self.binance, "USDT")
         delta_bal = await self._fetch_balance(self.delta, "USDT") if self.delta else None
 
+        # Capital = sum of actual exchange balances
+        total_capital = (binance_bal or 0) + (delta_bal or 0)
+
         await self.alerts.send_daily_summary(
             total_trades=total,
             wins=wins,
             losses=losses,
             win_rate=rm.win_rate,
             daily_pnl=rm.daily_pnl,
-            capital=rm.capital,
+            capital=total_capital,
             pnl_by_pair=pnl_map,
             best_trade=best_trade,
             worst_trade=worst_trade,
@@ -465,13 +471,16 @@ class AlphaBot:
             binance_bal = await self._fetch_balance(self.binance, "USDT")
             delta_bal = await self._fetch_balance(self.delta, "USDT") if self.delta else None
 
+            # Capital = sum of actual exchange balances
+            total_capital = (binance_bal or 0) + (delta_bal or 0)
+
             await self.alerts.send_hourly_summary(
                 open_positions=open_pos,
                 hourly_wins=self._hourly_wins,
                 hourly_losses=self._hourly_losses,
                 hourly_pnl=self._hourly_pnl,
                 daily_pnl=rm.daily_pnl,
-                capital=rm.capital,
+                capital=total_capital,
                 active_strategies=active_map,
                 win_rate_24h=rm.win_rate,
                 binance_balance=binance_bal,
