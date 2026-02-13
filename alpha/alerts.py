@@ -65,13 +65,12 @@ class AlertManager:
         shorting = "Enabled" if shorting_enabled else "Disabled"
         now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
 
-        # Capital lines — show per-exchange balances if available
+        # Capital lines — always show per-exchange balances
         capital_line = f"\U0001f4b0 Capital: `{format_usd(capital)}`"
-        balance_lines = ""
-        if binance_balance is not None:
-            balance_lines += f"\n   \U0001f7e1 Binance: `{format_usd(binance_balance)}`"
-        if delta_balance is not None:
-            balance_lines += f"\n   \U0001f7e0 Delta: `{format_usd(delta_balance)}`"
+        balance_lines = (
+            f"\n   \U0001f7e1 Binance: `{format_usd(binance_balance) if binance_balance is not None else 'N/A'}`"
+            f"\n   \U0001f7e0 Delta: `{format_usd(delta_balance) if delta_balance is not None else 'N/A'}`"
+        )
 
         msg = (
             f"{LINE}\n"
@@ -288,15 +287,11 @@ class AlertManager:
             f"\U0001f4b0 Hourly P&L: `{'+' if hourly_pnl >= 0 else ''}{format_usd(hourly_pnl)}`",
             f"\U0001f4c8 Daily P&L: `{'+' if daily_pnl >= 0 else ''}{format_usd(daily_pnl)}`",
             f"\U0001f4b5 Capital: `{format_usd(capital)}`",
-        ]
-        if binance_balance is not None:
-            lines.append(f"   \U0001f7e1 Binance: `{format_usd(binance_balance)}`")
-        if delta_balance is not None:
-            lines.append(f"   \U0001f7e0 Delta: `{format_usd(delta_balance)}`")
-        lines.extend([
+            f"   \U0001f7e1 Binance: `{format_usd(binance_balance) if binance_balance is not None else 'N/A'}`",
+            f"   \U0001f7e0 Delta: `{format_usd(delta_balance) if delta_balance is not None else 'N/A'}`",
             f"\U0001f3af Strategies: `{strat_line}`",
             f"\U0001f3c6 Win rate (24h): `{win_rate_24h:.0f}%`",
-        ])
+        ]
         await self._send("\n".join(lines))
 
     # ── 5. DAILY SUMMARY ─────────────────────────────────────────────────────
@@ -348,10 +343,8 @@ class AlertManager:
                 lines.append(f"  {icon} `{short}`: `{'+' if pnl >= 0 else ''}{format_usd(pnl)}`")
 
         lines.append(f"\n\U0001f4b5 Capital: `{format_usd(capital)}`")
-        if binance_balance is not None:
-            lines.append(f"   \U0001f7e1 Binance: `{format_usd(binance_balance)}`")
-        if delta_balance is not None:
-            lines.append(f"   \U0001f7e0 Delta: `{format_usd(delta_balance)}`")
+        lines.append(f"   \U0001f7e1 Binance: `{format_usd(binance_balance) if binance_balance is not None else 'N/A'}`")
+        lines.append(f"   \U0001f7e0 Delta: `{format_usd(delta_balance) if delta_balance is not None else 'N/A'}`")
 
         # Best / worst trades
         if best_trade:

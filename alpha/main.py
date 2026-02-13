@@ -673,9 +673,11 @@ class AlphaBot:
             return None
         try:
             balance = await exchange.fetch_balance()
-            return float(balance.get("free", {}).get(currency, 0))
-        except Exception:
-            logger.debug("Could not fetch balance from %s", getattr(exchange, "id", "?"))
+            free = float(balance.get("free", {}).get(currency, 0))
+            logger.info("Balance for %s: %s = %.4f", getattr(exchange, "id", "?"), currency, free)
+            return free
+        except Exception as e:
+            logger.warning("Could not fetch balance from %s: %s", getattr(exchange, "id", "?"), e)
             return None
 
 
