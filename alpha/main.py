@@ -163,21 +163,8 @@ class AlphaBot:
         self._scheduler.start()
 
         # Fetch exchange balances for startup alert
-        binance_bal = await self._fetch_balance(self.binance, "USDT")
-        delta_bal = await self._fetch_balance(self.delta, "USDT") if self.delta else None
-
-        # Send debug info to Telegram so we can see what's happening
-        delta_url = self.delta.urls.get("api", "N/A") if self.delta else "no delta"
-        delta_sandbox = getattr(self.delta, "sandbox", "?") if self.delta else "N/A"
-        debug_msg = (
-            f"\U0001f527 *BALANCE DEBUG*\n"
-            f"Binance raw: `{binance_bal}`\n"
-            f"Delta raw: `{delta_bal}`\n"
-            f"Delta URL: `{delta_url}`\n"
-            f"Delta sandbox: `{delta_sandbox}`\n"
-            f"Delta obj: `{type(self.delta).__name__ if self.delta else 'None'}`"
-        )
-        await self.alerts._send(debug_msg)
+        binance_bal = await self._fetch_portfolio_usd(self.binance)
+        delta_bal = await self._fetch_portfolio_usd(self.delta) if self.delta else None
 
         # Capital = sum of actual exchange balances
         total_capital = (binance_bal or 0) + (delta_bal or 0)
@@ -437,8 +424,8 @@ class AlphaBot:
             worst_trade = {"pair": worst_pair, "pnl": pnl_map[worst_pair]}
 
         # Fetch live exchange balances
-        binance_bal = await self._fetch_balance(self.binance, "USDT")
-        delta_bal = await self._fetch_balance(self.delta, "USDT") if self.delta else None
+        binance_bal = await self._fetch_portfolio_usd(self.binance)
+        delta_bal = await self._fetch_portfolio_usd(self.delta) if self.delta else None
 
         # Capital = sum of actual exchange balances
         total_capital = (binance_bal or 0) + (delta_bal or 0)
@@ -481,8 +468,8 @@ class AlphaBot:
                 active_map[pair] = strat.name.value if strat else None
 
             # Fetch live exchange balances
-            binance_bal = await self._fetch_balance(self.binance, "USDT")
-            delta_bal = await self._fetch_balance(self.delta, "USDT") if self.delta else None
+            binance_bal = await self._fetch_portfolio_usd(self.binance)
+            delta_bal = await self._fetch_portfolio_usd(self.delta) if self.delta else None
 
             # Capital = sum of actual exchange balances
             total_capital = (binance_bal or 0) + (delta_bal or 0)
@@ -690,43 +677,40 @@ class AlphaBot:
             logger.info("Delta credentials not set -- futures disabled")
 
     @staticmethod
-    async def _fetch_balance(exchange: ccxt.Exchange | None, currency: str = "USDT") -> float | None:
-        """Fetch free balance for a currency on an exchange. Returns None on failure."""
+    async def _fetch_portfolio_usd(exchange: ccxt.Exchange | None) -> float | None:
+        """Fetch total balance in USD. Checks USDT, USD, USDC, and INR (converted)."""
         if not exchange:
             return None
         ex_id = getattr(exchange, "id", "?")
         try:
-            # Log the API URL being used (debug connectivity issues)
-            api_url = getattr(exchange, "urls", {}).get("api", "unknown")
-            logger.info("Fetching balance from %s (url=%s)", ex_id, api_url)
-
             balance = await exchange.fetch_balance()
-
-            # Debug: dump all keys with non-zero values
-            free_map = balance.get("free", {})
             total_map = balance.get("total", {})
-            all_free = {k: v for k, v in free_map.items() if v is not None and v != 0}
-            all_total = {k: v for k, v in total_map.items() if v is not None and v != 0}
-            logger.info("Balance dump for %s: free=%s total=%s", ex_id, all_free, all_total)
+            free_map = balance.get("free", {})
 
-            # Try exact currency, then common alternatives
-            for key in (currency, "USD", "USDC"):
-                val = free_map.get(key)
-                if val is not None and float(val) > 0:
-                    result = float(val)
-                    logger.info("Balance for %s: %s = %.4f", ex_id, key, result)
-                    return result
+            # Log what we see
+            holdings = {k: float(v) for k, v in total_map.items()
+                        if v is not None and float(v) > 0}
+            logger.info("Holdings on %s: %s", ex_id, holdings)
 
-            # If no positive free balance, check total as fallback
-            for key in (currency, "USD", "USDC"):
+            # Try USDT/USD/USDC first (total = free + locked)
+            for key in ("USDT", "USD", "USDC"):
                 val = total_map.get(key)
                 if val is not None and float(val) > 0:
                     result = float(val)
-                    logger.info("Balance for %s (total): %s = %.4f", ex_id, key, result)
+                    logger.info("Balance for %s: %s = %.4f (total)", ex_id, key, result)
                     return result
 
-            logger.warning("No %s balance found on %s", currency, ex_id)
+            # Delta Exchange India uses INR — convert to USD
+            inr_val = total_map.get("INR") or free_map.get("INR")
+            if inr_val is not None and float(inr_val) > 0:
+                inr = float(inr_val)
+                usd = inr / 85.0  # approximate INR/USD rate
+                logger.info("Balance for %s: INR %.2f = $%.2f (at ~85 INR/USD)", ex_id, inr, usd)
+                return usd
+
+            logger.warning("No balance found on %s. Holdings: %s", ex_id, holdings)
             return 0.0
+
         except Exception as e:
             logger.warning("Could not fetch balance from %s: %s (type: %s)", ex_id, e, type(e).__name__)
             return None
