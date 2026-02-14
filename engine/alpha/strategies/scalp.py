@@ -768,9 +768,9 @@ class ScalpStrategy(BaseStrategy):
     def _calculate_position_size(self, current_price: float, available: float) -> float | None:
         """Calculate position amount in coin terms. Returns None if can't size.
 
-        Smart sizing: fit as many contracts as we can afford into available capital.
-        At 20x with $12 capital:  1 ETH contract = $1.04 collateral → can fit ~11
-        At 5x  with $12 capital:  1 ETH contract = $4.16 collateral → can fit ~2
+        Smart sizing: fit contracts into the LOWER of available capital and
+        risk manager's max_position_pct limit. This prevents sizing above
+        what the risk manager will approve.
         """
         if self.is_futures:
             from alpha.trade_executor import DELTA_CONTRACT_SIZE
@@ -788,17 +788,23 @@ class ScalpStrategy(BaseStrategy):
                     )
                 return None
 
-            # Fit as many contracts as available capital allows
-            max_affordable = int(available / one_contract_collateral)
+            # Cap at risk manager's max_position_pct to avoid rejection
+            exchange_capital = self.risk_manager.get_exchange_capital(self._exchange_id)
+            max_position_value = exchange_capital * (self.risk_manager.max_position_pct / 100)
+            budget = min(available, max_position_value)
+
+            # Fit as many contracts as budget allows
+            max_affordable = int(budget / one_contract_collateral)
             contracts = max(1, min(max_affordable, self.MAX_CONTRACTS))
             total_collateral = contracts * one_contract_collateral
             amount = contracts * contract_size
 
             self.logger.info(
                 "[%s] Sizing: %d contracts × %.4f = %.6f coin, "
-                "collateral=$%.2f (%dx), avail=$%.2f",
+                "collateral=$%.2f (%dx), budget=$%.2f (avail=$%.2f, max=%.0f%%)",
                 self.pair, contracts, contract_size, amount,
-                total_collateral, self.leverage, available,
+                total_collateral, self.leverage, budget, available,
+                self.risk_manager.max_position_pct,
             )
         else:
             exchange_capital = self.risk_manager.get_exchange_capital(self._exchange_id)
