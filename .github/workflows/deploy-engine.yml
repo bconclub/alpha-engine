@@ -1,0 +1,41 @@
+name: Deploy Engine
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'engine/**'
+
+jobs:
+  deploy:
+    name: Deploy to VPS
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Deploy to VPS
+        uses: appleboy/ssh-action@master
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: root
+          key: ${{ secrets.VPS_SSH_KEY }}
+          script: |
+            set -e
+
+            echo ">>> Pulling latest code..."
+            cd /root/alpha
+            git pull origin main
+
+            echo ">>> Installing dependencies..."
+            cd engine
+            pip3 install -r requirements.txt --break-system-packages --quiet
+
+            echo ">>> Restarting alpha-bot service..."
+            sudo systemctl restart alpha-bot
+
+            echo ">>> Waiting 5s for startup..."
+            sleep 5
+
+            echo ">>> Checking service status..."
+            sudo systemctl status alpha-bot --no-pager
+
+            echo ">>> Deploy complete."

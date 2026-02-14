@@ -1,5 +1,29 @@
-.env
+# Engine
+engine/.env
+engine/__pycache__/
+engine/alpha/__pycache__/
+engine/alpha/strategies/__pycache__/
 __pycache__/
 *.pyc
 .venv/
 venv/
+
+# Dashboard
+dashboard/.env.local
+dashboard/node_modules/
+dashboard/.next/
+node_modules/
+.next/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Claude
+.claude/

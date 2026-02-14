@@ -1,0 +1,27 @@
+# /etc/systemd/system/alpha-bot.service
+# Copy this file to the VPS:
+#   sudo cp alpha-bot.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable alpha-bot
+#   sudo systemctl start alpha-bot
+
+[Unit]
+Description=Alpha Trading Bot
+After=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/root/alpha/engine
+ExecStart=/usr/bin/python3 -m alpha.main
+EnvironmentFile=/root/alpha/engine/.env
+Restart=always
+RestartSec=10
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=alpha-bot
+
+[Install]
+WantedBy=multi-user.target
