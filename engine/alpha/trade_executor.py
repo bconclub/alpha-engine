@@ -69,15 +69,20 @@ class TradeExecutor:
           1 ETH contract = 0.01 ETH (~$20.80 notional at $2080)
           1 BTC contract = 0.001 BTC (~$69.70 notional at $69700)
 
+        Example: coin_amount=0.01 ETH / contract_size=0.01 = 1 contract
+                 → send amount=1, NOT amount=0.01
+
         Returns: number of contracts (minimum 1).
         """
         contract_size = DELTA_CONTRACT_SIZE.get(pair, 0)
         if contract_size <= 0:
             # Unknown pair — try to derive from ccxt market info (fallback)
             logger.warning("[%s] Unknown Delta contract size, using raw amount", pair)
-            return max(1, int(coin_amount))
+            return max(1, round(coin_amount))
 
-        contracts = int(coin_amount / contract_size)
+        # Use round() not int() to avoid floating-point truncation
+        # e.g. 0.01/0.01 might be 0.999999 → int()=0, round()=1
+        contracts = round(coin_amount / contract_size)
         return max(contracts, 1)
 
     @staticmethod
