@@ -28,8 +28,8 @@ create table if not exists public.trades (
     cost          numeric(20,8) not null default 0,    -- entry_price * amount (quote value)
 
     -- Classification
-    strategy      text        not null                 -- 'grid', 'momentum', 'arbitrage', 'futures_momentum'
-                  check (strategy in ('grid', 'momentum', 'arbitrage', 'futures_momentum')),
+    strategy      text        not null                 -- 'grid', 'momentum', 'arbitrage', 'futures_momentum', 'scalp'
+                  check (strategy in ('grid', 'momentum', 'arbitrage', 'futures_momentum', 'scalp')),
     order_type    text        not null default 'market'
                   check (order_type in ('market', 'limit')),
     exchange      text        not null default 'binance',
@@ -83,8 +83,8 @@ create table if not exists public.strategy_log (
                         check (market_condition in ('trending', 'sideways', 'volatile')),
 
     -- Decision
-    strategy_selected   text not null                    -- 'grid', 'momentum', 'arbitrage', 'futures_momentum', 'paused'
-                        check (strategy_selected in ('grid', 'momentum', 'arbitrage', 'futures_momentum', 'paused')),
+    strategy_selected   text not null                    -- 'grid', 'momentum', 'arbitrage', 'futures_momentum', 'scalp', 'paused'
+                        check (strategy_selected in ('grid', 'momentum', 'arbitrage', 'futures_momentum', 'scalp', 'paused')),
     reason              text,
 
     -- Indicator snapshot (what the analyzer saw)

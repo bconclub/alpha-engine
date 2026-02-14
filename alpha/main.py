@@ -24,6 +24,7 @@ from alpha.strategies.base import BaseStrategy, StrategyName
 from alpha.strategies.futures_momentum import FuturesMomentumStrategy
 from alpha.strategies.grid import GridStrategy
 from alpha.strategies.momentum import MomentumStrategy
+from alpha.strategies.scalp import ScalpStrategy
 from alpha.strategy_selector import StrategySelector
 from alpha.trade_executor import TradeExecutor
 from alpha.utils import setup_logger
@@ -56,6 +57,9 @@ class AlphaBot:
         self._strategies: dict[str, dict[StrategyName, BaseStrategy]] = {}
         # Per-pair active strategy:  pair -> running strategy or None
         self._active_strategies: dict[str, BaseStrategy | None] = {}
+
+        # Scalp overlay strategies: pair -> ScalpStrategy (run independently)
+        self._scalp_strategies: dict[str, ScalpStrategy] = {}
 
         # Scheduler
         self._scheduler = AsyncIOScheduler()
@@ -157,6 +161,26 @@ class AlphaBot:
                 }
                 self._active_strategies[pair] = None
 
+        # Register scalp overlay for ALL pairs (runs independently)
+        for pair in self.pairs:
+            self._scalp_strategies[pair] = ScalpStrategy(
+                pair, self.executor, self.risk_manager,
+                exchange=self.binance,
+                is_futures=False,
+            )
+        if self.delta:
+            for pair in self.delta_pairs:
+                self._scalp_strategies[pair] = ScalpStrategy(
+                    pair, self.executor, self.risk_manager,
+                    exchange=self.delta,
+                    is_futures=True,
+                )
+
+        # Start all scalp strategies immediately (they run as parallel overlays)
+        for pair, scalp in self._scalp_strategies.items():
+            await scalp.start()
+        logger.info("Scalp overlay started on %d pairs", len(self._scalp_strategies))
+
         # Schedule periodic tasks
         self._scheduler.add_job(
             self._analysis_cycle, "interval",
@@ -209,11 +233,14 @@ class AlphaBot:
         self._running = False
         logger.info("Shutting down: %s", reason)
 
-        # Stop all active strategies concurrently
+        # Stop all active strategies concurrently (primary + scalp)
         stop_tasks = []
         for pair, strategy in self._active_strategies.items():
             if strategy:
                 stop_tasks.append(strategy.stop())
+        for pair, scalp in self._scalp_strategies.items():
+            if scalp.is_active:
+                stop_tasks.append(scalp.stop())
         if stop_tasks:
             await asyncio.gather(*stop_tasks, return_exceptions=True)
         self._active_strategies = {p: None for p in self.all_pairs}
@@ -460,6 +487,9 @@ class AlphaBot:
         self._hourly_pnl = 0.0
         self._hourly_wins = 0
         self._hourly_losses = 0
+        # Reset scalp daily stats
+        for scalp in self._scalp_strategies.values():
+            scalp.reset_daily_stats()
 
     async def _hourly_report(self) -> None:
         """Send hourly market update + summary to Telegram, then reset hourly counters."""
@@ -590,12 +620,15 @@ class AlphaBot:
             if command == "pause":
                 self.risk_manager.is_paused = True
                 self.risk_manager._pause_reason = params.get("reason", "Paused via dashboard")
-                # Stop all active strategies
+                # Stop all active strategies (primary + scalp)
                 stop_tasks = []
                 for pair, strategy in self._active_strategies.items():
                     if strategy:
                         stop_tasks.append(strategy.stop())
                         self._active_strategies[pair] = None
+                for pair, scalp in self._scalp_strategies.items():
+                    if scalp.is_active:
+                        stop_tasks.append(scalp.stop())
                 if stop_tasks:
                     await asyncio.gather(*stop_tasks, return_exceptions=True)
                 await self.alerts.send_command_confirmation("pause")
@@ -604,6 +637,10 @@ class AlphaBot:
             elif command == "resume":
                 self.risk_manager.unpause()
                 await self._analysis_cycle()  # re-evaluate and start strategies
+                # Restart scalp overlays
+                for pair, scalp in self._scalp_strategies.items():
+                    if not scalp.is_active:
+                        await scalp.start()
                 await self.alerts.send_command_confirmation("resume")
                 result_msg = "Bot resumed"
 

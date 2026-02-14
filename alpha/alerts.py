@@ -32,6 +32,7 @@ _STRAT_DISPLAY: dict[str | None, str] = {
     "momentum": "Momentum",
     "arbitrage": "Arbitrage",
     "futures_momentum": "Futures Momentum",
+    "scalp": "Scalp",
     None: "Paused",
 }
 

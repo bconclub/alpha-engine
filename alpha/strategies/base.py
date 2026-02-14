@@ -20,6 +20,7 @@ class StrategyName(str, Enum):
     MOMENTUM = "momentum"
     ARBITRAGE = "arbitrage"
     FUTURES_MOMENTUM = "futures_momentum"
+    SCALP = "scalp"
 
 
 class MarketCondition(str, Enum):
