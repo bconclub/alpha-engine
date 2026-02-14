@@ -173,6 +173,24 @@ FROM   public.bot_status
 ORDER  BY timestamp DESC
 LIMIT  1;
 
+-- ─── Step 10: Fix the LATEST bot_status row with correct data ────
+-- The bot writes total_pnl from memory (which was wrong). Fix it by
+-- recalculating from the now-corrected trades table.
+UPDATE bot_status
+SET
+    total_pnl = COALESCE((SELECT SUM(pnl) FROM trades WHERE status = 'closed'), 0),
+    win_rate = COALESCE((
+        SELECT ROUND(
+            COUNT(*) FILTER (WHERE pnl > 0)::numeric
+            / GREATEST(COUNT(*) FILTER (WHERE status = 'closed'), 1) * 100, 2
+        )
+        FROM trades WHERE status = 'closed'
+    ), 0),
+    total_trades = COALESCE((SELECT COUNT(*) FROM trades WHERE status = 'closed'), 0),
+    leverage = 20,
+    shorting_enabled = true
+WHERE id = (SELECT id FROM bot_status ORDER BY timestamp DESC LIMIT 1);
+
 -- ═══════════════════════════════════════════════════════════════════
 -- Verify: After running, check the results:
 -- SELECT pair, position_type, entry_price, exit_price, amount,
