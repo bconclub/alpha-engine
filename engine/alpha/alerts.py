@@ -415,8 +415,9 @@ class AlertManager:
         pnl_emoji = "\U0001f4c8" if daily_pnl >= 0 else "\U0001f4c9"
         d_sign = "+" if daily_pnl >= 0 else ""
 
+        version = get_version()
         lines = [
-            "\U0001f4c5 <b>DAILY REPORT</b>",
+            f"\U0001f4c5 <b>DAILY REPORT</b> <code>v{version}</code>",
             "",
             f"\U0001f4ca Total trades: <code>{total_trades}</code>",
             f"\u2705 Wins: <code>{wins}</code> | \u274c Losses: <code>{losses}</code>",

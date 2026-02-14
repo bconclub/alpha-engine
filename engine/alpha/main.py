@@ -86,8 +86,10 @@ class AlphaBot:
 
     async def start(self) -> None:
         """Initialize all components and start the main loop."""
+        from alpha.utils import get_version
+        version = get_version()
         logger.info("=" * 60)
-        logger.info("  ALPHA BOT -- Starting up (multi-pair, multi-exchange)")
+        logger.info("  ALPHA BOT v%s -- Starting up", version)
         logger.info("  Binance pairs: %s", ", ".join(self.pairs))
         if self.delta_pairs:
             logger.info("  Delta pairs:   %s", ", ".join(self.delta_pairs))
