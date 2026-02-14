@@ -154,7 +154,8 @@ WHERE exchange = 'binance'
   AND status = 'open';
 
 -- ─── Step 8: Fix v_futures_positions view ────────────────────────
--- Remove leveraged_pnl/leveraged_pnl_pct — pnl is already the real dollar P&L
+-- Must DROP first because we're removing columns (leveraged_pnl, leveraged_pnl_pct)
+DROP VIEW IF EXISTS public.v_futures_positions;
 CREATE OR REPLACE VIEW public.v_futures_positions AS
 SELECT
     id, opened_at, closed_at, pair, side,
