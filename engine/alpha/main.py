@@ -633,12 +633,16 @@ class AlphaBot:
         else:
             bot_state = "running"
 
+        # Query ACTUAL P&L from trades table (source of truth)
+        # Never trust in-memory calculations for dashboard display
+        trade_stats = await self.db.get_trade_stats()
+
         status = {
-            "total_pnl": rm.capital - config.trading.starting_capital,
+            "total_pnl": trade_stats["total_pnl"],
             "daily_pnl": rm.daily_pnl,
             "daily_loss_pct": rm.daily_loss_pct,
-            "win_rate": rm.win_rate,
-            "total_trades": len(rm.trade_results),
+            "win_rate": trade_stats["win_rate"],
+            "total_trades": trade_stats["total_trades"],
             "open_positions": len(rm.open_positions),
             "active_strategy": active_map.get(self.pairs[0]) if self.pairs else None,
             "market_condition": last.condition.value if last else None,

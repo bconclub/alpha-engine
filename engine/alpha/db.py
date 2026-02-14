@@ -257,6 +257,42 @@ class Database:
         )
         logger.info("Command %d marked executed: %s", command_id, result_msg)
 
+    # ── Aggregated trade stats (source of truth for dashboard) ───────────────
+
+    async def get_trade_stats(self) -> dict[str, Any]:
+        """Query actual P&L stats from the trades table.
+
+        Returns dict with total_pnl, win_rate, total_trades.
+        This is the SOURCE OF TRUTH — never trust in-memory calculations.
+        """
+        if not self.is_connected:
+            return {"total_pnl": 0, "win_rate": 0, "total_trades": 0}
+
+        loop = asyncio.get_running_loop()
+
+        # Get all closed trades
+        result = await loop.run_in_executor(
+            None,
+            lambda: (
+                self._client.table(self.TABLE_TRADES)  # type: ignore[union-attr]
+                .select("pnl")
+                .eq("status", "closed")
+                .execute()
+            ),
+        )
+        rows = result.data or []
+
+        total_pnl = sum(float(r.get("pnl", 0) or 0) for r in rows)
+        total_trades = len(rows)
+        wins = sum(1 for r in rows if float(r.get("pnl", 0) or 0) > 0)
+        win_rate = round((wins / total_trades * 100), 2) if total_trades > 0 else 0
+
+        return {
+            "total_pnl": total_pnl,
+            "win_rate": win_rate,
+            "total_trades": total_trades,
+        }
+
     # ── Internal ─────────────────────────────────────────────────────────────
 
     async def _insert(self, table: str, data: dict[str, Any]) -> None:
