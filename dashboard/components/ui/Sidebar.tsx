@@ -98,6 +98,7 @@ export function Sidebar() {
           isConnected ? 'bg-[#00c853] animate-pulse' : 'bg-red-500',
         )} />
         <span className="text-lg font-bold tracking-widest text-white">ALPHA</span>
+        <span className="text-[10px] font-mono text-zinc-600 ml-auto">v{process.env.APP_VERSION ?? '?'}</span>
       </div>
 
       {/* Navigation */}
