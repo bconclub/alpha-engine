@@ -111,7 +111,7 @@ class RiskManager:
         return sum(1 for p in self.open_positions if p.exchange == exchange_id)
 
     # Per-exchange position limits
-    MAX_POSITIONS_PER_EXCHANGE = 2
+    MAX_POSITIONS_PER_EXCHANGE = 3  # match scalp MAX_POSITIONS
 
     # -- Properties ------------------------------------------------------------
 

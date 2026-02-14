@@ -157,9 +157,8 @@ class ScalpStrategy(BaseStrategy):
 
     # ── Position sizing ───────────────────────────────────────────────────
     CAPITAL_PCT_SPOT = 50.0           # unused in Delta-only mode
-    CAPITAL_PCT_FUTURES = 30.0        # 30% of exchange capital
-    TARGET_CONTRACTS = 3              # 3 contracts per trade
-    MAX_CONTRACTS = 3                 # hard cap per trade
+    CAPITAL_PCT_FUTURES = 80.0        # 80% of exchange capital (aggressive)
+    MAX_CONTRACTS = 5                 # hard cap per trade
     MAX_POSITIONS = 3                 # max 3 concurrent
     MAX_SPREAD_PCT = 0.15             # skip if spread > 0.15%
 
@@ -767,11 +766,12 @@ class ScalpStrategy(BaseStrategy):
     # ======================================================================
 
     def _calculate_position_size(self, current_price: float, available: float) -> float | None:
-        """Calculate position amount in coin terms. Returns None if can't size."""
-        exchange_capital = self.risk_manager.get_exchange_capital(self._exchange_id)
-        capital = exchange_capital * (self.capital_pct / 100)
-        capital = min(capital, available)
+        """Calculate position amount in coin terms. Returns None if can't size.
 
+        Smart sizing: fit as many contracts as we can afford into available capital.
+        At 20x with $12 capital:  1 ETH contract = $1.04 collateral → can fit ~11
+        At 5x  with $12 capital:  1 ETH contract = $4.16 collateral → can fit ~2
+        """
         if self.is_futures:
             from alpha.trade_executor import DELTA_CONTRACT_SIZE
             contract_size = DELTA_CONTRACT_SIZE.get(self.pair, 0)
@@ -783,26 +783,27 @@ class ScalpStrategy(BaseStrategy):
             if one_contract_collateral > available:
                 if self._tick_count % 60 == 0:
                     self.logger.info(
-                        "[%s] 1 contract needs $%.2f collateral > $%.2f — skipping",
+                        "[%s] 1 contract needs $%.2f collateral > $%.2f avail — skipping",
                         self.pair, one_contract_collateral, available,
                     )
                 return None
 
-            contracts = self.TARGET_CONTRACTS
-            total_collateral = contracts * one_contract_collateral
-            if total_collateral > available:
-                contracts = max(1, int(available / one_contract_collateral))
-            contracts = min(contracts, self.MAX_CONTRACTS)
+            # Fit as many contracts as available capital allows
+            max_affordable = int(available / one_contract_collateral)
+            contracts = max(1, min(max_affordable, self.MAX_CONTRACTS))
             total_collateral = contracts * one_contract_collateral
             amount = contracts * contract_size
 
-            self.logger.debug(
+            self.logger.info(
                 "[%s] Sizing: %d contracts × %.4f = %.6f coin, "
-                "collateral=$%.2f (%dx)",
+                "collateral=$%.2f (%dx), avail=$%.2f",
                 self.pair, contracts, contract_size, amount,
-                total_collateral, self.leverage,
+                total_collateral, self.leverage, available,
             )
         else:
+            exchange_capital = self.risk_manager.get_exchange_capital(self._exchange_id)
+            capital = exchange_capital * (self.capital_pct / 100)
+            capital = min(capital, available)
             amount = capital / current_price
             self.logger.debug(
                 "[%s] Sizing (spot): $%.2f → %.8f",
