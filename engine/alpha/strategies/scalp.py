@@ -1,31 +1,29 @@
-"""Pattern-based scalping strategy — always hunting for entries.
+"""Momentum scalping strategy — spot momentum, get in, get out.
 
-Runs as an independent parallel task alongside whatever primary strategy
-is active. Checks every 10 seconds on 1m candles. Philosophy: always be
-in the market. If balance is available, find a pattern and enter.
+Core principle: detect momentum, jump on it, ride it, exit fast.
+Runs every 5 seconds. ONE strong condition is enough to enter.
 
-Entry Patterns (ANY one pattern triggers entry):
-  1. RSI Extreme:     RSI < 30 long, RSI > 70 short (instant)
-  2. BB Squeeze Break: BB width < 1% + price breaks band → enter breakout direction
-  3. Volume Spike:    Volume > 2x average → enter candle direction
-  4. RSI Divergence:  Price lower low + RSI higher low → long (vice versa short)
-  5. Quick Reversal:  After SL, if price reverses within 30s → enter opposite
-  6. Candle Pattern:  3 consecutive directional candles (>0.1% each) → fade
-  7. Mean Reversion:  Price > 1.5% from 20-EMA → enter toward EMA
-  8. BB Touch + Confirm: Price at BB + (RSI or volume or candle pattern) → enter
+Entry — Momentum detection:
+  1. Price acceleration: current candle faster than last 3 avg
+  2. Volume confirmation: current volume > 1.5x recent avg
+  3. RSI extreme: RSI < 30 or > 70 = instant entry
+  4. BB breakout: price breaks outside Bollinger Bands
+  Direction: FOLLOW the momentum (not fade it)
+    - Price up + volume = LONG
+    - Price down + volume = SHORT
 
-Exit:
-  - TP: 1.5% price (= 30% capital at 20x)
-  - SL: 0.75% (= 15% capital at 20x, liquidation at ~5%)
+Exit — Get out fast:
+  - TP: 1.5% (= 30% capital at 20x)
+  - SL: 0.75% (= 15% capital at 20x, liq at ~5%)
   - Trailing: activate 0.80%, trail 0.40%
-  - Timeout: 45 min
-  - Flatline: close if < 0.1% move for 30 min
+  - Profit lock: if +1.0%, move SL to breakeven
+  - Timeout: 30 min max
   - Risk/reward: 2:1 — need 34% win rate to profit
 
-Position sizing (Delta futures):
-  - 2 contracts per trade (min), 3 max for safety
-  - 2 contracts × $20.80 = $41.60 notional, $2.08 collateral at 20x
-  - Max 2 concurrent positions = 4 contracts total
+Leverage: 20x on Delta futures
+Position size: 2 contracts per trade ($2.08 collateral)
+Max concurrent: 3 positions
+Tick speed: 5 seconds
 """
 
 from __future__ import annotations
@@ -34,7 +32,6 @@ import time
 from typing import TYPE_CHECKING, Any
 
 import ccxt.async_support as ccxt
-import numpy as np
 import pandas as pd
 import ta
 
@@ -50,49 +47,44 @@ logger = setup_logger("scalp")
 
 
 class ScalpStrategy(BaseStrategy):
-    """
-    Pattern-based scalp — always hunting for entries.
+    """Momentum scalp — spot momentum, get in, get out.
 
-    Any ONE pattern triggers an entry. 8 patterns scanned every 10s.
-    Tighter RSI thresholds for standard patterns; extreme RSI bypasses all.
-
-    Exit: TP=1.5%, SL=0.75%, Trail=0.80/0.40, Timeout=45min, Flatline=30min.
-    Risk/reward 2:1 — only need 34% win rate to profit.
-    Futures: 20x leverage, 2-3 contracts per trade, SL well within liq zone.
+    Detects momentum via price acceleration + volume, follows it.
+    ONE strong signal is enough. 5-second ticks. 20x leverage on Delta.
     """
 
     name = StrategyName.SCALP
-    check_interval_sec = 10  # 10 second ticks — always hunting
+    check_interval_sec = 5  # 5 second ticks — fast momentum hunting
 
     # ── Exit thresholds (2:1 R/R) ─────────────────────────────────────────
-    TAKE_PROFIT_PCT = 1.5         # 1.5% price move
-    STOP_LOSS_PCT = 0.75          # 0.75% price move (2:1 R/R)
+    TAKE_PROFIT_PCT = 1.5         # 1.5% price move (30% capital at 20x)
+    STOP_LOSS_PCT = 0.75          # 0.75% price move (15% capital at 20x)
     TRAILING_ACTIVATE_PCT = 0.80  # start trailing after 0.80%
     TRAILING_DISTANCE_PCT = 0.40  # trail at 0.40% from high/low
-    MAX_HOLD_SECONDS = 45 * 60    # 45 minutes
-    FLATLINE_SECONDS = 30 * 60    # close if flat for 30 min
+    PROFIT_LOCK_PCT = 1.0         # move SL to breakeven after +1.0%
+    MAX_HOLD_SECONDS = 30 * 60    # 30 minutes max
+    FLATLINE_SECONDS = 15 * 60    # close if flat for 15 min
     FLATLINE_MIN_MOVE_PCT = 0.1   # "flat" means < 0.1% total move
 
-    # ── Pattern thresholds ────────────────────────────────────────────────
+    # ── Momentum thresholds ──────────────────────────────────────────────
     RSI_EXTREME_LONG = 30         # instant long entry
     RSI_EXTREME_SHORT = 70        # instant short entry
-    BB_SQUEEZE_WIDTH_PCT = 1.0    # BB width < 1% = squeeze
-    VOL_SPIKE_RATIO = 2.0         # volume > 2x average
-    CANDLE_MIN_PCT = 0.1          # min candle size for candle pattern
-    MEAN_REVERSION_PCT = 1.5      # price > 1.5% from EMA → mean revert
-    BB_TOUCH_CONFIRM_RSI_L = 40   # RSI < 40 confirms lower BB touch
-    BB_TOUCH_CONFIRM_RSI_S = 60   # RSI > 60 confirms upper BB touch
+    VOL_SPIKE_RATIO = 1.5         # volume > 1.5x average
+    ACCEL_MIN_PCT = 0.05          # minimum candle move to count as momentum
+    ACCEL_MULTIPLIER = 1.5        # current candle must be 1.5x avg of last 3
 
     # ── Position sizing ───────────────────────────────────────────────────
     CAPITAL_PCT_SPOT = 50.0       # 50% for spot (Binance $5 min)
-    CAPITAL_PCT_FUTURES = 30.0    # 30% for futures (leverage)
-    MAX_POSITIONS_PER_EXCHANGE = 2  # 2 concurrent per exchange
+    CAPITAL_PCT_FUTURES = 30.0    # 30% for futures (leverage handles the rest)
+    TARGET_CONTRACTS = 2          # 2 contracts per trade
+    MAX_CONTRACTS = 3             # hard cap per trade
+    MAX_POSITIONS = 3             # max concurrent positions
     MAX_SPREAD_PCT = 0.15         # skip if spread > 0.15%
 
     # ── Rate limiting / risk ──────────────────────────────────────────────
     MAX_TRADES_PER_HOUR = 30
     CONSECUTIVE_LOSS_PAUSE = 5    # pause after 5 consecutive losses
-    PAUSE_DURATION_SEC = 15 * 60  # 15 minutes pause
+    PAUSE_DURATION_SEC = 5 * 60   # 5 minutes pause (was 15 — get back faster)
     DAILY_LOSS_LIMIT_PCT = 5.0
 
     def __init__(
@@ -118,17 +110,13 @@ class ScalpStrategy(BaseStrategy):
         self.entry_time: float = 0.0
         self.highest_since_entry: float = 0.0
         self.lowest_since_entry: float = float("inf")
-        self._positions_on_pair: int = 0
+        self._breakeven_locked: bool = False  # profit lock engaged
 
         # Rate limiting
         self._hourly_trades: list[float] = []
         self._consecutive_losses: int = 0
         self._paused_until: float = 0.0
         self._daily_scalp_loss: float = 0.0
-
-        # Quick reversal state
-        self._last_sl_side: str | None = None
-        self._last_sl_time: float = 0.0
 
         # Stats for hourly summary
         self.hourly_wins: int = 0
@@ -140,21 +128,25 @@ class ScalpStrategy(BaseStrategy):
         self._last_heartbeat: float = 0.0
 
     async def on_start(self) -> None:
-        self.in_position = False
-        self.position_side = None
-        self.entry_price = 0.0
-        self.entry_amount = 0.0
-        self._positions_on_pair = 0
+        # Don't reset position state — it may have been injected by _restore_strategy_state
+        if not self.in_position:
+            self.position_side = None
+            self.entry_price = 0.0
+            self.entry_amount = 0.0
         self._tick_count = 0
         self._last_heartbeat = time.monotonic()
         tag = f"{self.leverage}x futures" if self.is_futures else "spot"
+        pos_info = ""
+        if self.in_position:
+            pos_info = f" | RESTORED {self.position_side} @ ${self.entry_price:.2f}"
         self.logger.info(
-            "[%s] Scalp ACTIVE (%s, %.0f%% capital) — PATTERN-BASED, tick=%ds, "
-            "8 patterns, TP=%.2f%% SL=%.2f%% Trail=%.2f/%.2f%% Timeout=%dm",
-            self.pair, tag, self.capital_pct, self.check_interval_sec,
+            "[%s] Scalp ACTIVE (%s) — MOMENTUM-BASED, tick=%ds, "
+            "TP=%.2f%% SL=%.2f%% Trail=%.2f/%.2f%% ProfitLock=%.1f%% Timeout=%dm%s",
+            self.pair, tag, self.check_interval_sec,
             self.TAKE_PROFIT_PCT, self.STOP_LOSS_PCT,
             self.TRAILING_ACTIVATE_PCT, self.TRAILING_DISTANCE_PCT,
-            self.MAX_HOLD_SECONDS // 60,
+            self.PROFIT_LOCK_PCT, self.MAX_HOLD_SECONDS // 60,
+            pos_info,
         )
 
     async def on_stop(self) -> None:
@@ -168,44 +160,40 @@ class ScalpStrategy(BaseStrategy):
     # ======================================================================
 
     async def check(self) -> list[Signal]:
-        """One scalping tick — fetch 1m candles, scan patterns, manage exits."""
+        """One scalping tick — fetch candles, detect momentum, manage exits."""
         signals: list[Signal] = []
         self._tick_count += 1
         exchange = self.trade_exchange or self.executor.exchange
-
-        # ── Pause check ──────────────────────────────────────────────────
         now = time.monotonic()
+
+        # ── Pause check (5 consecutive losses → 5 min cooldown) ──────────
         if now < self._paused_until:
             remaining = int(self._paused_until - now)
-            if self._tick_count % 30 == 0:
+            if self._tick_count % 60 == 0:  # log every 5 min at 5s ticks
                 self.logger.info(
-                    "[%s] Scalp PAUSED (%d losses) — resuming in %dm",
-                    self.pair, self._consecutive_losses, remaining // 60,
+                    "[%s] PAUSED (%d losses) — resuming in %ds",
+                    self.pair, self._consecutive_losses, remaining,
                 )
             return signals
 
-        # ── Daily scalp loss limit ───────────────────────────────────────
-        if self._daily_scalp_loss <= -(self.risk_manager.get_exchange_capital(self._exchange_id) * self.DAILY_LOSS_LIMIT_PCT / 100):
-            if self._tick_count % 30 == 0:
+        # ── Daily loss limit ─────────────────────────────────────────────
+        exchange_cap = self.risk_manager.get_exchange_capital(self._exchange_id)
+        if exchange_cap > 0 and self._daily_scalp_loss <= -(exchange_cap * self.DAILY_LOSS_LIMIT_PCT / 100):
+            if self._tick_count % 60 == 0:
                 self.logger.info(
-                    "[%s] Scalp STOPPED — daily loss limit hit ($%.4f)",
+                    "[%s] STOPPED — daily loss limit $%.2f",
                     self.pair, self._daily_scalp_loss,
                 )
             return signals
 
-        # ── Rate limit check ─────────────────────────────────────────────
+        # ── Rate limit ───────────────────────────────────────────────────
         cutoff = time.time() - 3600
         self._hourly_trades = [t for t in self._hourly_trades if t > cutoff]
         if len(self._hourly_trades) >= self.MAX_TRADES_PER_HOUR:
-            if self._tick_count % 30 == 0:
-                self.logger.info(
-                    "[%s] Scalp rate limited — %d trades/hr (max %d)",
-                    self.pair, len(self._hourly_trades), self.MAX_TRADES_PER_HOUR,
-                )
             return signals
 
         # ── Fetch 1m candles ─────────────────────────────────────────────
-        ohlcv = await exchange.fetch_ohlcv(self.pair, "1m", limit=50)
+        ohlcv = await exchange.fetch_ohlcv(self.pair, "1m", limit=30)
         df = pd.DataFrame(ohlcv, columns=["timestamp", "open", "high", "low", "close", "volume"])
         close = df["close"]
         volume = df["volume"]
@@ -213,91 +201,66 @@ class ScalpStrategy(BaseStrategy):
 
         # ── Compute indicators ───────────────────────────────────────────
         rsi_series = ta.momentum.RSIIndicator(close, window=14).rsi()
+        rsi_now = float(rsi_series.iloc[-1]) if not rsi_series.empty else 50.0
+
         bb = ta.volatility.BollingerBands(close, window=20, window_dev=2)
         bb_upper = float(bb.bollinger_hband().iloc[-1])
         bb_lower = float(bb.bollinger_lband().iloc[-1])
-        bb_mid = float(bb.bollinger_mavg().iloc[-1])
 
-        rsi_now = float(rsi_series.iloc[-1])
-
-        # Volume ratio
+        # Volume ratio (current vs avg of last 10)
         avg_vol = float(volume.iloc[-11:-1].mean()) if len(volume) >= 11 else float(volume.mean())
         current_vol = float(volume.iloc[-1])
         vol_ratio = current_vol / avg_vol if avg_vol > 0 else 0
 
-        # BB width as percentage of mid
-        bb_range = bb_upper - bb_lower
-        bb_width_pct = (bb_range / bb_mid * 100) if bb_mid > 0 else 999
-
-        # Price proximity to bands
-        lower_dist_pct = ((current_price - bb_lower) / bb_lower * 100) if bb_lower > 0 else 999
-        upper_dist_pct = ((bb_upper - current_price) / bb_upper * 100) if bb_upper > 0 else 999
-
-        # EMA 20 for mean reversion
-        ema_20 = float(close.ewm(span=20, adjust=False).mean().iloc[-1])
-        ema_dist_pct = ((current_price - ema_20) / ema_20 * 100) if ema_20 > 0 else 0
-
-        # Candle changes for pattern detection
+        # Price acceleration: how fast is the current candle vs last 3?
         closes = close.values
         candle_changes: list[float] = []
-        for i in range(-3, 0):
+        for i in range(-4, 0):
             if len(closes) >= abs(i) + 1:
                 prev = float(closes[i - 1])
                 cur = float(closes[i])
                 candle_changes.append(((cur - prev) / prev * 100) if prev > 0 else 0)
-            else:
-                candle_changes.append(0)
+        current_candle_pct = candle_changes[-1] if candle_changes else 0
+        avg_candle_pct = (
+            sum(abs(c) for c in candle_changes[:-1]) / max(len(candle_changes) - 1, 1)
+        )
 
-        last_candle_pct = candle_changes[-1] if candle_changes else 0
-
-        # RSI previous values for divergence
-        rsi_vals = rsi_series.dropna().values
-        prev_close = float(close.iloc[-2]) if len(close) >= 2 else current_price
-
-        # ── Heartbeat every 5 minutes ────────────────────────────────────
-        if now - self._last_heartbeat >= 300:
+        # ── Heartbeat every 60 seconds ───────────────────────────────────
+        if now - self._last_heartbeat >= 60:
             self._last_heartbeat = now
             tag = f"{self.leverage}x" if self.is_futures else "spot"
             if self.in_position:
-                hold_sec = time.monotonic() - self.entry_time
-                pnl_now = ((current_price - self.entry_price) / self.entry_price * 100
-                           if self.position_side == "long"
-                           else (self.entry_price - current_price) / self.entry_price * 100)
+                hold_sec = now - self.entry_time
+                pnl_now = self._calc_pnl_pct(current_price)
+                be_tag = " [BE-LOCKED]" if self._breakeven_locked else ""
                 self.logger.info(
-                    "[%s] Scalp heartbeat (%s) — %s @ $%.2f for %ds, PnL=%+.2f%%, RSI=%.1f",
+                    "[%s] (%s) %s @ $%.2f | %ds | PnL=%+.2f%% | RSI=%.1f%s",
                     self.pair, tag, self.position_side, self.entry_price,
-                    int(hold_sec), pnl_now, rsi_now,
+                    int(hold_sec), pnl_now, rsi_now, be_tag,
                 )
             else:
                 self.logger.info(
-                    "[%s] Scalp heartbeat (%s) — HUNTING | RSI=%.1f, BBW=%.2f%%, Vol=%.1fx, "
-                    "EMA_dist=%+.2f%% | trades/hr=%d, W/L=%d/%d",
-                    self.pair, tag, rsi_now, bb_width_pct, vol_ratio, ema_dist_pct,
-                    len(self._hourly_trades), self.hourly_wins, self.hourly_losses,
+                    "[%s] (%s) SCANNING | $%.2f | RSI=%.1f | Vol=%.1fx | "
+                    "candle=%+.3f%% (avg=%.3f%%) | W/L=%d/%d",
+                    self.pair, tag, current_price, rsi_now, vol_ratio,
+                    current_candle_pct, avg_candle_pct,
+                    self.hourly_wins, self.hourly_losses,
                 )
 
         # ── In position: check exit ──────────────────────────────────────
         if self.in_position:
-            signals = self._check_exits(current_price, rsi_now)
-            return signals
+            return self._check_exits(current_price, rsi_now)
 
-        # ── No position: HUNT for patterns ───────────────────────────────
-        self.logger.info(
-            "[%s] Scalp #%d HUNTING | $%.2f | RSI=%.1f | BBW=%.1f%% | "
-            "Vol=%.1fx | EMA_dist=%+.2f%% | candle=%+.2f%%",
-            self.pair, self._tick_count, current_price,
-            rsi_now, bb_width_pct, vol_ratio, ema_dist_pct, last_candle_pct,
-        )
-
+        # ── No position: detect momentum ─────────────────────────────────
         # Check position limits
         if self.risk_manager.has_position(self.pair):
             return signals
 
-        scalp_positions = sum(
+        total_scalp = sum(
             1 for p in self.risk_manager.open_positions
-            if p.strategy == "scalp" and getattr(p, "exchange_id", None) == self._exchange_id
+            if p.strategy == "scalp"
         )
-        if scalp_positions >= self.MAX_POSITIONS_PER_EXCHANGE:
+        if total_scalp >= self.MAX_POSITIONS:
             return signals
 
         # Spread check
@@ -312,14 +275,14 @@ class ScalpStrategy(BaseStrategy):
         except Exception:
             pass
 
-        # Check available balance
+        # Balance check
         available = self.risk_manager.get_available_capital(self._exchange_id)
         min_balance = 5.50 if self._exchange_id == "binance" else 1.00
         if available < min_balance:
-            if self._tick_count % 30 == 0:
+            if self._tick_count % 60 == 0:
                 self.logger.info(
-                    "[%s] Insufficient %s balance: $%.2f < $%.2f — waiting",
-                    self.pair, self._exchange_id, available, min_balance,
+                    "[%s] Insufficient %s balance: $%.2f",
+                    self.pair, self._exchange_id, available,
                 )
             return signals
 
@@ -328,251 +291,216 @@ class ScalpStrategy(BaseStrategy):
         if amount is None:
             return signals
 
-        # ── Scan all 8 patterns (first match wins) ────────────────────────
-        entry = self._scan_patterns(
-            current_price, rsi_now, rsi_vals, bb_upper, bb_lower,
-            bb_width_pct, vol_ratio, last_candle_pct, candle_changes,
-            ema_dist_pct, closes, lower_dist_pct, upper_dist_pct,
+        # ── Detect momentum ──────────────────────────────────────────────
+        entry = self._detect_momentum(
+            current_price, rsi_now, vol_ratio,
+            current_candle_pct, avg_candle_pct,
+            bb_upper, bb_lower,
         )
 
         if entry is not None:
-            side, pattern_name, reason = entry
+            side, reason = entry
             signals.append(self._build_entry_signal(side, current_price, amount, reason))
 
         return signals
 
     # ======================================================================
-    # PATTERN SCANNER — any ONE pattern triggers entry
+    # MOMENTUM DETECTION — one strong signal is enough
     # ======================================================================
 
-    def _scan_patterns(
+    def _detect_momentum(
         self,
         price: float,
         rsi_now: float,
-        rsi_vals: np.ndarray,
+        vol_ratio: float,
+        current_candle_pct: float,
+        avg_candle_pct: float,
         bb_upper: float,
         bb_lower: float,
-        bb_width_pct: float,
-        vol_ratio: float,
-        last_candle_pct: float,
-        candle_changes: list[float],
-        ema_dist_pct: float,
-        closes: np.ndarray,
-        lower_dist_pct: float,
-        upper_dist_pct: float,
-    ) -> tuple[str, str, str] | None:
-        """Scan 8 entry patterns. Returns (side, pattern_name, reason) or None."""
+    ) -> tuple[str, str] | None:
+        """Detect momentum. Returns (side, reason) or None.
 
+        ONE strong condition triggers entry. Follow the momentum direction.
+        """
         can_short = self.is_futures and config.delta.enable_shorting
 
-        # ── P1: Quick Reversal (highest priority — time-sensitive) ────────
-        if self._last_sl_side and (time.monotonic() - self._last_sl_time) < 30:
-            if self._last_sl_side == "long" and can_short and rsi_now > 50:
-                self._last_sl_side = None
-                return ("short", "quick_reversal",
-                        f"PATTERN: quick_reversal (reversed long SL, RSI={rsi_now:.1f})")
-            elif self._last_sl_side == "short" and rsi_now < 50:
-                self._last_sl_side = None
-                return ("long", "quick_reversal",
-                        f"PATTERN: quick_reversal (reversed short SL, RSI={rsi_now:.1f})")
-            self._last_sl_side = None
-
-        # ── P2: RSI Extreme (instant entry) ──────────────────────────────
+        # ── 1. RSI Extreme — instant entry, strongest signal ─────────────
         if rsi_now < self.RSI_EXTREME_LONG:
-            return ("long", "rsi_extreme",
-                    f"PATTERN: rsi_extreme (RSI={rsi_now:.1f})")
+            return ("long",
+                    f"MOMENTUM: RSI extreme {rsi_now:.1f} — oversold bounce")
         if rsi_now > self.RSI_EXTREME_SHORT and can_short:
-            return ("short", "rsi_extreme",
-                    f"PATTERN: rsi_extreme (RSI={rsi_now:.1f})")
+            return ("short",
+                    f"MOMENTUM: RSI extreme {rsi_now:.1f} — overbought fade")
 
-        # ── P3: Volume Spike (enter candle direction) ────────────────────
-        if vol_ratio >= self.VOL_SPIKE_RATIO and abs(last_candle_pct) >= self.CANDLE_MIN_PCT:
-            if last_candle_pct > 0:
-                return ("long", "volume_spike",
-                        f"PATTERN: volume_spike (Vol={vol_ratio:.1f}x, candle=+{last_candle_pct:.2f}%)")
+        # ── 2. Price acceleration + volume — core momentum signal ────────
+        is_accelerating = (
+            abs(current_candle_pct) >= self.ACCEL_MIN_PCT
+            and avg_candle_pct > 0
+            and abs(current_candle_pct) >= avg_candle_pct * self.ACCEL_MULTIPLIER
+        )
+        has_volume = vol_ratio >= self.VOL_SPIKE_RATIO
+
+        if is_accelerating and has_volume:
+            if current_candle_pct > 0:
+                return ("long",
+                        f"MOMENTUM: accel {current_candle_pct:+.3f}% "
+                        f"({self.ACCEL_MULTIPLIER}x avg {avg_candle_pct:.3f}%), "
+                        f"Vol {vol_ratio:.1f}x")
             elif can_short:
-                return ("short", "volume_spike",
-                        f"PATTERN: volume_spike (Vol={vol_ratio:.1f}x, candle={last_candle_pct:.2f}%)")
+                return ("short",
+                        f"MOMENTUM: accel {current_candle_pct:+.3f}% "
+                        f"({self.ACCEL_MULTIPLIER}x avg {avg_candle_pct:.3f}%), "
+                        f"Vol {vol_ratio:.1f}x")
 
-        # ── P4: BB Squeeze Breakout ──────────────────────────────────────
-        if bb_width_pct < self.BB_SQUEEZE_WIDTH_PCT:
-            if price > bb_upper:
-                return ("long", "bb_squeeze_break",
-                        f"PATTERN: bb_squeeze_break (BBW={bb_width_pct:.2f}%, break=upper)")
-            elif price < bb_lower and can_short:
-                return ("short", "bb_squeeze_break",
-                        f"PATTERN: bb_squeeze_break (BBW={bb_width_pct:.2f}%, break=lower)")
-
-        # ── P5: Mean Reversion (price far from EMA → revert) ─────────────
-        if abs(ema_dist_pct) >= self.MEAN_REVERSION_PCT:
-            if ema_dist_pct < 0:
-                # Price below EMA → long (revert up)
-                return ("long", "mean_reversion",
-                        f"PATTERN: mean_reversion (price {ema_dist_pct:+.2f}% from EMA)")
+        # ── 3. Price acceleration alone (strong move) ────────────────────
+        strong_accel = (
+            abs(current_candle_pct) >= self.ACCEL_MIN_PCT * 2  # 0.10% min
+            and avg_candle_pct > 0
+            and abs(current_candle_pct) >= avg_candle_pct * 2.0  # 2x avg
+        )
+        if strong_accel:
+            if current_candle_pct > 0:
+                return ("long",
+                        f"MOMENTUM: strong accel {current_candle_pct:+.3f}% "
+                        f"(2x avg {avg_candle_pct:.3f}%)")
             elif can_short:
-                # Price above EMA → short (revert down)
-                return ("short", "mean_reversion",
-                        f"PATTERN: mean_reversion (price {ema_dist_pct:+.2f}% from EMA)")
+                return ("short",
+                        f"MOMENTUM: strong accel {current_candle_pct:+.3f}% "
+                        f"(2x avg {avg_candle_pct:.3f}%)")
 
-        # ── P6: Candle Pattern (3 consecutive → fade) ────────────────────
-        if len(candle_changes) >= 3:
-            all_red = all(c < -self.CANDLE_MIN_PCT for c in candle_changes)
-            all_green = all(c > self.CANDLE_MIN_PCT for c in candle_changes)
-            if all_red:
-                return ("long", "candle_pattern",
-                        f"PATTERN: candle_pattern (3 red candles: {', '.join(f'{c:.2f}%' for c in candle_changes)})")
-            elif all_green and can_short:
-                return ("short", "candle_pattern",
-                        f"PATTERN: candle_pattern (3 green candles: {', '.join(f'{c:.2f}%' for c in candle_changes)})")
+        # ── 4. Volume spike alone (big volume = something happening) ─────
+        if vol_ratio >= 2.0 and abs(current_candle_pct) >= self.ACCEL_MIN_PCT:
+            if current_candle_pct > 0:
+                return ("long",
+                        f"MOMENTUM: volume spike {vol_ratio:.1f}x, "
+                        f"candle {current_candle_pct:+.3f}%")
+            elif can_short:
+                return ("short",
+                        f"MOMENTUM: volume spike {vol_ratio:.1f}x, "
+                        f"candle {current_candle_pct:+.3f}%")
 
-        # ── P7: RSI Divergence ───────────────────────────────────────────
-        if len(closes) >= 10 and len(rsi_vals) >= 10:
-            # Look at last 5 and previous 5 for divergence
-            recent_price_low = float(np.min(closes[-5:]))
-            prev_price_low = float(np.min(closes[-10:-5]))
-            recent_rsi_low = float(np.min(rsi_vals[-5:]))
-            prev_rsi_low = float(np.min(rsi_vals[-10:-5]))
-
-            recent_price_high = float(np.max(closes[-5:]))
-            prev_price_high = float(np.max(closes[-10:-5]))
-            recent_rsi_high = float(np.max(rsi_vals[-5:]))
-            prev_rsi_high = float(np.max(rsi_vals[-10:-5]))
-
-            # Bullish divergence: price lower low + RSI higher low
-            if (recent_price_low < prev_price_low and recent_rsi_low > prev_rsi_low
-                    and rsi_now < 45):
-                return ("long", "rsi_divergence",
-                        f"PATTERN: rsi_divergence (price LL ${recent_price_low:.2f}<${prev_price_low:.2f}, "
-                        f"RSI HL {recent_rsi_low:.1f}>{prev_rsi_low:.1f})")
-            # Bearish divergence: price higher high + RSI lower high
-            if (can_short and recent_price_high > prev_price_high
-                    and recent_rsi_high < prev_rsi_high and rsi_now > 55):
-                return ("short", "rsi_divergence",
-                        f"PATTERN: rsi_divergence (price HH ${recent_price_high:.2f}>${prev_price_high:.2f}, "
-                        f"RSI LH {recent_rsi_high:.1f}<{prev_rsi_high:.1f})")
-
-        # ── P8: BB Touch + Confirmation ──────────────────────────────────
-        if lower_dist_pct <= 0.3:  # within 0.3% of lower BB
-            confirmations = []
-            if rsi_now < self.BB_TOUCH_CONFIRM_RSI_L:
-                confirmations.append(f"RSI={rsi_now:.1f}")
-            if vol_ratio >= 1.2:
-                confirmations.append(f"Vol={vol_ratio:.1f}x")
-            if last_candle_pct < -self.CANDLE_MIN_PCT:
-                confirmations.append(f"candle={last_candle_pct:.2f}%")
-            if confirmations:
-                return ("long", "bb_touch_confirm",
-                        f"PATTERN: bb_touch_confirm (lower BB, {' + '.join(confirmations)})")
-
-        if upper_dist_pct <= 0.3 and can_short:
-            confirmations = []
-            if rsi_now > self.BB_TOUCH_CONFIRM_RSI_S:
-                confirmations.append(f"RSI={rsi_now:.1f}")
-            if vol_ratio >= 1.2:
-                confirmations.append(f"Vol={vol_ratio:.1f}x")
-            if last_candle_pct > self.CANDLE_MIN_PCT:
-                confirmations.append(f"candle=+{last_candle_pct:.2f}%")
-            if confirmations:
-                return ("short", "bb_touch_confirm",
-                        f"PATTERN: bb_touch_confirm (upper BB, {' + '.join(confirmations)})")
+        # ── 5. BB Breakout — price outside bands = momentum confirmed ────
+        if price > bb_upper:
+            return ("long",
+                    f"MOMENTUM: BB breakout (${price:.2f} > upper ${bb_upper:.2f})")
+        if price < bb_lower and can_short:
+            return ("short",
+                    f"MOMENTUM: BB breakdown (${price:.2f} < lower ${bb_lower:.2f})")
 
         return None
 
     # ======================================================================
-    # EXIT LOGIC
+    # EXIT LOGIC — get out fast
     # ======================================================================
 
     def _check_exits(self, current_price: float, rsi_now: float) -> list[Signal]:
-        """Check all exit conditions for the current position."""
+        """Check all exit conditions. Priority: TP > SL/Trail > Profit lock > Timeout > Flatline."""
         signals: list[Signal] = []
         hold_seconds = time.monotonic() - self.entry_time
+        pnl_pct = self._calc_pnl_pct(current_price)
 
         if self.position_side == "long":
-            pnl_pct = ((current_price - self.entry_price) / self.entry_price) * 100
             self.highest_since_entry = max(self.highest_since_entry, current_price)
 
-            if pnl_pct >= self.TRAILING_ACTIVATE_PCT:
+            # Determine stop level
+            if self._breakeven_locked:
+                # Profit locked: SL at breakeven (entry price)
+                trail_stop = max(
+                    self.entry_price,
+                    self.highest_since_entry * (1 - self.TRAILING_DISTANCE_PCT / 100),
+                ) if pnl_pct >= self.TRAILING_ACTIVATE_PCT else self.entry_price
+            elif pnl_pct >= self.TRAILING_ACTIVATE_PCT:
                 trail_stop = self.highest_since_entry * (1 - self.TRAILING_DISTANCE_PCT / 100)
             else:
                 trail_stop = self.entry_price * (1 - self.STOP_LOSS_PCT / 100)
 
             tp_price = self.entry_price * (1 + self.TAKE_PROFIT_PCT / 100)
 
-            self.logger.info(
-                "[%s] Scalp #%d — LONG | $%.2f | PnL=%+.3f%% | %ds | SL=$%.2f | TP=$%.2f",
-                self.pair, self._tick_count, current_price, pnl_pct,
-                int(hold_seconds), trail_stop, tp_price,
-            )
+            # Profit lock check
+            if not self._breakeven_locked and pnl_pct >= self.PROFIT_LOCK_PCT:
+                self._breakeven_locked = True
+                self.logger.info(
+                    "[%s] PROFIT LOCK — PnL +%.2f%% → SL moved to breakeven $%.2f",
+                    self.pair, pnl_pct, self.entry_price,
+                )
 
+            # Exit checks (priority order)
             if current_price >= tp_price:
-                cap_pct = pnl_pct * self.leverage
-                signals.append(self._exit_signal(current_price, "long",
-                    f"Scalp TP +{pnl_pct:.2f}% price (+{cap_pct:.1f}% capital at {self.leverage}x)"))
-                self._record_scalp_result(pnl_pct, "tp")
-            elif current_price <= trail_stop:
-                cap_pct = pnl_pct * self.leverage
-                exit_type = "trail" if pnl_pct >= 0 else "sl"
-                signals.append(self._exit_signal(current_price, "long",
-                    f"Scalp {exit_type.upper()} {pnl_pct:+.2f}% price ({cap_pct:+.1f}% capital at {self.leverage}x)"))
-                self._record_scalp_result(pnl_pct, exit_type)
-                self._last_sl_side = "long"
-                self._last_sl_time = time.monotonic()
-            elif hold_seconds >= self.MAX_HOLD_SECONDS:
-                cap_pct = pnl_pct * self.leverage
-                signals.append(self._exit_signal(current_price, "long",
-                    f"Scalp TIMEOUT {pnl_pct:+.2f}% price ({cap_pct:+.1f}% capital) after {int(hold_seconds)}s"))
-                self._record_scalp_result(pnl_pct, "timeout")
-            elif hold_seconds >= self.FLATLINE_SECONDS and abs(pnl_pct) < self.FLATLINE_MIN_MOVE_PCT:
-                cap_pct = pnl_pct * self.leverage
-                signals.append(self._exit_signal(current_price, "long",
-                    f"Scalp FLATLINE {pnl_pct:+.2f}% (< {self.FLATLINE_MIN_MOVE_PCT}% in {int(hold_seconds)}s)"))
-                self._record_scalp_result(pnl_pct, "flatline")
+                return self._do_exit(current_price, pnl_pct, "long", "TP", hold_seconds)
+            if current_price <= trail_stop:
+                exit_type = "TRAIL" if pnl_pct >= 0 else "SL"
+                if self._breakeven_locked and pnl_pct >= 0:
+                    exit_type = "BE-LOCK"
+                return self._do_exit(current_price, pnl_pct, "long", exit_type, hold_seconds)
+            if hold_seconds >= self.MAX_HOLD_SECONDS:
+                return self._do_exit(current_price, pnl_pct, "long", "TIMEOUT", hold_seconds)
+            if hold_seconds >= self.FLATLINE_SECONDS and abs(pnl_pct) < self.FLATLINE_MIN_MOVE_PCT:
+                return self._do_exit(current_price, pnl_pct, "long", "FLAT", hold_seconds)
 
         elif self.position_side == "short":
-            pnl_pct = ((self.entry_price - current_price) / self.entry_price) * 100
             self.lowest_since_entry = min(self.lowest_since_entry, current_price)
 
-            if pnl_pct >= self.TRAILING_ACTIVATE_PCT:
+            # Determine stop level
+            if self._breakeven_locked:
+                trail_stop = min(
+                    self.entry_price,
+                    self.lowest_since_entry * (1 + self.TRAILING_DISTANCE_PCT / 100),
+                ) if pnl_pct >= self.TRAILING_ACTIVATE_PCT else self.entry_price
+            elif pnl_pct >= self.TRAILING_ACTIVATE_PCT:
                 trail_stop = self.lowest_since_entry * (1 + self.TRAILING_DISTANCE_PCT / 100)
             else:
                 trail_stop = self.entry_price * (1 + self.STOP_LOSS_PCT / 100)
 
             tp_price = self.entry_price * (1 - self.TAKE_PROFIT_PCT / 100)
 
-            self.logger.info(
-                "[%s] Scalp #%d — SHORT | $%.2f | PnL=%+.3f%% | %ds | SL=$%.2f | TP=$%.2f",
-                self.pair, self._tick_count, current_price, pnl_pct,
-                int(hold_seconds), trail_stop, tp_price,
-            )
+            # Profit lock check
+            if not self._breakeven_locked and pnl_pct >= self.PROFIT_LOCK_PCT:
+                self._breakeven_locked = True
+                self.logger.info(
+                    "[%s] PROFIT LOCK — PnL +%.2f%% → SL moved to breakeven $%.2f",
+                    self.pair, pnl_pct, self.entry_price,
+                )
 
+            # Exit checks (priority order)
             if current_price <= tp_price:
-                cap_pct = pnl_pct * self.leverage
-                signals.append(self._exit_signal(current_price, "short",
-                    f"Scalp TP +{pnl_pct:.2f}% price (+{cap_pct:.1f}% capital at {self.leverage}x)"))
-                self._record_scalp_result(pnl_pct, "tp")
-            elif current_price >= trail_stop:
-                cap_pct = pnl_pct * self.leverage
-                exit_type = "trail" if pnl_pct >= 0 else "sl"
-                signals.append(self._exit_signal(current_price, "short",
-                    f"Scalp {exit_type.upper()} {pnl_pct:+.2f}% price ({cap_pct:+.1f}% capital at {self.leverage}x)"))
-                self._record_scalp_result(pnl_pct, exit_type)
-                self._last_sl_side = "short"
-                self._last_sl_time = time.monotonic()
-            elif hold_seconds >= self.MAX_HOLD_SECONDS:
-                cap_pct = pnl_pct * self.leverage
-                signals.append(self._exit_signal(current_price, "short",
-                    f"Scalp TIMEOUT {pnl_pct:+.2f}% price ({cap_pct:+.1f}% capital) after {int(hold_seconds)}s"))
-                self._record_scalp_result(pnl_pct, "timeout")
-            elif hold_seconds >= self.FLATLINE_SECONDS and abs(pnl_pct) < self.FLATLINE_MIN_MOVE_PCT:
-                cap_pct = pnl_pct * self.leverage
-                signals.append(self._exit_signal(current_price, "short",
-                    f"Scalp FLATLINE {pnl_pct:+.2f}% (< {self.FLATLINE_MIN_MOVE_PCT}% in {int(hold_seconds)}s)"))
-                self._record_scalp_result(pnl_pct, "flatline")
+                return self._do_exit(current_price, pnl_pct, "short", "TP", hold_seconds)
+            if current_price >= trail_stop:
+                exit_type = "TRAIL" if pnl_pct >= 0 else "SL"
+                if self._breakeven_locked and pnl_pct >= 0:
+                    exit_type = "BE-LOCK"
+                return self._do_exit(current_price, pnl_pct, "short", exit_type, hold_seconds)
+            if hold_seconds >= self.MAX_HOLD_SECONDS:
+                return self._do_exit(current_price, pnl_pct, "short", "TIMEOUT", hold_seconds)
+            if hold_seconds >= self.FLATLINE_SECONDS and abs(pnl_pct) < self.FLATLINE_MIN_MOVE_PCT:
+                return self._do_exit(current_price, pnl_pct, "short", "FLAT", hold_seconds)
 
         return signals
 
+    def _do_exit(
+        self, price: float, pnl_pct: float, side: str,
+        exit_type: str, hold_seconds: float,
+    ) -> list[Signal]:
+        """Execute an exit: build signal, record result, log."""
+        cap_pct = pnl_pct * self.leverage
+        reason = (
+            f"Scalp {exit_type} {pnl_pct:+.2f}% price "
+            f"({cap_pct:+.1f}% capital at {self.leverage}x)"
+        )
+        self._record_scalp_result(pnl_pct, exit_type.lower())
+        return [self._exit_signal(price, side, reason)]
+
+    def _calc_pnl_pct(self, current_price: float) -> float:
+        """Calculate unrealized P&L percentage."""
+        if self.entry_price <= 0:
+            return 0.0
+        if self.position_side == "long":
+            return ((current_price - self.entry_price) / self.entry_price) * 100
+        elif self.position_side == "short":
+            return ((self.entry_price - current_price) / self.entry_price) * 100
+        return 0.0
+
     # ======================================================================
-    # POSITION SIZING
+    # POSITION SIZING — 2 contracts target, 3 max
     # ======================================================================
 
     def _calculate_position_size(self, current_price: float, available: float) -> float | None:
@@ -590,34 +518,33 @@ class ScalpStrategy(BaseStrategy):
 
             one_contract_collateral = (contract_size * current_price) / self.leverage
             if one_contract_collateral > available:
-                if self._tick_count % 30 == 0:
+                if self._tick_count % 60 == 0:
                     self.logger.info(
-                        "[%s] 1 contract needs $%.2f collateral > $%.2f available — skipping",
+                        "[%s] 1 contract needs $%.2f collateral > $%.2f — skipping",
                         self.pair, one_contract_collateral, available,
                     )
                 return None
 
-            contracts = int(capital * self.leverage / (contract_size * current_price))
-            contracts = max(contracts, 2)  # minimum 2 contracts per scalp
-            contracts = min(contracts, 3)  # cap at 3 contracts for safety
+            # Target 2 contracts, max 3
+            contracts = self.TARGET_CONTRACTS
             total_collateral = contracts * one_contract_collateral
             if total_collateral > available:
                 contracts = max(1, int(available / one_contract_collateral))
-                total_collateral = contracts * one_contract_collateral
-
+            contracts = min(contracts, self.MAX_CONTRACTS)
+            total_collateral = contracts * one_contract_collateral
             amount = contracts * contract_size
 
             self.logger.debug(
-                "[%s] Sizing (futures): capital=$%.2f, avail=$%.2f "
-                "→ %d contracts (%.6f coin, collateral=$%.2f, %dx)",
-                self.pair, capital, available, contracts,
-                amount, total_collateral, self.leverage,
+                "[%s] Sizing: %d contracts × %.4f = %.6f coin, "
+                "collateral=$%.2f (%dx)",
+                self.pair, contracts, contract_size, amount,
+                total_collateral, self.leverage,
             )
         else:
             amount = capital / current_price
             self.logger.debug(
-                "[%s] Sizing (spot): capital=$%.2f, avail=$%.2f → amount=%.8f",
-                self.pair, capital, available, amount,
+                "[%s] Sizing (spot): $%.2f → %.8f",
+                self.pair, capital, amount,
             )
 
         return amount
@@ -627,7 +554,7 @@ class ScalpStrategy(BaseStrategy):
     # ======================================================================
 
     def _build_entry_signal(self, side: str, price: float, amount: float, reason: str) -> Signal:
-        """Build an entry signal for a detected pattern."""
+        """Build an entry signal for detected momentum."""
         self.logger.info("[%s] %s → %s entry", self.pair, reason, side.upper())
 
         if side == "long":
@@ -705,8 +632,8 @@ class ScalpStrategy(BaseStrategy):
             filled_amount = order.get("filled") or pending_amount or signal.amount
             self._open_position(pending_side, fill_price, filled_amount)
             self.logger.info(
-                "[%s] Order FILLED — tracking %s position @ $%.2f, amount=%.8f",
-                self.pair, pending_side, fill_price, filled_amount,
+                "[%s] FILLED — %s @ $%.2f, %.6f, %dx",
+                self.pair, pending_side.upper(), fill_price, filled_amount, self.leverage,
             )
 
     def on_rejected(self, signal: Signal) -> None:
@@ -714,7 +641,7 @@ class ScalpStrategy(BaseStrategy):
         pending_side = signal.metadata.get("pending_side")
         if pending_side:
             self.logger.warning(
-                "[%s] Order FAILED — NOT tracking %s position (phantom prevention)",
+                "[%s] REJECTED — NOT tracking %s (phantom prevention)",
                 self.pair, pending_side,
             )
 
@@ -730,20 +657,19 @@ class ScalpStrategy(BaseStrategy):
         self.entry_time = time.monotonic()
         self.highest_since_entry = price
         self.lowest_since_entry = price
-        self._positions_on_pair += 1
+        self._breakeven_locked = False
         self._hourly_trades.append(time.time())
 
     def _record_scalp_result(self, pnl_pct: float, exit_type: str) -> None:
-        # Gross P&L = price change * notional (entry_amount is coin qty)
+        # Gross P&L
         notional = self.entry_price * self.entry_amount
         gross_pnl = notional * (pnl_pct / 100)
 
-        # Estimate trading fees (entry + exit): ~0.05% per side on Delta, ~0.1% on Binance
-        fee_rate = 0.001 if self._exchange_id == "delta" else 0.002  # round-trip
+        # Fees: ~0.05% per side on Delta, ~0.1% on Binance
+        fee_rate = 0.001 if self._exchange_id == "delta" else 0.002
         est_fees = notional * fee_rate
         net_pnl = gross_pnl - est_fees
 
-        # Capital P&L % (leveraged)
         capital_pnl_pct = pnl_pct * self.leverage
 
         self.hourly_pnl += net_pnl
@@ -756,35 +682,30 @@ class ScalpStrategy(BaseStrategy):
             self.hourly_losses += 1
             self._consecutive_losses += 1
 
-        # Duration in human-readable format
+        # Duration
         hold_sec = int(time.monotonic() - self.entry_time)
-        if hold_sec >= 60:
-            duration = f"{hold_sec // 60}m{hold_sec % 60:02d}s"
-        else:
-            duration = f"{hold_sec}s"
+        duration = f"{hold_sec // 60}m{hold_sec % 60:02d}s" if hold_sec >= 60 else f"{hold_sec}s"
 
         self.logger.info(
-            "[%s] SCALP CLOSED — %s hit %+.2f%% price (%+.2f%% capital at %dx) | "
-            "Gross=$%.4f, Net=$%.4f (fees~$%.4f) | Duration: %s | "
-            "W/L=%d/%d, streak=%d, daily=$%.4f",
+            "[%s] CLOSED %s %+.2f%% price (%+.1f%% capital at %dx) | "
+            "Gross=$%.4f Net=$%.4f fees=$%.4f | %s | W/L=%d/%d streak=%d",
             self.pair, exit_type.upper(), pnl_pct, capital_pnl_pct, self.leverage,
             gross_pnl, net_pnl, est_fees, duration,
-            self.hourly_wins, self.hourly_losses,
-            self._consecutive_losses, self._daily_scalp_loss,
+            self.hourly_wins, self.hourly_losses, self._consecutive_losses,
         )
 
         if self._consecutive_losses >= self.CONSECUTIVE_LOSS_PAUSE:
             self._paused_until = time.monotonic() + self.PAUSE_DURATION_SEC
             self.logger.warning(
-                "[%s] Scalp PAUSING %dmin — %d consecutive losses",
-                self.pair, self.PAUSE_DURATION_SEC // 60, self._consecutive_losses,
+                "[%s] PAUSING %ds — %d consecutive losses",
+                self.pair, self.PAUSE_DURATION_SEC, self._consecutive_losses,
             )
 
         self.in_position = False
         self.position_side = None
         self.entry_price = 0.0
         self.entry_amount = 0.0
-        self._positions_on_pair = max(0, self._positions_on_pair - 1)
+        self._breakeven_locked = False
 
     # ======================================================================
     # STATS
