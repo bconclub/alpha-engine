@@ -332,6 +332,20 @@ class TradeExecutor:
         if not is_exit:
             signal = self._enforce_binance_min(signal)
 
+        # Convert Delta coin amounts to integer contracts BEFORE validation
+        if signal.exchange_id == "delta":
+            contracts = self._to_delta_contracts(signal.pair, signal.amount, signal.price)
+            logger.info("[%s] Delta: %.8f coins -> %d contracts", signal.pair, signal.amount, contracts)
+            signal = Signal(
+                side=signal.side, price=signal.price,
+                amount=float(contracts),
+                order_type=signal.order_type, reason=signal.reason,
+                strategy=signal.strategy, pair=signal.pair,
+                stop_loss=signal.stop_loss, take_profit=signal.take_profit,
+                leverage=signal.leverage, position_type=signal.position_type,
+                reduce_only=signal.reduce_only, exchange_id=signal.exchange_id,
+            )
+
         # Validate minimum order size (exits skip validation)
         if not self.validate_order_size(signal):
             return None
@@ -372,17 +386,8 @@ class TradeExecutor:
         if is_futures:
             params["leverage"] = signal.leverage
 
-        # Delta Exchange uses INTEGER contracts, not fractional coin amounts
-        # Convert coin amount to contracts for Delta
+        # signal.amount is already in integer contracts for Delta (converted above)
         order_amount = signal.amount
-        if signal.exchange_id == "delta":
-            contract_sizes = {"ETH/USD:USD": 0.01, "BTC/USD:USD": 0.001}
-            cs = contract_sizes.get(signal.pair, DELTA_CONTRACT_SIZE.get(signal.pair, 0.01))
-            order_amount = float(max(1, round(signal.amount / cs)))  # 0.01 ETH / 0.01 = 1 contract
-            logger.info(
-                "[%s] Delta: %.6f coin / %.4f contract_size = %d contracts",
-                signal.pair, signal.amount, cs, int(order_amount),
-            )
 
         order: dict | None = None
         last_error: Exception | None = None
