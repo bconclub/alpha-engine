@@ -40,8 +40,8 @@ function ISTClock() {
 export function LiveStatusBar() {
   const { botStatus, isConnected, pnlByExchange, trades } = useSupabase();
 
-  const binanceConnected = botStatus?.binance_connected ?? isConnected;
-  const deltaConnected = botStatus?.delta_connected ?? isConnected;
+  const binanceConnected = botStatus?.binance_connected || (Number(botStatus?.binance_balance ?? 0) > 0) || isConnected;
+  const deltaConnected = botStatus?.delta_connected || (Number(botStatus?.delta_balance ?? 0) > 0) || isConnected;
   const botState = botStatus?.bot_state ?? (isConnected ? 'running' : 'paused');
 
   // Use per-exchange P&L view data as fallback for balances
@@ -56,7 +56,7 @@ export function LiveStatusBar() {
   const totalCapital = (binanceBalance + deltaBalance) || botStatus?.capital || 0;
 
   const shortingEnabled = botStatus?.shorting_enabled ?? false;
-  const leverageLevel = botStatus?.leverage_level ?? 1;
+  const leverageLevel = botStatus?.leverage_level ?? botStatus?.leverage ?? 1;
   const activeStrategiesCount = botStatus?.active_strategies_count ?? 0;
   const uptimeSeconds = botStatus?.uptime_seconds ?? 0;
 
