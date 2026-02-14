@@ -1,8 +1,13 @@
 -- ═══════════════════════════════════════════════════════════════════
--- Fix Delta Exchange P&L calculations (retroactive)
+-- Fix Delta Exchange P&L calculations (retroactive) — v2
 --
--- Problem: P&L was calculated using raw contract count as if it were
--- coin amount. 1 contract ETH/USD = 0.01 ETH, not 1 ETH.
+-- Problems fixed:
+--   1. P&L was calculated using raw contract count as if it were
+--      coin amount.  1 contract ETH/USD = 0.01 ETH, not 1 ETH.
+--   2. Leverage was stored as 5 (old config) — should be 20.
+--   3. Fees were not deducted from P&L.
+--   4. Cost column was wrong (raw notional instead of collateral).
+--   5. bot_status table missing columns for leverage/balance display.
 --
 -- Correct formula:
 --   LONG:  gross_pnl = (exit_price - entry_price) × 0.01 × contracts
@@ -13,12 +18,33 @@
 --
 -- Fee rate: 0.05% taker per side (0.0005 as decimal)
 --
--- Also recalculates pnl_pct as return on collateral:
---   collateral = entry_price × 0.01 × contracts / leverage
+-- pnl_pct = return on COLLATERAL:
+--   collateral = entry_price × contract_size × contracts / leverage
 --   pnl_pct = net_pnl / collateral × 100
 -- ═══════════════════════════════════════════════════════════════════
 
--- Fix LONG trades (ETH) — contract_size = 0.01, fee = 0.05% per side
+-- ─── Step 0: Ensure bot_status has all required columns ──────────
+-- (idempotent — safe to run multiple times)
+ALTER TABLE public.bot_status
+    ADD COLUMN IF NOT EXISTS binance_balance   numeric(20,8),
+    ADD COLUMN IF NOT EXISTS delta_balance     numeric(20,8),
+    ADD COLUMN IF NOT EXISTS delta_balance_inr numeric(20,8),
+    ADD COLUMN IF NOT EXISTS binance_connected boolean NOT NULL DEFAULT false,
+    ADD COLUMN IF NOT EXISTS delta_connected   boolean NOT NULL DEFAULT false,
+    ADD COLUMN IF NOT EXISTS bot_state         text NOT NULL DEFAULT 'running',
+    ADD COLUMN IF NOT EXISTS shorting_enabled  boolean NOT NULL DEFAULT false,
+    ADD COLUMN IF NOT EXISTS leverage          integer NOT NULL DEFAULT 1,
+    ADD COLUMN IF NOT EXISTS active_strategy_count integer NOT NULL DEFAULT 0,
+    ADD COLUMN IF NOT EXISTS uptime_seconds    integer NOT NULL DEFAULT 0;
+
+-- ─── Step 1: Fix leverage from 5 → 20 for ALL Delta trades ───────
+UPDATE trades
+SET leverage = 20
+WHERE exchange = 'delta'
+  AND leverage != 20;
+
+-- ─── Step 2: Fix LONG trades (ETH) ──────────────────────────────
+-- contract_size = 0.01, fee = 0.05% per side, leverage = 20
 UPDATE trades
 SET
     pnl = (exit_price - entry_price) * 0.01 * amount
@@ -39,7 +65,7 @@ WHERE exchange = 'delta'
   AND exit_price IS NOT NULL
   AND (pair LIKE 'ETH%' OR pair LIKE '%ETH%');
 
--- Fix SHORT trades (ETH)
+-- ─── Step 3: Fix SHORT trades (ETH) ─────────────────────────────
 UPDATE trades
 SET
     pnl = (entry_price - exit_price) * 0.01 * amount
@@ -60,7 +86,7 @@ WHERE exchange = 'delta'
   AND exit_price IS NOT NULL
   AND (pair LIKE 'ETH%' OR pair LIKE '%ETH%');
 
--- Fix LONG trades (BTC) — contract_size = 0.001
+-- ─── Step 4: Fix LONG trades (BTC) — contract_size = 0.001 ──────
 UPDATE trades
 SET
     pnl = (exit_price - entry_price) * 0.001 * amount
@@ -81,7 +107,7 @@ WHERE exchange = 'delta'
   AND exit_price IS NOT NULL
   AND (pair LIKE 'BTC%' OR pair LIKE '%BTC%');
 
--- Fix SHORT trades (BTC)
+-- ─── Step 5: Fix SHORT trades (BTC) ─────────────────────────────
 UPDATE trades
 SET
     pnl = (entry_price - exit_price) * 0.001 * amount
@@ -102,7 +128,7 @@ WHERE exchange = 'delta'
   AND exit_price IS NOT NULL
   AND (pair LIKE 'BTC%' OR pair LIKE '%BTC%');
 
--- Also fix the cost column (should be collateral, not raw notional)
+-- ─── Step 6: Fix cost column (should be collateral) ─────────────
 UPDATE trades
 SET cost = entry_price * 0.01 * amount / GREATEST(leverage, 1)
 WHERE exchange = 'delta'
@@ -115,16 +141,50 @@ WHERE exchange = 'delta'
   AND (pair LIKE 'BTC%' OR pair LIKE '%BTC%')
   AND entry_price IS NOT NULL;
 
--- ═══════════════════════════════════════════════════════════════════
--- Zero out Binance dust trades — they were never properly closed
--- ═══════════════════════════════════════════════════════════════════
+-- ─── Step 7: Zero out Binance dust trades ────────────────────────
 UPDATE trades
 SET pnl = 0, pnl_pct = 0
 WHERE exchange = 'binance'
   AND status = 'closed';
 
--- Also mark any remaining Binance open trades as closed (dust)
+-- Mark remaining Binance open trades as closed (dust)
 UPDATE trades
 SET status = 'closed', reason = 'dust_zeroed_v2'
 WHERE exchange = 'binance'
   AND status = 'open';
+
+-- ─── Step 8: Fix v_futures_positions view ────────────────────────
+-- Remove leveraged_pnl/leveraged_pnl_pct — pnl is already the real dollar P&L
+CREATE OR REPLACE VIEW public.v_futures_positions AS
+SELECT
+    id, opened_at, closed_at, pair, side,
+    entry_price, exit_price, amount, cost,
+    leverage, position_type,
+    pnl, pnl_pct, status, reason
+FROM   public.trades
+WHERE  position_type IN ('long', 'short')
+ORDER  BY opened_at DESC;
+
+-- ─── Step 9: Refresh v_bot_latest_status view ────────────────────
+CREATE OR REPLACE VIEW public.v_bot_latest_status AS
+SELECT *
+FROM   public.bot_status
+ORDER  BY timestamp DESC
+LIMIT  1;
+
+-- ═══════════════════════════════════════════════════════════════════
+-- Verify: After running, check the results:
+-- SELECT pair, position_type, entry_price, exit_price, amount,
+--        leverage, pnl, pnl_pct, cost
+-- FROM trades
+-- WHERE exchange = 'delta' AND status = 'closed'
+-- ORDER BY opened_at DESC;
+--
+-- Expected for Trade 1 (buy 2069.55, sell 2073.85, 1 contract ETH):
+--   gross = (2073.85 - 2069.55) * 0.01 * 1 = $0.0430
+--   entry_fee = 2069.55 * 0.01 * 0.0005 = $0.01035
+--   exit_fee  = 2073.85 * 0.01 * 0.0005 = $0.01037
+--   net_pnl = 0.0430 - 0.01035 - 0.01037 = $0.0223
+--   collateral = 2069.55 * 0.01 / 20 = $1.035
+--   pnl_pct = 0.0223 / 1.035 * 100 = 2.15%
+-- ═══════════════════════════════════════════════════════════════════

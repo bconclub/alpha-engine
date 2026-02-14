@@ -56,8 +56,8 @@ export function LiveStatusBar() {
   const totalCapital = (binanceBalance + deltaBalance) || botStatus?.capital || 0;
 
   const shortingEnabled = botStatus?.shorting_enabled ?? false;
-  const leverageLevel = botStatus?.leverage_level ?? botStatus?.leverage ?? 1;
-  const activeStrategiesCount = botStatus?.active_strategies_count ?? 0;
+  const leverageLevel = botStatus?.leverage ?? botStatus?.leverage_level ?? 1;
+  const activeStrategiesCount = botStatus?.active_strategy_count ?? botStatus?.active_strategies_count ?? 0;
   const uptimeSeconds = botStatus?.uptime_seconds ?? 0;
 
   // Total P&L from bot status

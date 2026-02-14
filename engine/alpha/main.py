@@ -67,6 +67,7 @@ class AlphaBot:
 
         # Shutdown flag
         self._running = False
+        self._start_time: float = 0.0  # monotonic time for uptime calc
 
         # Suppress strategy-change alerts on the very first analysis cycle
         self._has_run_first_cycle: bool = False
@@ -212,6 +213,7 @@ class AlphaBot:
 
         # Register shutdown signals
         self._running = True
+        self._start_time = time.monotonic()
         if sys.platform != "win32":
             loop = asyncio.get_running_loop()
             for sig in (signal.SIGTERM, signal.SIGINT):
@@ -654,6 +656,7 @@ class AlphaBot:
             "shorting_enabled": config.delta.enable_shorting,
             "leverage": config.delta.leverage,
             "active_strategy_count": active_count,
+            "uptime_seconds": int(time.monotonic() - self._start_time) if self._start_time else 0,
         }
         await self.db.save_bot_status(status)
 

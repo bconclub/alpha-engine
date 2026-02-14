@@ -10,8 +10,17 @@ export function formatCurrency(value: number): string {
   }).format(value);
 }
 
+/** Format P&L with adaptive precision — small values get more decimals */
 export function formatPnL(value: number): string {
-  const formatted = formatCurrency(Math.abs(value));
+  const abs = Math.abs(value);
+  // For tiny P&L (< $1), show 4 decimal places to avoid rounding to $0.00
+  const decimals = abs > 0 && abs < 1 ? 4 : 2;
+  const formatted = new Intl.NumberFormat('en-US', {
+    style: 'currency',
+    currency: 'USD',
+    minimumFractionDigits: decimals,
+    maximumFractionDigits: decimals,
+  }).format(abs);
   return value >= 0 ? `+${formatted}` : `-${formatted}`;
 }
 

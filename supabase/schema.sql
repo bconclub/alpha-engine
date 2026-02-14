@@ -128,6 +128,21 @@ create table if not exists public.bot_status (
     capital           numeric(20,8) not null default 0,
     pair              text         not null default 'BTC/USDT',
 
+    -- Exchange balances
+    binance_balance   numeric(20,8),
+    delta_balance     numeric(20,8),
+    delta_balance_inr numeric(20,8),
+    binance_connected boolean      not null default false,
+    delta_connected   boolean      not null default false,
+
+    -- Bot state
+    bot_state         text         not null default 'running'
+        check (bot_state in ('running', 'paused', 'error')),
+    shorting_enabled  boolean      not null default false,
+    leverage          integer      not null default 1,
+    active_strategy_count integer  not null default 0,
+    uptime_seconds    integer      not null default 0,
+
     -- Flags
     is_running        boolean      not null default true,
     is_paused         boolean      not null default false,
@@ -287,14 +302,14 @@ where  status = 'open'
 order  by opened_at desc;
 
 -- Futures positions only (open + closed)
+-- NOTE: pnl is already the actual dollar P&L (no need to multiply by leverage).
+-- pnl_pct is return on collateral (already accounts for leverage).
 create or replace view public.v_futures_positions as
 select
     id, opened_at, closed_at, pair, side,
     entry_price, exit_price, amount, cost,
     leverage, position_type,
-    pnl, pnl_pct, status, reason,
-    round((pnl * leverage)::numeric, 8) as leveraged_pnl,
-    round((pnl_pct * leverage)::numeric, 4) as leveraged_pnl_pct
+    pnl, pnl_pct, status, reason
 from   public.trades
 where  position_type in ('long', 'short')
 order  by opened_at desc;
