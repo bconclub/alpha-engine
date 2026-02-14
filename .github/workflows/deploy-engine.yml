@@ -21,6 +21,12 @@ jobs:
           script: |
             set -e
 
+            # First-time setup: clone if repo doesn't exist yet
+            if [ ! -d /root/alpha ]; then
+              echo ">>> First deploy — cloning repo..."
+              git clone https://github.com/bconclub/alpha.git /root/alpha
+            fi
+
             echo ">>> Pulling latest code..."
             cd /root/alpha
             git pull origin main
@@ -29,13 +35,21 @@ jobs:
             cd engine
             pip3 install -r requirements.txt --break-system-packages --quiet
 
+            # Install systemd service if not already present
+            if [ ! -f /etc/systemd/system/alpha-bot.service ]; then
+              echo ">>> Installing systemd service..."
+              cp alpha-bot.service /etc/systemd/system/alpha-bot.service
+              systemctl daemon-reload
+              systemctl enable alpha-bot
+            fi
+
             echo ">>> Restarting alpha-bot service..."
-            sudo systemctl restart alpha-bot
+            systemctl restart alpha-bot
 
             echo ">>> Waiting 5s for startup..."
             sleep 5
 
             echo ">>> Checking service status..."
-            sudo systemctl status alpha-bot --no-pager
+            systemctl status alpha-bot --no-pager
 
             echo ">>> Deploy complete."
