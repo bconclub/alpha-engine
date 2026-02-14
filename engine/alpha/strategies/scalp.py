@@ -33,11 +33,11 @@ logger = setup_logger("scalp")
 
 class ScalpStrategy(BaseStrategy):
     """
-    Aggressive scalping overlay — runs alongside primary strategies.
+    Scalping overlay — runs alongside primary strategies.
 
     Entry (2 of 3 conditions required):
-      LONG:  2 of [RSI(14) < 45, price within 0.5% of lower BB(20,2), volume > 0.8x avg]
-      SHORT: 2 of [RSI(14) > 55, price within 0.5% of upper BB(20,2), volume > 0.8x avg]
+      LONG:  2 of [RSI(14) < 40, price within 0.5% of lower BB(20,2), volume > 0.8x avg]
+      SHORT: 2 of [RSI(14) > 60, price within 0.5% of upper BB(20,2), volume > 0.8x avg]
       Extreme RSI (<30 / >70) enters regardless — bypasses all conditions.
 
     Momentum Burst:
@@ -47,13 +47,14 @@ class ScalpStrategy(BaseStrategy):
       After SL hit, immediately check for opposite direction entry.
 
     Exit:
-      - TP: 0.25%
-      - SL: 0.15%
-      - Trailing: after 0.1% profit, trail at 0.1%
-      - Time: force close after 10 minutes
+      - TP: 1.5% price move (= 7.5% on capital at 5x leverage)
+      - SL: 0.75% (= 3.75% on capital at 5x)
+      - Trailing: activate at 0.80%, trail at 0.40%
+      - Time: force close after 45 minutes
+      - Risk/reward: 2:1 — need 34% win rate to profit
 
     Risk:
-      - 30% of capital per scalp
+      - 30% of capital per scalp (futures), 50% spot
       - Max 2 positions per pair, max 4 total
       - Max 30 trades/hour, pause 15min after 5 consecutive losses
       - Separate 5% daily scalp loss limit
@@ -62,24 +63,25 @@ class ScalpStrategy(BaseStrategy):
     name = StrategyName.SCALP
     check_interval_sec = 10  # 10 second ticks (aggressive)
 
-    # Entry thresholds (loosened for more trades)
-    RSI_LONG_ENTRY = 45       # was 38
-    RSI_SHORT_ENTRY = 55      # was 62
-    RSI_EXTREME_LONG = 30     # bypass volume check
-    RSI_EXTREME_SHORT = 70    # bypass volume check
-    VOL_RATIO_MIN = 0.8       # was 1.2
-    BB_PROXIMITY_PCT = 0.5    # within 0.5% of BB (was touching)
+    # Entry thresholds (tighter RSI = fewer but higher-quality entries)
+    RSI_LONG_ENTRY = 40       # tightened from 45 for stronger signals
+    RSI_SHORT_ENTRY = 60      # tightened from 55 for stronger signals
+    RSI_EXTREME_LONG = 30     # bypass all conditions
+    RSI_EXTREME_SHORT = 70    # bypass all conditions
+    VOL_RATIO_MIN = 0.8       # volume above 80% of average
+    BB_PROXIMITY_PCT = 0.5    # within 0.5% of BB
 
     # Momentum burst detection
     BURST_PRICE_PCT = 0.3     # 0.3% move in 1 candle
     BURST_VOL_RATIO = 2.0     # 2x average volume
 
-    # Exit thresholds (tighter for faster trades)
-    TAKE_PROFIT_PCT = 0.25    # was 0.4%
-    STOP_LOSS_PCT = 0.15      # was 0.2%
-    TRAILING_ACTIVATE_PCT = 0.1   # start trailing after 0.1% (was 0.2%)
-    TRAILING_DISTANCE_PCT = 0.1   # trail at 0.1% (was 0.15%)
-    MAX_HOLD_SECONDS = 10 * 60    # 10 minutes (was 15)
+    # Exit thresholds (wider for 2:1 R/R — need 34% win rate to profit)
+    # At 5x leverage: 1.5% price = 7.5% on capital, 0.75% price = 3.75% on capital
+    TAKE_PROFIT_PCT = 1.5     # 1.5% price move TP
+    STOP_LOSS_PCT = 0.75      # 0.75% price move SL (2:1 R/R)
+    TRAILING_ACTIVATE_PCT = 0.80  # start trailing after 0.80% profit
+    TRAILING_DISTANCE_PCT = 0.40  # trail at 0.40% from high/low
+    MAX_HOLD_SECONDS = 45 * 60    # 45 minutes (bigger moves need more time)
 
     # Position sizing (spot uses more capital to meet Binance $5 min notional)
     CAPITAL_PCT_SPOT = 50.0      # 50% for spot (Binance $5 minimum)
@@ -274,18 +276,21 @@ class ScalpStrategy(BaseStrategy):
                 )
 
                 if current_price >= tp_price:
+                    cap_pct = pnl_pct * self.leverage
                     signals.append(self._exit_signal(current_price, "long",
-                        f"Scalp TP +{pnl_pct:.3f}% in {int(hold_seconds)}s"))
+                        f"Scalp TP +{pnl_pct:.2f}% price (+{cap_pct:.1f}% capital at {self.leverage}x)"))
                     self._record_scalp_result(pnl_pct, "tp")
                 elif current_price <= trail_stop:
+                    cap_pct = pnl_pct * self.leverage
                     signals.append(self._exit_signal(current_price, "long",
-                        f"Scalp SL {pnl_pct:+.3f}% in {int(hold_seconds)}s"))
-                    self._record_scalp_result(pnl_pct, "sl")
+                        f"Scalp {'trail' if pnl_pct >= self.TRAILING_ACTIVATE_PCT else 'SL'} {pnl_pct:+.2f}% price ({cap_pct:+.1f}% capital at {self.leverage}x)"))
+                    self._record_scalp_result(pnl_pct, "trail" if pnl_pct >= 0 else "sl")
                     self._last_sl_side = "long"
                     self._last_sl_time = time.monotonic()
                 elif hold_seconds >= self.MAX_HOLD_SECONDS:
+                    cap_pct = pnl_pct * self.leverage
                     signals.append(self._exit_signal(current_price, "long",
-                        f"Scalp timeout {pnl_pct:+.3f}% after {int(hold_seconds)}s"))
+                        f"Scalp timeout {pnl_pct:+.2f}% price ({cap_pct:+.1f}% capital) after {int(hold_seconds)}s"))
                     self._record_scalp_result(pnl_pct, "timeout")
 
             elif self.position_side == "short":
@@ -306,18 +311,21 @@ class ScalpStrategy(BaseStrategy):
                 )
 
                 if current_price <= tp_price:
+                    cap_pct = pnl_pct * self.leverage
                     signals.append(self._exit_signal(current_price, "short",
-                        f"Scalp TP +{pnl_pct:.3f}% in {int(hold_seconds)}s"))
+                        f"Scalp TP +{pnl_pct:.2f}% price (+{cap_pct:.1f}% capital at {self.leverage}x)"))
                     self._record_scalp_result(pnl_pct, "tp")
                 elif current_price >= trail_stop:
+                    cap_pct = pnl_pct * self.leverage
                     signals.append(self._exit_signal(current_price, "short",
-                        f"Scalp SL {pnl_pct:+.3f}% in {int(hold_seconds)}s"))
-                    self._record_scalp_result(pnl_pct, "sl")
+                        f"Scalp {'trail' if pnl_pct >= self.TRAILING_ACTIVATE_PCT else 'SL'} {pnl_pct:+.2f}% price ({cap_pct:+.1f}% capital at {self.leverage}x)"))
+                    self._record_scalp_result(pnl_pct, "trail" if pnl_pct >= 0 else "sl")
                     self._last_sl_side = "short"
                     self._last_sl_time = time.monotonic()
                 elif hold_seconds >= self.MAX_HOLD_SECONDS:
+                    cap_pct = pnl_pct * self.leverage
                     signals.append(self._exit_signal(current_price, "short",
-                        f"Scalp timeout {pnl_pct:+.3f}% after {int(hold_seconds)}s"))
+                        f"Scalp timeout {pnl_pct:+.2f}% price ({cap_pct:+.1f}% capital) after {int(hold_seconds)}s"))
                     self._record_scalp_result(pnl_pct, "timeout")
 
         # ── No position: check entry ─────────────────────────────────────
@@ -591,10 +599,20 @@ class ScalpStrategy(BaseStrategy):
         self._hourly_trades.append(time.time())
 
     def _record_scalp_result(self, pnl_pct: float, exit_type: str) -> None:
-        # Actual dollar P&L based on entry amount and price change
-        actual_pnl = self.entry_price * self.entry_amount * (pnl_pct / 100)
-        self.hourly_pnl += actual_pnl
-        self._daily_scalp_loss += actual_pnl if actual_pnl < 0 else 0
+        # Gross P&L = price change * notional (entry_amount is coin qty)
+        notional = self.entry_price * self.entry_amount
+        gross_pnl = notional * (pnl_pct / 100)
+
+        # Estimate trading fees (entry + exit): ~0.05% per side on Delta, ~0.1% on Binance
+        fee_rate = 0.001 if self._exchange_id == "delta" else 0.002  # round-trip
+        est_fees = notional * fee_rate
+        net_pnl = gross_pnl - est_fees
+
+        # Capital P&L % (leveraged)
+        capital_pnl_pct = pnl_pct * self.leverage
+
+        self.hourly_pnl += net_pnl
+        self._daily_scalp_loss += net_pnl if net_pnl < 0 else 0
 
         if pnl_pct >= 0:
             self.hourly_wins += 1
@@ -603,9 +621,19 @@ class ScalpStrategy(BaseStrategy):
             self.hourly_losses += 1
             self._consecutive_losses += 1
 
+        # Duration in human-readable format
+        hold_sec = int(time.monotonic() - self.entry_time)
+        if hold_sec >= 60:
+            duration = f"{hold_sec // 60}m{hold_sec % 60:02d}s"
+        else:
+            duration = f"{hold_sec}s"
+
         self.logger.info(
-            "[%s] Scalp %s %+.3f%% (%s) — W/L=%d/%d, streak=%d, daily=$%.4f",
-            self.pair, self.position_side, pnl_pct, exit_type,
+            "[%s] SCALP CLOSED — %s hit %+.2f%% price (%+.2f%% capital at %dx) | "
+            "Gross=$%.4f, Net=$%.4f (fees~$%.4f) | Duration: %s | "
+            "W/L=%d/%d, streak=%d, daily=$%.4f",
+            self.pair, exit_type.upper(), pnl_pct, capital_pnl_pct, self.leverage,
+            gross_pnl, net_pnl, est_fees, duration,
             self.hourly_wins, self.hourly_losses,
             self._consecutive_losses, self._daily_scalp_loss,
         )
