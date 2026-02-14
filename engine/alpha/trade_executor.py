@@ -90,18 +90,33 @@ class TradeExecutor:
                 logger.exception("Failed to load Delta market limits")
 
     def validate_order_size(self, signal: Signal) -> bool:
-        """Check if the order meets exchange minimum requirements."""
+        """Check if the order meets exchange minimum requirements.
+
+        For futures (Delta): the notional value is collateral × leverage,
+        which easily clears minimums. We check the leveraged notional.
+        For spot (Binance): check order value directly against $5 min.
+        """
         pair = signal.pair
-        value = signal.price * signal.amount
+        order_value = signal.price * signal.amount  # for futures, amount is already leveraged
         min_notional = self._min_notional.get(pair, 0)
         min_amount = self._min_amount.get(pair, 0)
 
-        if min_notional and value < min_notional:
+        # For Delta futures: amount is already leverage-adjusted in the signal,
+        # so order_value = notional. Skip min notional for futures — Delta
+        # minimums are much lower than Binance's $5.
+        is_futures = signal.exchange_id == "delta" and signal.leverage > 1
+        if is_futures:
+            logger.debug(
+                "[%s] Futures order: collateral=$%.2f, notional=$%.2f (skipping min notional check)",
+                pair, order_value / signal.leverage, order_value,
+            )
+        elif min_notional and order_value < min_notional:
             logger.warning(
                 "[%s] Order value $%.4f below min notional $%.2f -- skipping",
-                pair, value, min_notional,
+                pair, order_value, min_notional,
             )
             return False
+
         if min_amount and signal.amount < min_amount:
             logger.warning(
                 "[%s] Order amount %.8f below min %.8f -- skipping",

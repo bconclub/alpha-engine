@@ -81,8 +81,9 @@ class ScalpStrategy(BaseStrategy):
     TRAILING_DISTANCE_PCT = 0.1   # trail at 0.1% (was 0.15%)
     MAX_HOLD_SECONDS = 10 * 60    # 10 minutes (was 15)
 
-    # Position sizing
-    CAPITAL_PCT = 30.0        # 30% per scalp (was 40%)
+    # Position sizing (spot uses more capital to meet Binance $5 min notional)
+    CAPITAL_PCT_SPOT = 50.0      # 50% for spot (Binance $5 minimum)
+    CAPITAL_PCT_FUTURES = 30.0   # 30% for futures (leverage handles it)
     MAX_POSITIONS_PER_PAIR = 2   # was 1
     MAX_POSITIONS_TOTAL = 4      # was 2
 
@@ -105,6 +106,7 @@ class ScalpStrategy(BaseStrategy):
         self.trade_exchange: ccxt.Exchange | None = exchange
         self.is_futures = is_futures
         self.leverage: int = min(config.delta.leverage, 10) if is_futures else 1
+        self.capital_pct: float = self.CAPITAL_PCT_FUTURES if is_futures else self.CAPITAL_PCT_SPOT
 
         # Position state
         self.in_position = False
@@ -143,12 +145,11 @@ class ScalpStrategy(BaseStrategy):
         self._last_heartbeat = time.monotonic()
         tag = f"{self.leverage}x futures" if self.is_futures else "spot"
         self.logger.info(
-            "[%s] Scalp ACTIVE (%s) — tick=%ds, "
-            "LONG RSI<%d + BB<%.1f%% + Vol>%.1fx, SHORT RSI>%d + BB + Vol>%.1fx, "
+            "[%s] Scalp ACTIVE (%s, %.0f%% capital) — tick=%ds, "
+            "2-of-3: RSI<%d BB<%.1f%% Vol>%.1fx, "
             "TP=%.2f%% SL=%.2f%% | burst=%.1f%% @ %.1fx vol",
-            self.pair, tag, self.check_interval_sec,
+            self.pair, tag, self.capital_pct, self.check_interval_sec,
             self.RSI_LONG_ENTRY, self.BB_PROXIMITY_PCT, self.VOL_RATIO_MIN,
-            self.RSI_SHORT_ENTRY, self.VOL_RATIO_MIN,
             self.TAKE_PROFIT_PCT, self.STOP_LOSS_PCT,
             self.BURST_PRICE_PCT, self.BURST_VOL_RATIO,
         )
@@ -348,7 +349,7 @@ class ScalpStrategy(BaseStrategy):
             except Exception:
                 pass
 
-            capital = self.risk_manager.capital * (self.CAPITAL_PCT / 100)
+            capital = self.risk_manager.capital * (self.capital_pct / 100)
             amount = capital / current_price
             if self.is_futures:
                 amount *= self.leverage
@@ -499,7 +500,7 @@ class ScalpStrategy(BaseStrategy):
         self._hourly_trades.append(time.time())
 
     def _record_scalp_result(self, pnl_pct: float, exit_type: str) -> None:
-        actual_pnl = self.entry_price * (pnl_pct / 100) * (self.CAPITAL_PCT / 100)
+        actual_pnl = self.entry_price * (pnl_pct / 100) * (self.capital_pct / 100)
         self.hourly_pnl += actual_pnl
         self._daily_scalp_loss += actual_pnl if actual_pnl < 0 else 0
 
@@ -530,7 +531,7 @@ class ScalpStrategy(BaseStrategy):
         self._positions_on_pair = max(0, self._positions_on_pair - 1)
 
     def _exit_signal(self, price: float, side: str, reason: str) -> Signal:
-        capital = self.risk_manager.capital * (self.CAPITAL_PCT / 100)
+        capital = self.risk_manager.capital * (self.capital_pct / 100)
         amount = capital / price
         if self.is_futures:
             amount *= self.leverage
