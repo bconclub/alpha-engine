@@ -180,6 +180,10 @@ class Database:
         result = await loop.run_in_executor(None, _query)
         return result.data
 
+    async def get_all_open_trades(self) -> list[dict[str, Any]]:
+        """Fetch ALL open trades across all pairs and exchanges."""
+        return await self.get_open_trades(pair=None)
+
     # ── Strategy log ─────────────────────────────────────────────────────────
 
     async def log_strategy_selection(self, data: dict[str, Any]) -> None:

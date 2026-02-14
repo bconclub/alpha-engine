@@ -51,14 +51,17 @@ class TradeExecutor:
             return self.delta_exchange
         return self.exchange  # default: Binance
 
-    async def _get_actual_asset_balance(self, signal: Signal) -> float | None:
-        """Fetch the actual balance of the base asset for exit orders.
+    async def _get_spot_exit_amount(self, signal: Signal) -> float | None:
+        """Fetch actual asset balance and truncate to exchange step size for spot exits.
 
-        For selling ETH/USDT: returns how much ETH the account holds.
-        For futures reduce_only: returns None (futures use contract amounts).
+        Trading fees reduce the held amount vs entry amount, so we must sell
+        the ACTUAL balance, not the entry amount.  Truncate (floor) to the
+        exchange's LOT_SIZE step so Binance doesn't reject for precision.
+
+        Returns None for futures (they use reduce_only with contract amounts).
         """
         if signal.reduce_only:
-            return None  # futures — use signal amount directly
+            return None  # futures — amount handled by contract
         try:
             exchange = self._get_exchange(signal)
             balance = await exchange.fetch_balance()
@@ -66,11 +69,31 @@ class TradeExecutor:
             base = signal.pair.split("/")[0] if "/" in signal.pair else signal.pair
             free = float(balance.get("free", {}).get(base, 0) or 0)
             total = float(balance.get("total", {}).get(base, 0) or 0)
-            logger.debug(
-                "[%s] Asset balance: %s free=%.8f, total=%.8f",
-                signal.pair, base, free, total,
+            raw = free if free > 0 else total
+
+            if raw <= 0:
+                logger.warning("[%s] No %s balance found for exit (free=%.8f, total=%.8f)",
+                               signal.pair, base, free, total)
+                return None
+
+            # Truncate to exchange step size using ccxt's precision helper
+            # amount_to_precision uses TRUNCATE mode by default for Binance
+            try:
+                truncated = float(exchange.amount_to_precision(signal.pair, raw))
+            except Exception:
+                # Fallback: manual floor to step size from cached limits
+                step = self._min_amount.get(signal.pair, 0)
+                if step and step > 0:
+                    truncated = math.floor(raw / step) * step
+                else:
+                    truncated = raw
+
+            logger.info(
+                "[%s] Spot exit: %s raw=%.8f → truncated=%.8f (step=%s)",
+                signal.pair, base, raw, truncated,
+                self._min_amount.get(signal.pair, "?"),
             )
-            return free if free > 0 else total
+            return truncated if truncated > 0 else None
         except Exception:
             logger.warning("[%s] Could not fetch asset balance for exit", signal.pair)
             return None
@@ -226,19 +249,31 @@ class TradeExecutor:
         """
         is_exit = self._is_exit_order(signal)
 
-        # For spot exits: use actual asset balance instead of calculated amount
+        # Track whether we should try quoteOrderQty if amount-based sell fails
+        use_quote_fallback = False
+
+        # For spot exits: fetch actual balance (fees reduce held amount)
+        # and truncate to exchange step size
         if is_exit and signal.exchange_id == "binance" and not signal.reduce_only:
-            actual_balance = await self._get_actual_asset_balance(signal)
-            if actual_balance and actual_balance > 0:
-                if abs(actual_balance - signal.amount) / max(signal.amount, 1e-12) > 0.01:
+            actual_amount = await self._get_spot_exit_amount(signal)
+            if actual_amount and actual_amount > 0:
+                logger.info(
+                    "[%s] Exit: entry_amount=%.8f → actual_balance=%.8f (diff from fees)",
+                    signal.pair, signal.amount, actual_amount,
+                )
+                # Check if truncated amount * price < $5 (MIN_NOTIONAL)
+                est_value = actual_amount * signal.price
+                if est_value < 5.0:
+                    # Amount too small for normal sell — will use quoteOrderQty
+                    use_quote_fallback = True
                     logger.info(
-                        "[%s] Exit: adjusting amount from %.8f to actual balance %.8f",
-                        signal.pair, signal.amount, actual_balance,
+                        "[%s] Exit value $%.4f < $5 — will use quoteOrderQty mode",
+                        signal.pair, est_value,
                     )
                 signal = Signal(
                     side=signal.side,
                     price=signal.price,
-                    amount=actual_balance,
+                    amount=actual_amount,
                     order_type=signal.order_type,
                     reason=signal.reason,
                     strategy=signal.strategy,
@@ -289,7 +324,22 @@ class TradeExecutor:
 
         for attempt in range(1, MAX_RETRIES + 1):
             try:
-                if signal.order_type == "market":
+                if use_quote_fallback and is_exit:
+                    # Sell by USDT value — for small balances below MIN_NOTIONAL
+                    # Must NOT pass amount when using quoteOrderQty on Binance
+                    quote_value = round(signal.amount * signal.price, 2)
+                    logger.info(
+                        "[%s] Placing quoteOrderQty sell: $%.2f (amount=%.8f too small for normal sell)",
+                        signal.pair, quote_value, signal.amount,
+                    )
+                    order = await exchange.create_order(
+                        symbol=signal.pair,
+                        type="market",
+                        side="sell",
+                        amount=None,
+                        params={**params, "quoteOrderQty": quote_value},
+                    )
+                elif signal.order_type == "market":
                     order = await exchange.create_order(
                         symbol=signal.pair,
                         type="market",
@@ -331,28 +381,14 @@ class TradeExecutor:
             except ccxt.InvalidOrder as e:
                 last_error = e
                 if is_exit and signal.exchange_id == "binance" and "MIN_NOTIONAL" in str(e).upper():
-                    # Binance rejected exit for min notional — try quoteOrderQty fallback
+                    # Binance rejected exit for min notional — switch to quoteOrderQty
                     logger.warning(
-                        "[%s] Exit rejected for MIN_NOTIONAL — trying quoteOrderQty fallback",
+                        "[%s] Exit rejected for MIN_NOTIONAL — switching to quoteOrderQty mode",
                         signal.pair,
                     )
-                    try:
-                        quote_value = signal.price * signal.amount
-                        order = await exchange.create_order(
-                            symbol=signal.pair,
-                            type="market",
-                            side=signal.side,
-                            amount=signal.amount,
-                            params={**params, "quoteOrderQty": quote_value},
-                        )
-                        break
-                    except Exception as e2:
-                        last_error = e2
-                        logger.warning(
-                            "[%s] quoteOrderQty fallback also failed: %s",
-                            signal.pair, e2,
-                        )
-                        await asyncio.sleep(2)
+                    use_quote_fallback = True
+                    # Don't sleep — immediately retry with quoteOrderQty on next iteration
+                    continue
                 elif is_exit:
                     # Exit: retry all errors
                     logger.warning(

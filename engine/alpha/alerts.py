@@ -337,17 +337,22 @@ class AlertManager:
         binance_balance: float | None = None,
         delta_balance: float | None = None,
     ) -> None:
-        """Hourly report with compact position + P&L info."""
+        """Hourly report with real exchange-verified positions and full portfolio value."""
         if open_positions:
             pos_parts = []
             for p in open_positions:
                 ptype = p.get("position_type", "spot")
                 exch = p.get("exchange", "binance")
                 short = _pair_short(p["pair"])
+                held_value = p.get("held_value")
                 if ptype in ("long", "short"):
-                    pos_parts.append(f"{short} {ptype} on {exch.capitalize()}")
+                    part = f"{short} {ptype} on {exch.capitalize()}"
                 else:
-                    pos_parts.append(f"{short} on {exch.capitalize()}")
+                    part = f"{short} on {exch.capitalize()}"
+                # Show held value if available (from exchange verification)
+                if held_value is not None and held_value > 0:
+                    part += f" ({format_usd(held_value)})"
+                pos_parts.append(part)
             pos_str = f"<code>{len(open_positions)}</code> ({', '.join(pos_parts)})"
         else:
             pos_str = "<code>0</code>"
@@ -373,7 +378,7 @@ class AlertManager:
             f"\U0001f4ca Trades this hour: <code>{hourly_trades}</code> ({hourly_wins}W / {hourly_losses}L)",
             f"\U0001f4b0 Hourly P&amp;L: <code>{h_sign}{format_usd(hourly_pnl)}</code>",
             f"\U0001f4c8 Daily P&amp;L: <code>{d_sign}{format_usd(daily_pnl)}</code>",
-            f"\U0001f4b5 Capital: <code>{format_usd(capital)}</code>",
+            f"\U0001f4b5 Capital: <code>{format_usd(capital)}</code> (USDT + assets)",
             f"   \U0001f7e1 Binance: <code>{_bal(binance_balance)}</code>",
             f"   \U0001f7e0 Delta: <code>{_bal(delta_balance)}</code>",
             f"\U0001f3af Strategies: <code>{strat_line}</code>",

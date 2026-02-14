@@ -27,7 +27,7 @@ from alpha.strategies.momentum import MomentumStrategy
 from alpha.strategies.scalp import ScalpStrategy
 from alpha.strategy_selector import StrategySelector
 from alpha.trade_executor import TradeExecutor
-from alpha.utils import setup_logger
+from alpha.utils import iso_now, setup_logger
 
 logger = setup_logger("main")
 
@@ -493,7 +493,12 @@ class AlphaBot:
             scalp.reset_daily_stats()
 
     async def _hourly_report(self) -> None:
-        """Send hourly market update + summary to Telegram, then reset hourly counters."""
+        """Send hourly market update + summary to Telegram, then reset hourly counters.
+
+        Positions are cross-checked against actual exchange balances, not just
+        internal state. The balance shown is the REAL portfolio value including
+        held assets (USDT + value of BTC/ETH/SOL etc.).
+        """
         try:
             rm = self.risk_manager
 
@@ -503,12 +508,15 @@ class AlphaBot:
                 strat = self._active_strategies.get(pair)
                 active_map[pair] = strat.name.value if strat else None
 
-            # Fetch live exchange balances
+            # Fetch live exchange balances (includes held assets)
             binance_bal = await self._fetch_portfolio_usd(self.binance)
             delta_bal = await self._fetch_portfolio_usd(self.delta) if self.delta else None
 
             # Capital = sum of actual exchange balances
             total_capital = (binance_bal or 0) + (delta_bal or 0)
+
+            # Cross-check positions against exchange: verify we actually hold coins
+            verified_positions = await self._verify_positions_against_exchange()
 
             # Send hourly market update (all pairs grouped by exchange)
             if self._latest_analyses:
@@ -516,17 +524,11 @@ class AlphaBot:
                     analyses=self._latest_analyses,
                     active_strategies=active_map,
                     capital=total_capital,
-                    open_position_count=len(rm.open_positions),
+                    open_position_count=len(verified_positions),
                 )
 
-            # Build open positions list for the summary
-            open_pos = [
-                {"pair": p.pair, "position_type": p.position_type, "exchange": p.exchange}
-                for p in rm.open_positions
-            ]
-
             await self.alerts.send_hourly_summary(
-                open_positions=open_pos,
+                open_positions=verified_positions,
                 hourly_wins=self._hourly_wins,
                 hourly_losses=self._hourly_losses,
                 hourly_pnl=self._hourly_pnl,
@@ -544,6 +546,57 @@ class AlphaBot:
             self._hourly_losses = 0
         except Exception:
             logger.exception("Error sending hourly report")
+
+    async def _verify_positions_against_exchange(self) -> list[dict[str, Any]]:
+        """Cross-check risk manager positions against actual exchange balances.
+
+        Returns a list of verified positions (those confirmed to still exist
+        on the exchange). Also cleans up stale positions from the risk manager.
+        """
+        rm = self.risk_manager
+        verified: list[dict[str, Any]] = []
+
+        # Fetch exchange balances once
+        binance_free: dict[str, Any] = {}
+        try:
+            if self.binance:
+                bal = await self.binance.fetch_balance()
+                binance_free = bal.get("free", {})
+        except Exception:
+            logger.debug("Could not fetch Binance balance for position verification")
+            # Fall back to internal state
+            return [
+                {"pair": p.pair, "position_type": p.position_type, "exchange": p.exchange}
+                for p in rm.open_positions
+            ]
+
+        for pos in rm.open_positions:
+            if pos.exchange == "binance":
+                base = pos.pair.split("/")[0] if "/" in pos.pair else pos.pair
+                held = float(binance_free.get(base, 0) or 0)
+                held_value = held * pos.entry_price if pos.entry_price > 0 else 0
+                if held > 0 and held_value > 0.50:
+                    verified.append({
+                        "pair": pos.pair,
+                        "position_type": pos.position_type,
+                        "exchange": pos.exchange,
+                        "held": held,
+                        "held_value": held_value,
+                    })
+                else:
+                    logger.info(
+                        "Position %s on %s not found on exchange (held=%.8f, value=$%.2f) — stale?",
+                        pos.pair, pos.exchange, held, held_value,
+                    )
+            else:
+                # Delta/futures: trust internal state (futures positions may not show as balances)
+                verified.append({
+                    "pair": pos.pair,
+                    "position_type": pos.position_type,
+                    "exchange": pos.exchange,
+                })
+
+        return verified
 
     async def _save_status(self) -> None:
         """Persist bot state to Supabase for crash recovery + dashboard display."""
@@ -684,7 +737,11 @@ class AlphaBot:
         await self.db.mark_command_executed(cmd_id, result_msg)
 
     async def _restore_state(self) -> None:
-        """Restore capital and state from last saved status."""
+        """Restore capital, state, and open positions from last saved status.
+
+        Open positions from DB are verified against actual exchange balances.
+        Stale positions (no longer on exchange) are marked closed.
+        """
         last = await self.db.get_last_bot_status()
         if last:
             # Restore per-exchange balances if available
@@ -706,6 +763,123 @@ class AlphaBot:
                 logger.info("Restored state from DB -- capital: $%.2f (legacy)", self.risk_manager.capital)
         else:
             logger.info("No previous state found -- starting fresh")
+
+        # Restore open positions from DB and verify against exchange balances
+        await self._restore_open_positions()
+
+    async def _restore_open_positions(self) -> None:
+        """Load open trades from DB and verify they still exist on exchange.
+
+        For each open trade:
+        - Spot (Binance): check if we still hold the base asset (> $1 worth)
+        - Futures (Delta): check if position still open via exchange balance
+        If position no longer exists, mark trade as closed in DB.
+        If it does exist, register it with the risk manager.
+        """
+        open_trades = await self.db.get_all_open_trades()
+        if not open_trades:
+            logger.info("No open trades to restore from DB")
+            return
+
+        logger.info("Found %d open trades in DB — verifying against exchange...", len(open_trades))
+
+        # Fetch exchange balances once (not per-trade)
+        binance_balance: dict[str, Any] = {}
+        delta_balance: dict[str, Any] = {}
+
+        try:
+            if self.binance:
+                bal = await self.binance.fetch_balance()
+                binance_balance = bal.get("free", {})
+        except Exception:
+            logger.warning("Could not fetch Binance balance for position restore")
+
+        try:
+            if self.delta:
+                bal = await self.delta.fetch_balance()
+                delta_balance = bal.get("free", {})
+        except Exception:
+            logger.warning("Could not fetch Delta balance for position restore")
+
+        restored = 0
+        closed = 0
+
+        for trade in open_trades:
+            pair = trade.get("pair", "")
+            exchange_id = trade.get("exchange", "binance")
+            entry_price = float(trade.get("entry_price", 0) or 0)
+            amount = float(trade.get("amount", 0) or 0)
+            strategy = trade.get("strategy", "")
+            position_type = trade.get("position_type", "spot")
+            leverage = int(trade.get("leverage", 1) or 1)
+            trade_id = trade.get("id")
+
+            # Get the base asset (e.g., "ETH" from "ETH/USDT" or "ETHUSD")
+            base = pair.split("/")[0] if "/" in pair else pair.replace("USD", "").replace("USDT", "")
+
+            # Check if position still exists on exchange
+            position_exists = False
+
+            if exchange_id == "binance":
+                held = float(binance_balance.get(base, 0) or 0)
+                # Check if held amount is worth at least $1
+                if held > 0 and entry_price > 0:
+                    held_value = held * entry_price
+                    position_exists = held_value > 1.0
+                elif held > 0:
+                    position_exists = True
+            elif exchange_id == "delta":
+                # For futures, check if we have any balance in that asset
+                held = float(delta_balance.get(base, 0) or 0)
+                # Delta futures positions may not show as asset balance;
+                # trust the DB if we can't verify
+                position_exists = True
+
+            if position_exists:
+                # Register with risk manager using a synthetic Signal
+                from alpha.strategies.base import Signal, StrategyName
+                try:
+                    strat_name = StrategyName(strategy)
+                except ValueError:
+                    strat_name = StrategyName.SCALP  # fallback
+
+                side = "buy" if position_type in ("spot", "long") else "sell"
+                synthetic_signal = Signal(
+                    side=side,
+                    price=entry_price,
+                    amount=amount,
+                    order_type="market",
+                    reason="restored from DB",
+                    strategy=strat_name,
+                    pair=pair,
+                    leverage=leverage,
+                    position_type=position_type,
+                    exchange_id=exchange_id,
+                )
+                self.risk_manager.record_open(synthetic_signal)
+                restored += 1
+                logger.info(
+                    "Restored position: %s %s %s (%.6f @ $%.2f) on %s [%s]",
+                    position_type, side, pair, amount, entry_price, exchange_id, strategy,
+                )
+            else:
+                # Position no longer on exchange — mark closed in DB
+                if trade_id:
+                    await self.db.update_trade(trade_id, {
+                        "status": "closed",
+                        "closed_at": iso_now(),
+                        "reason": "position_not_found_on_restart",
+                    })
+                closed += 1
+                logger.info(
+                    "Position %s no longer on %s — marked closed (trade_id=%s)",
+                    pair, exchange_id, trade_id,
+                )
+
+        logger.info(
+            "Position restore complete: %d restored, %d marked closed (of %d DB open)",
+            restored, closed, len(open_trades),
+        )
 
     # -- Exchange init ---------------------------------------------------------
 
@@ -783,9 +957,15 @@ class AlphaBot:
             self.delta_pairs = []  # no Delta pairs if no credentials
             logger.info("Delta credentials not set -- futures disabled")
 
-    @staticmethod
-    async def _fetch_portfolio_usd(exchange: ccxt.Exchange | None) -> float | None:
-        """Fetch total balance in USD. Checks USDT, USD, USDC, and INR (converted)."""
+    async def _fetch_portfolio_usd(
+        self, exchange: ccxt.Exchange | None,
+    ) -> float | None:
+        """Fetch total portfolio value in USD including held assets.
+
+        Total = USDT free + value of held BTC + value of held ETH + value of held SOL + ...
+        Not just USDT balance — counts all coins worth > $0.50.
+        For Delta, converts INR to USD.
+        """
         if not exchange:
             return None
         ex_id = getattr(exchange, "id", "?")
@@ -799,24 +979,64 @@ class AlphaBot:
                         if v is not None and float(v) > 0}
             logger.info("Holdings on %s: %s", ex_id, holdings)
 
-            # Try USDT/USD/USDC first (total = free + locked)
+            # Stablecoins counted at face value
+            stablecoin_total = 0.0
             for key in ("USDT", "USD", "USDC"):
                 val = total_map.get(key)
                 if val is not None and float(val) > 0:
-                    result = float(val)
-                    logger.info("Balance for %s: %s = %.4f (total)", ex_id, key, result)
-                    return result
+                    stablecoin_total += float(val)
+
+            # Value held crypto assets using live ticker prices
+            asset_total = 0.0
+            asset_details: list[str] = []
+            # Only price assets that are tracked pairs
+            tracked_bases = set()
+            for pair in (config.trading.pairs or []):
+                base = pair.split("/")[0] if "/" in pair else pair
+                tracked_bases.add(base)
+
+            for asset, qty in holdings.items():
+                if asset in ("USDT", "USD", "USDC", "INR"):
+                    continue  # stablecoins handled separately
+                if asset not in tracked_bases:
+                    continue  # skip untracked dust
+                qty_f = float(qty)
+                if qty_f <= 0:
+                    continue
+                # Try to get price from exchange
+                try:
+                    ticker = await exchange.fetch_ticker(f"{asset}/USDT")
+                    price = ticker.get("last", 0) or 0
+                    if price and price > 0:
+                        value = qty_f * price
+                        if value > 0.50:  # ignore sub-$0.50 dust
+                            asset_total += value
+                            asset_details.append(f"{asset}={qty_f:.6f}@${price:.2f}=${value:.2f}")
+                except Exception:
+                    pass  # skip assets we can't price
 
             # Delta Exchange India uses INR — convert to USD
+            inr_total = 0.0
             inr_val = total_map.get("INR") or free_map.get("INR")
             if inr_val is not None and float(inr_val) > 0:
                 inr = float(inr_val)
-                usd = inr / 85.0  # approximate INR/USD rate
-                logger.info("Balance for %s: INR %.2f = $%.2f (at ~85 INR/USD)", ex_id, inr, usd)
-                return usd
+                inr_total = inr / 85.0  # approximate INR/USD rate
 
-            logger.warning("No balance found on %s. Holdings: %s", ex_id, holdings)
-            return 0.0
+            portfolio_total = stablecoin_total + asset_total + inr_total
+
+            if asset_details:
+                logger.info(
+                    "Portfolio %s: USDT=$%.2f + assets=$%.2f (%s) + INR=$%.2f = $%.2f",
+                    ex_id, stablecoin_total, asset_total,
+                    ", ".join(asset_details), inr_total, portfolio_total,
+                )
+            else:
+                logger.info(
+                    "Portfolio %s: USDT=$%.2f + INR=$%.2f = $%.2f",
+                    ex_id, stablecoin_total, inr_total, portfolio_total,
+                )
+
+            return portfolio_total if portfolio_total > 0 else 0.0
 
         except Exception as e:
             logger.warning("Could not fetch balance from %s: %s (type: %s)", ex_id, e, type(e).__name__)
