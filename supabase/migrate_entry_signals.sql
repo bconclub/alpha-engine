@@ -16,9 +16,12 @@ alter table public.bot_status
     add column if not exists delta_balance_inr numeric(20,2),
     add column if not exists uptime_seconds    integer not null default 0;
 
--- ── 3. Recreate v_strategy_latest to include new columns ──
+-- ── 3. DROP and recreate v_strategy_latest with new columns ──
+-- (CREATE OR REPLACE cannot change column order/names)
 
-create or replace view public.v_strategy_latest as
+drop view if exists public.v_strategy_latest;
+
+create view public.v_strategy_latest as
 select distinct on (pair)
     id, timestamp, pair, exchange,
     market_condition, strategy_selected, reason,
