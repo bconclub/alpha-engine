@@ -246,31 +246,41 @@ function SupabaseProviderInner({ children }: { children: ReactNode }) {
 
     async function fetchInitialData() {
       try {
-        const [tradesRes, botStatusRes, strategyLogRes] = await Promise.all([
+        const [tradesRes, botStatusRes, strategyLogRes, latestPerPairRes] = await Promise.all([
           // trades table uses opened_at, not timestamp
           client!.from('trades').select('*').order('opened_at', { ascending: false }).limit(500),
           // bot_status uses created_at
           client!.from('bot_status').select('*').order('created_at', { ascending: false }).limit(1),
-          // strategy_log uses created_at — fetch enough rows to cover all 4 pairs
+          // strategy_log — recent history for activity feed & charts
           client!.from('strategy_log').select('*').order('created_at', { ascending: false }).limit(200),
+          // latest_strategy_log view — guaranteed 1 row per pair+exchange (for MarketOverview)
+          client!.from('latest_strategy_log').select('*'),
         ]);
 
         if (tradesRes.error) console.error('[Alpha] trades query error:', tradesRes.error.message);
         if (botStatusRes.error) console.error('[Alpha] bot_status query error:', botStatusRes.error.message);
         if (strategyLogRes.error) console.error('[Alpha] strategy_log query error:', strategyLogRes.error.message);
+        if (latestPerPairRes.error) console.warn('[Alpha] latest_strategy_log view error:', latestPerPairRes.error.message);
 
         // Normalize all data (map DB column names → app types)
         const tradeData = (tradesRes.data ?? []).map(normalizeTrade);
         const logData = (strategyLogRes.data ?? []).map(normalizeStrategyLog);
 
-        console.log(`[Alpha] Fetched: ${tradeData.length} trades, ${logData.length} strategy logs, ${botStatusRes.data?.length ?? 0} bot status`);
+        // Merge: prepend latest-per-pair rows so MarketOverview always sees all pairs
+        // Deduplicate by id — view rows may already be in the 200-row fetch
+        const seenIds = new Set(logData.map(l => l.id));
+        const latestRows = (latestPerPairRes.data ?? []).map(normalizeStrategyLog);
+        const extraRows = latestRows.filter(r => !seenIds.has(r.id));
+        const mergedLogs = [...logData, ...extraRows];
+
+        console.log(`[Alpha] Fetched: ${tradeData.length} trades, ${mergedLogs.length} strategy logs (${extraRows.length} from view), ${botStatusRes.data?.length ?? 0} bot status`);
 
         setTrades(tradeData);
         if (botStatusRes.data && botStatusRes.data.length > 0) {
           setBotStatus(normalizeBotStatus(botStatusRes.data[0]));
         }
-        setStrategyLog(logData);
-        buildInitialFeed(tradeData, logData);
+        setStrategyLog(mergedLogs);
+        buildInitialFeed(tradeData, mergedLogs);
       } catch (err) {
         console.error('[Alpha] fetchInitialData failed:', err);
       }
@@ -282,13 +292,22 @@ function SupabaseProviderInner({ children }: { children: ReactNode }) {
     // Poll every 60s as fallback (realtime may disconnect silently)
     const pollInterval = setInterval(async () => {
       try {
-        const logRes = await client!.from('strategy_log').select('*').order('created_at', { ascending: false }).limit(200);
-        if (logRes.data) setStrategyLog(logRes.data.map(normalizeStrategyLog));
+        const [logRes, latestRes, statusRes, tradesRes] = await Promise.all([
+          client!.from('strategy_log').select('*').order('created_at', { ascending: false }).limit(200),
+          client!.from('latest_strategy_log').select('*'),
+          client!.from('bot_status').select('*').order('created_at', { ascending: false }).limit(1),
+          client!.from('trades').select('*').order('opened_at', { ascending: false }).limit(500),
+        ]);
 
-        const statusRes = await client!.from('bot_status').select('*').order('created_at', { ascending: false }).limit(1);
+        if (logRes.data) {
+          const logs = logRes.data.map(normalizeStrategyLog);
+          // Merge latest-per-pair so all pairs always appear
+          const seenIds = new Set(logs.map(l => l.id));
+          const extra = (latestRes.data ?? []).map(normalizeStrategyLog).filter(r => !seenIds.has(r.id));
+          setStrategyLog([...logs, ...extra]);
+        }
+
         if (statusRes.data && statusRes.data.length > 0) setBotStatus(normalizeBotStatus(statusRes.data[0]));
-
-        const tradesRes = await client!.from('trades').select('*').order('opened_at', { ascending: false }).limit(500);
         if (tradesRes.data) setTrades(tradesRes.data.map(normalizeTrade));
       } catch (e) { console.warn('[Alpha] Poll refresh failed', e); }
 
