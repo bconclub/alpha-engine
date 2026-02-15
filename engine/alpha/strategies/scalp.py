@@ -867,10 +867,14 @@ class ScalpStrategy(BaseStrategy):
                     )
 
             # ── 4. TIMEOUT ──────────────────────────────────────────────
-            if hold_seconds >= self.MAX_HOLD_SECONDS:
+            # Never kill a winning trade with a clock.
+            # If trailing is active, the trail IS the exit — no timeout.
+            if hold_seconds >= self.MAX_HOLD_SECONDS and not self._trailing_active:
                 return self._do_exit(current_price, pnl_pct, "long", "TIMEOUT", hold_seconds)
 
             # ── 5. FLATLINE ─────────────────────────────────────────────
+            # Flatline still applies even to trailing trades — if price
+            # hasn't moved 0.10% in 15 min, momentum is dead.
             if hold_seconds >= self.FLATLINE_SECONDS and abs(pnl_pct) < self.FLATLINE_MIN_MOVE_PCT:
                 return self._do_exit(current_price, pnl_pct, "long", "FLAT", hold_seconds)
 
@@ -941,10 +945,14 @@ class ScalpStrategy(BaseStrategy):
                     )
 
             # ── 4. TIMEOUT ──────────────────────────────────────────────
-            if hold_seconds >= self.MAX_HOLD_SECONDS:
+            # Never kill a winning trade with a clock.
+            # If trailing is active, the trail IS the exit — no timeout.
+            if hold_seconds >= self.MAX_HOLD_SECONDS and not self._trailing_active:
                 return self._do_exit(current_price, pnl_pct, "short", "TIMEOUT", hold_seconds)
 
             # ── 5. FLATLINE ─────────────────────────────────────────────
+            # Flatline still applies even to trailing trades — if price
+            # hasn't moved 0.10% in 15 min, momentum is dead.
             if hold_seconds >= self.FLATLINE_SECONDS and abs(pnl_pct) < self.FLATLINE_MIN_MOVE_PCT:
                 return self._do_exit(current_price, pnl_pct, "short", "FLAT", hold_seconds)
 

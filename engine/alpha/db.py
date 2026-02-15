@@ -101,18 +101,32 @@ class Database:
     async def update_trade(self, trade_id: int, data: dict[str, Any]) -> None:
         """Update an existing trade row by its Supabase row ID."""
         if not self.is_connected:
+            logger.warning("update_trade: DB not connected, skipping id=%s data=%s", trade_id, data)
             return
         loop = asyncio.get_running_loop()
-        await loop.run_in_executor(
-            None,
-            lambda: (
+
+        def _do_update() -> Any:
+            result = (
                 self._client.table(self.TABLE_TRADES)  # type: ignore[union-attr]
                 .update(data)
                 .eq("id", trade_id)
                 .execute()
-            ),
-        )
-        logger.debug("Trade updated: id=%d, data=%s", trade_id, data)
+            )
+            # Verify the update actually matched a row
+            if not result.data:
+                logger.error(
+                    "update_trade: NO ROWS UPDATED for id=%s — data=%s (row may not exist or RLS blocked)",
+                    trade_id, data,
+                )
+            else:
+                row = result.data[0]
+                logger.info(
+                    "update_trade OK: id=%s status=%s pnl=%s pnl_pct=%s exit_price=%s",
+                    trade_id, row.get("status"), row.get("pnl"), row.get("pnl_pct"), row.get("exit_price"),
+                )
+            return result
+
+        await loop.run_in_executor(None, _do_update)
 
     async def get_open_trade(
         self, pair: str, exchange: str, strategy: str | None = None,

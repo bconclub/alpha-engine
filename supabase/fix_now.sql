@@ -125,5 +125,20 @@ from public.trades
 where status = 'open'
 order by opened_at desc;
 
+-- ── 12. Verify: check P&L values on closed trades ──
+-- If pnl is always 0 or NULL, the trade_executor isn't writing P&L correctly.
+select id, pair, position_type, entry_price, exit_price,
+       pnl, pnl_pct, status, reason, opened_at, closed_at
+from public.trades
+where status = 'closed'
+order by closed_at desc nulls last
+limit 20;
+
+-- ── 13. Verify: check if any closed trades have NULL pnl (missed update) ──
+select count(*) as closed_with_null_pnl
+from public.trades
+where status = 'closed'
+  and pnl is null;
+
 -- Done! If SOL/XRP rows appear above, the dashboard will show them.
 -- If only BTC/ETH appear, the engine isn't logging SOL/XRP (check VPS logs).

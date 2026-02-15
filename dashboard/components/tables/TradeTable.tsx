@@ -19,6 +19,7 @@ import {
   getStrategyBadgeVariant,
 } from '@/lib/utils';
 import { Badge } from '@/components/ui/Badge';
+import { useSupabase } from '@/components/providers/SupabaseProvider';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -60,15 +61,25 @@ const PNL_OPTIONS: { label: string; value: PnLFilter }[] = [
 ];
 const TRADES_PER_PAGE = 50;
 
-const COLUMNS: { key: SortKey; label: string; align?: 'right' }[] = [
+// Delta contract sizes (must match engine/alpha/trade_executor.py)
+const DELTA_CONTRACT_SIZE: Record<string, number> = {
+  'BTC/USD:USD': 0.001,
+  'ETH/USD:USD': 0.01,
+  'SOL/USD:USD': 1.0,
+  'XRP/USD:USD': 1.0,
+};
+
+type ColumnDef = { key: string; label: string; align?: 'right' };
+
+const COLUMNS: ColumnDef[] = [
   { key: 'timestamp', label: 'Date' },
   { key: 'pair', label: 'Pair' },
   { key: 'exchange', label: 'Exchange' },
-  { key: 'side', label: 'Side' },
   { key: 'position_type', label: 'Type' },
-  { key: 'leverage', label: 'Leverage', align: 'right' },
-  { key: 'price', label: 'Price', align: 'right' },
-  { key: 'amount', label: 'Amount', align: 'right' },
+  { key: 'leverage', label: 'Lev', align: 'right' },
+  { key: 'price', label: 'Entry', align: 'right' },
+  { key: 'exit_price', label: 'Exit', align: 'right' },
+  { key: 'amount', label: 'Contracts', align: 'right' },
   { key: 'strategy', label: 'Strategy' },
   { key: 'pnl', label: 'P&L', align: 'right' },
   { key: 'pnl_pct', label: 'P&L %', align: 'right' },
@@ -79,8 +90,6 @@ const COLUMNS: { key: SortKey; label: string; align?: 'right' }[] = [
 // Helpers
 // ---------------------------------------------------------------------------
 
-// getStrategyBadgeVariant is now imported from @/lib/utils
-
 function getStatusBadgeVariant(status: Trade['status']) {
   const map: Record<Trade['status'], 'success' | 'danger' | 'default'> = {
     open: 'success',
@@ -90,17 +99,15 @@ function getStatusBadgeVariant(status: Trade['status']) {
   return map[status];
 }
 
-function compareTrades(a: Trade, b: Trade, key: SortKey, dir: SortDirection): number {
-  let aVal: string | number = (a[key] as string | number | undefined | null) ?? 0;
-  let bVal: string | number = (b[key] as string | number | undefined | null) ?? 0;
+function compareTrades(a: Trade, b: Trade, key: string, dir: SortDirection): number {
+  let aVal: string | number = (a[key as keyof Trade] as string | number | undefined | null) ?? 0;
+  let bVal: string | number = (b[key as keyof Trade] as string | number | undefined | null) ?? 0;
 
-  // For timestamp, compare as dates
   if (key === 'timestamp') {
     aVal = new Date(aVal as string).getTime();
     bVal = new Date(bVal as string).getTime();
   }
 
-  // For strings, compare case-insensitively
   if (typeof aVal === 'string' && typeof bVal === 'string') {
     aVal = aVal.toLowerCase();
     bVal = bVal.toLowerCase();
@@ -111,11 +118,58 @@ function compareTrades(a: Trade, b: Trade, key: SortKey, dir: SortDirection): nu
   return 0;
 }
 
+/** Extract base asset from a pair string, e.g. "SOL/USD:USD" → "SOL" */
+function extractBaseAsset(pair: string): string {
+  if (pair.includes('/')) return pair.split('/')[0];
+  return pair.replace(/USD.*$/, '');
+}
+
+/**
+ * Calculate unrealized P&L for an open trade using the latest market price.
+ * Returns { pnl, pnl_pct } or null if we can't calculate.
+ */
+function calcUnrealizedPnL(
+  trade: Trade,
+  currentPrice: number | null,
+): { pnl: number; pnl_pct: number } | null {
+  if (currentPrice == null || currentPrice <= 0) return null;
+  if (trade.status !== 'open') return null;
+
+  const entryPrice = trade.price;
+  const contracts = trade.amount;
+  if (!entryPrice || !contracts) return null;
+
+  // Get coin amount from contracts
+  let coinAmount = contracts;
+  if (trade.exchange === 'delta') {
+    const contractSize = DELTA_CONTRACT_SIZE[trade.pair] ?? 1.0;
+    coinAmount = contracts * contractSize;
+  }
+
+  // Calculate gross P&L
+  let grossPnl: number;
+  if (trade.position_type === 'short') {
+    grossPnl = (entryPrice - currentPrice) * coinAmount;
+  } else {
+    grossPnl = (currentPrice - entryPrice) * coinAmount;
+  }
+
+  // P&L % against collateral
+  const notional = entryPrice * coinAmount;
+  const leverage = trade.leverage > 1 ? trade.leverage : 1;
+  const collateral = notional / leverage;
+  const pnlPct = collateral > 0 ? (grossPnl / collateral) * 100 : 0;
+
+  return { pnl: grossPnl, pnl_pct: pnlPct };
+}
+
 // ---------------------------------------------------------------------------
 // Component
 // ---------------------------------------------------------------------------
 
 export default function TradeTable({ trades }: TradeTableProps) {
+  const { strategyLog } = useSupabase();
+
   // -- Filter state ---------------------------------------------------------
   const [strategyFilter, setStrategyFilter] = useState<Strategy | 'All'>('All');
   const [exchangeFilterLocal, setExchangeFilterLocal] = useState<Exchange | 'All'>('All');
@@ -126,14 +180,28 @@ export default function TradeTable({ trades }: TradeTableProps) {
   const [search, setSearch] = useState('');
 
   // -- Sort state -----------------------------------------------------------
-  const [sortKey, setSortKey] = useState<SortKey>('timestamp');
+  const [sortKey, setSortKey] = useState<string>('timestamp');
   const [sortDir, setSortDir] = useState<SortDirection>('desc');
 
   // -- Pagination state -----------------------------------------------------
   const [page, setPage] = useState(1);
 
-  // -- Derived: filtered & sorted trades ------------------------------------
-  const filteredTrades = useMemo(() => {
+  // -- Build current price map from strategy_log ----------------------------
+  const currentPrices = useMemo(() => {
+    const prices = new Map<string, number>();
+    for (const log of strategyLog) {
+      if (log.current_price && log.pair) {
+        const asset = extractBaseAsset(log.pair);
+        if (!prices.has(asset)) {
+          prices.set(asset, log.current_price);
+        }
+      }
+    }
+    return prices;
+  }, [strategyLog]);
+
+  // -- Derived: filtered & sorted trades with open/closed separation --------
+  const { openTrades, closedTrades, filteredTrades } = useMemo(() => {
     let result = trades;
 
     // Strategy filter
@@ -164,7 +232,6 @@ export default function TradeTable({ trades }: TradeTableProps) {
       result = result.filter((t) => new Date(t.timestamp).getTime() >= from);
     }
     if (dateTo) {
-      // Include the full "to" day by setting to end-of-day
       const to = new Date(dateTo).getTime() + 86_399_999;
       result = result.filter((t) => new Date(t.timestamp).getTime() <= to);
     }
@@ -175,10 +242,19 @@ export default function TradeTable({ trades }: TradeTableProps) {
       result = result.filter((t) => t.pair.toLowerCase().includes(q));
     }
 
-    // Sort
-    result = [...result].sort((a, b) => compareTrades(a, b, sortKey, sortDir));
+    // Split into open and closed/cancelled
+    const open = result
+      .filter((t) => t.status === 'open')
+      .sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
 
-    return result;
+    const closed = result
+      .filter((t) => t.status !== 'open')
+      .sort((a, b) => compareTrades(a, b, sortKey, sortDir));
+
+    // Combined: open first, then closed
+    const combined = [...open, ...closed];
+
+    return { openTrades: open, closedTrades: closed, filteredTrades: combined };
   }, [trades, strategyFilter, exchangeFilterLocal, positionTypeFilter, pnlFilter, dateFrom, dateTo, search, sortKey, sortDir]);
 
   // -- Derived: pagination --------------------------------------------------
@@ -188,12 +264,10 @@ export default function TradeTable({ trades }: TradeTableProps) {
   const endIdx = Math.min(startIdx + TRADES_PER_PAGE, filteredTrades.length);
   const visibleTrades = filteredTrades.slice(startIdx, endIdx);
 
-  // Reset to page 1 whenever filters change — handled via key resets below
-  // We use safePage for display so the user never sees an out-of-range page.
-
   // -- Handlers -------------------------------------------------------------
   const handleSort = useCallback(
-    (key: SortKey) => {
+    (key: string) => {
+      if (key === 'exit_price') return; // Not sortable
       if (key === sortKey) {
         setSortDir((d) => (d === 'asc' ? 'desc' : 'asc'));
       } else {
@@ -259,6 +333,32 @@ export default function TradeTable({ trades }: TradeTableProps) {
     'px-3 py-1.5 text-xs font-medium rounded-lg transition-colors';
   const filterBtnActive = 'bg-zinc-700 text-white';
   const filterBtnInactive = 'text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800';
+
+  /** Get P&L display values for a trade (realized or unrealized) */
+  function getDisplayPnL(trade: Trade): { pnl: number; pnlPct: number | null; isUnrealized: boolean } {
+    if (trade.status === 'closed') {
+      return {
+        pnl: trade.pnl,
+        pnlPct: trade.pnl_pct ?? null,
+        isUnrealized: false,
+      };
+    }
+
+    if (trade.status === 'open') {
+      const asset = extractBaseAsset(trade.pair);
+      const currentPrice = currentPrices.get(asset) ?? null;
+      const unrealized = calcUnrealizedPnL(trade, currentPrice);
+      if (unrealized) {
+        return {
+          pnl: unrealized.pnl,
+          pnlPct: unrealized.pnl_pct,
+          isUnrealized: true,
+        };
+      }
+    }
+
+    return { pnl: trade.pnl, pnlPct: trade.pnl_pct ?? null, isUnrealized: false };
+  }
 
   // -------------------------------------------------------------------------
   return (
@@ -397,6 +497,17 @@ export default function TradeTable({ trades }: TradeTableProps) {
       </div>
 
       {/* ----------------------------------------------------------------- */}
+      {/* Summary bar                                                        */}
+      {/* ----------------------------------------------------------------- */}
+      <div className="flex items-center gap-4 text-xs text-zinc-400">
+        <span>{openTrades.length} open</span>
+        <span className="text-zinc-700">|</span>
+        <span>{closedTrades.length} closed</span>
+        <span className="text-zinc-700">|</span>
+        <span>{filteredTrades.length} total</span>
+      </div>
+
+      {/* ----------------------------------------------------------------- */}
       {/* Mobile card view                                                   */}
       {/* ----------------------------------------------------------------- */}
       <div className="md:hidden">
@@ -406,49 +517,87 @@ export default function TradeTable({ trades }: TradeTableProps) {
           </div>
         ) : (
           <div className="space-y-2">
-            {visibleTrades.map((trade) => (
-              <div
-                key={trade.id}
-                className="bg-zinc-900/40 border border-zinc-800/50 rounded-lg p-3"
-              >
-                {/* Top row: Pair + Side + P&L */}
-                <div className="flex items-center justify-between mb-2">
-                  <div className="flex items-center gap-2">
-                    <span className="text-sm font-semibold text-white">{trade.pair}</span>
-                    <Badge variant={trade.side === 'buy' ? 'success' : 'danger'}>
-                      {trade.side.toUpperCase()}
-                    </Badge>
-                    <span
-                      className="inline-block h-2 w-2 rounded-full"
-                      style={{ backgroundColor: getExchangeColor(trade.exchange) }}
-                    />
+            {visibleTrades.map((trade, idx) => {
+              const display = getDisplayPnL(trade);
+              // Show section divider between open and closed
+              const prevTrade = idx > 0 ? visibleTrades[idx - 1] : null;
+              const showDivider = prevTrade?.status === 'open' && trade.status !== 'open';
+
+              return (
+                <div key={trade.id}>
+                  {showDivider && (
+                    <div className="flex items-center gap-2 py-2">
+                      <div className="flex-1 border-t border-zinc-700" />
+                      <span className="text-[10px] uppercase tracking-wider text-zinc-500">Closed Trades</span>
+                      <div className="flex-1 border-t border-zinc-700" />
+                    </div>
+                  )}
+                  <div className={cn(
+                    'border rounded-lg p-3',
+                    trade.status === 'open'
+                      ? 'bg-zinc-900/60 border-zinc-700'
+                      : 'bg-zinc-900/40 border-zinc-800/50',
+                  )}>
+                    {/* Top row: Pair + Type + P&L */}
+                    <div className="flex items-center justify-between mb-2">
+                      <div className="flex items-center gap-2">
+                        <span className="text-sm font-semibold text-white">{trade.pair}</span>
+                        <span className={cn('text-[10px] font-medium', getPositionTypeColor(trade.position_type))}>
+                          {getPositionTypeLabel(trade.position_type)}
+                        </span>
+                        <span
+                          className="inline-block h-2 w-2 rounded-full"
+                          style={{ backgroundColor: getExchangeColor(trade.exchange) }}
+                        />
+                      </div>
+                      <div className="text-right">
+                        <span
+                          className={cn(
+                            'text-sm font-mono font-semibold',
+                            getPnLColor(display.pnl),
+                          )}
+                        >
+                          {formatPnL(display.pnl)}
+                        </span>
+                        {display.isUnrealized && (
+                          <span className="text-[9px] text-zinc-500 ml-1">live</span>
+                        )}
+                      </div>
+                    </div>
+                    {/* Prices row */}
+                    <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs mb-1">
+                      <span className="text-zinc-400">
+                        Entry: <span className="font-mono text-zinc-300">{formatCurrency(trade.price)}</span>
+                      </span>
+                      {trade.exit_price != null && (
+                        <span className="text-zinc-400">
+                          Exit: <span className="font-mono text-zinc-300">{formatCurrency(trade.exit_price)}</span>
+                        </span>
+                      )}
+                      {trade.exchange === 'delta' && (
+                        <span className="text-zinc-500 font-mono">{trade.amount} contracts</span>
+                      )}
+                    </div>
+                    {/* Details row */}
+                    <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-zinc-400">
+                      <span>{formatDate(trade.timestamp)}</span>
+                      <Badge variant={getStrategyBadgeVariant(trade.strategy)}>
+                        {getStrategyLabel(trade.strategy)}
+                      </Badge>
+                      {trade.leverage > 1 && (
+                        <span className="text-amber-400 font-mono">{formatLeverage(trade.leverage)}</span>
+                      )}
+                      {display.pnlPct != null && (
+                        <span className={cn('font-mono', getPnLColor(display.pnlPct))}>
+                          {formatPercentage(display.pnlPct)}
+                          {display.isUnrealized ? ' (unr)' : ''}
+                        </span>
+                      )}
+                    </div>
                   </div>
-                  <span
-                    className={cn(
-                      'text-sm font-mono font-semibold',
-                      getPnLColor(trade.pnl),
-                    )}
-                  >
-                    {formatPnL(trade.pnl)}
-                  </span>
                 </div>
-                {/* Details row */}
-                <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-zinc-400">
-                  <span>{formatDate(trade.timestamp)}</span>
-                  <Badge variant={getStrategyBadgeVariant(trade.strategy)}>
-                    {getStrategyLabel(trade.strategy)}
-                  </Badge>
-                  {trade.leverage > 1 && (
-                    <span className="text-amber-400 font-mono">{formatLeverage(trade.leverage)}</span>
-                  )}
-                  {trade.pnl_pct != null && trade.pnl_pct !== 0 && (
-                    <span className={cn('font-mono', getPnLColor(trade.pnl_pct))}>
-                      {formatPercentage(trade.pnl_pct)}
-                    </span>
-                  )}
-                </div>
-              </div>
-            ))}
+              );
+            })}
           </div>
         )}
 
@@ -524,109 +673,152 @@ export default function TradeTable({ trades }: TradeTableProps) {
                   </td>
                 </tr>
               ) : (
-                visibleTrades.map((trade) => (
-                  <tr
-                    key={trade.id}
-                    className="border-b border-zinc-800/50 transition-colors hover:bg-zinc-800/30"
-                  >
-                    {/* Date */}
-                    <td className="whitespace-nowrap px-4 py-3 text-zinc-300">
-                      {formatDate(trade.timestamp)}
-                    </td>
+                visibleTrades.map((trade, idx) => {
+                  const display = getDisplayPnL(trade);
+                  const prevTrade = idx > 0 ? visibleTrades[idx - 1] : null;
+                  const showDivider = prevTrade?.status === 'open' && trade.status !== 'open';
 
-                    {/* Pair */}
-                    <td className="whitespace-nowrap px-4 py-3 font-medium text-zinc-100">
-                      {trade.pair}
-                    </td>
-
-                    {/* Exchange */}
-                    <td className="whitespace-nowrap px-4 py-3">
-                      <span className="inline-flex items-center gap-1.5">
-                        <span
-                          className="inline-block h-2 w-2 rounded-full"
-                          style={{ backgroundColor: getExchangeColor(trade.exchange) }}
-                        />
-                        <span className="text-zinc-300 text-xs">
-                          {getExchangeLabel(trade.exchange)}
-                        </span>
-                      </span>
-                    </td>
-
-                    {/* Side */}
-                    <td className="whitespace-nowrap px-4 py-3">
-                      <Badge variant={trade.side === 'buy' ? 'success' : 'danger'}>
-                        {trade.side.toUpperCase()}
-                      </Badge>
-                    </td>
-
-                    {/* Type (position_type) */}
-                    <td className="whitespace-nowrap px-4 py-3">
-                      <span className={cn('text-xs font-medium', getPositionTypeColor(trade.position_type))}>
-                        {getPositionTypeLabel(trade.position_type)}
-                      </span>
-                    </td>
-
-                    {/* Leverage */}
-                    <td className="whitespace-nowrap px-4 py-3 text-right">
-                      {trade.leverage > 1 ? (
-                        <span className="text-xs font-medium text-amber-400">
-                          {formatLeverage(trade.leverage)}
-                        </span>
-                      ) : (
-                        <span className="text-xs text-zinc-500">&mdash;</span>
+                  return (
+                    <>
+                      {showDivider && (
+                        <tr key={`divider-${trade.id}`}>
+                          <td colSpan={COLUMNS.length} className="px-4 py-2 bg-zinc-900/80">
+                            <div className="flex items-center gap-2">
+                              <div className="flex-1 border-t border-zinc-700" />
+                              <span className="text-[10px] uppercase tracking-wider text-zinc-500">Closed Trades</span>
+                              <div className="flex-1 border-t border-zinc-700" />
+                            </div>
+                          </td>
+                        </tr>
                       )}
-                    </td>
+                      <tr
+                        key={trade.id}
+                        className={cn(
+                          'border-b border-zinc-800/50 transition-colors hover:bg-zinc-800/30',
+                          trade.status === 'open' && 'bg-zinc-900/30',
+                        )}
+                      >
+                        {/* Date */}
+                        <td className="whitespace-nowrap px-4 py-3 text-zinc-300">
+                          {formatDate(trade.timestamp)}
+                        </td>
 
-                    {/* Price */}
-                    <td className="whitespace-nowrap px-4 py-3 text-right font-mono text-zinc-300">
-                      {formatCurrency(trade.price)}
-                    </td>
+                        {/* Pair */}
+                        <td className="whitespace-nowrap px-4 py-3 font-medium text-zinc-100">
+                          {trade.pair}
+                        </td>
 
-                    {/* Amount */}
-                    <td className="whitespace-nowrap px-4 py-3 text-right font-mono text-zinc-300">
-                      {trade.amount.toLocaleString('en-US', {
-                        minimumFractionDigits: 2,
-                        maximumFractionDigits: 6,
-                      })}
-                    </td>
+                        {/* Exchange */}
+                        <td className="whitespace-nowrap px-4 py-3">
+                          <span className="inline-flex items-center gap-1.5">
+                            <span
+                              className="inline-block h-2 w-2 rounded-full"
+                              style={{ backgroundColor: getExchangeColor(trade.exchange) }}
+                            />
+                            <span className="text-zinc-300 text-xs">
+                              {getExchangeLabel(trade.exchange)}
+                            </span>
+                          </span>
+                        </td>
 
-                    {/* Strategy */}
-                    <td className="whitespace-nowrap px-4 py-3">
-                      <Badge variant={getStrategyBadgeVariant(trade.strategy)}>
-                        {getStrategyLabel(trade.strategy)}
-                      </Badge>
-                    </td>
+                        {/* Type (position_type) */}
+                        <td className="whitespace-nowrap px-4 py-3">
+                          <span className={cn('text-xs font-medium', getPositionTypeColor(trade.position_type))}>
+                            {getPositionTypeLabel(trade.position_type)}
+                          </span>
+                        </td>
 
-                    {/* P&L */}
-                    <td
-                      className={cn(
-                        'whitespace-nowrap px-4 py-3 text-right font-mono font-medium',
-                        getPnLColor(trade.pnl),
-                      )}
-                    >
-                      {formatPnL(trade.pnl)}
-                    </td>
+                        {/* Leverage */}
+                        <td className="whitespace-nowrap px-4 py-3 text-right">
+                          {trade.leverage > 1 ? (
+                            <span className="text-xs font-medium text-amber-400">
+                              {formatLeverage(trade.leverage)}
+                            </span>
+                          ) : (
+                            <span className="text-xs text-zinc-500">&mdash;</span>
+                          )}
+                        </td>
 
-                    {/* P&L % (return on collateral) */}
-                    <td
-                      className={cn(
-                        'whitespace-nowrap px-4 py-3 text-right font-mono text-xs',
-                        getPnLColor(trade.pnl_pct ?? 0),
-                      )}
-                    >
-                      {trade.pnl_pct != null && trade.pnl_pct !== 0
-                        ? formatPercentage(trade.pnl_pct)
-                        : '—'}
-                    </td>
+                        {/* Entry Price */}
+                        <td className="whitespace-nowrap px-4 py-3 text-right font-mono text-zinc-300">
+                          {formatCurrency(trade.price)}
+                        </td>
 
-                    {/* Status */}
-                    <td className="whitespace-nowrap px-4 py-3">
-                      <Badge variant={getStatusBadgeVariant(trade.status)}>
-                        {trade.status.charAt(0).toUpperCase() + trade.status.slice(1)}
-                      </Badge>
-                    </td>
-                  </tr>
-                ))
+                        {/* Exit Price */}
+                        <td className="whitespace-nowrap px-4 py-3 text-right font-mono text-zinc-300">
+                          {trade.exit_price != null ? (
+                            formatCurrency(trade.exit_price)
+                          ) : trade.status === 'open' ? (
+                            <span className="text-zinc-500 text-xs italic">open</span>
+                          ) : (
+                            <span className="text-zinc-600">&mdash;</span>
+                          )}
+                        </td>
+
+                        {/* Contracts / Amount */}
+                        <td className="whitespace-nowrap px-4 py-3 text-right font-mono text-zinc-300">
+                          {trade.exchange === 'delta' ? (
+                            <span title={`${trade.amount} contracts`}>
+                              {trade.amount.toLocaleString('en-US', { maximumFractionDigits: 0 })}
+                              <span className="text-zinc-500 text-[10px] ml-0.5">ct</span>
+                            </span>
+                          ) : (
+                            trade.amount.toLocaleString('en-US', {
+                              minimumFractionDigits: 2,
+                              maximumFractionDigits: 6,
+                            })
+                          )}
+                        </td>
+
+                        {/* Strategy */}
+                        <td className="whitespace-nowrap px-4 py-3">
+                          <Badge variant={getStrategyBadgeVariant(trade.strategy)}>
+                            {getStrategyLabel(trade.strategy)}
+                          </Badge>
+                        </td>
+
+                        {/* P&L */}
+                        <td
+                          className={cn(
+                            'whitespace-nowrap px-4 py-3 text-right font-mono font-medium',
+                            getPnLColor(display.pnl),
+                          )}
+                        >
+                          {formatPnL(display.pnl)}
+                          {display.isUnrealized && (
+                            <span className="text-[9px] text-zinc-500 ml-0.5 font-normal">live</span>
+                          )}
+                        </td>
+
+                        {/* P&L % (return on collateral) */}
+                        <td
+                          className={cn(
+                            'whitespace-nowrap px-4 py-3 text-right font-mono text-xs',
+                            getPnLColor(display.pnlPct ?? 0),
+                          )}
+                        >
+                          {display.pnlPct != null
+                            ? (
+                              <>
+                                {formatPercentage(display.pnlPct)}
+                                {display.isUnrealized && (
+                                  <span className="text-[9px] text-zinc-500 ml-0.5">unr</span>
+                                )}
+                              </>
+                            )
+                            : trade.status === 'closed' ? '+0.00%' : '—'}
+                        </td>
+
+                        {/* Status */}
+                        <td className="whitespace-nowrap px-4 py-3">
+                          <Badge variant={getStatusBadgeVariant(trade.status)}>
+                            {trade.status.charAt(0).toUpperCase() + trade.status.slice(1)}
+                          </Badge>
+                        </td>
+                      </tr>
+                    </>
+                  );
+                })
               )}
             </tbody>
           </table>

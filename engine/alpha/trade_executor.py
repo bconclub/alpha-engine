@@ -566,18 +566,15 @@ class TradeExecutor:
             signal.position_type == "spot" and signal.side == "sell"
         )
 
-        # Send Telegram alert FIRST — user needs to know immediately.
-        # If DB insert fails later, at least the alert was already sent.
+        # DB write FIRST — P&L is calculated here.
+        # For exits, the computed P&L is passed directly to the Telegram
+        # notification so both DB and Telegram show the EXACT same numbers.
         if is_exit:
-            await self._notify_trade_closed(signal, order)
-        else:
-            await self._notify_trade_opened(signal, order)
-
-        # Then log to DB (dashboard reads this via realtime subscription)
-        if is_exit:
-            await self._close_trade_in_db(signal, order)
+            close_result = await self._close_trade_in_db(signal, order)
+            await self._notify_trade_closed(signal, order, close_result)
         else:
             await self._open_trade_in_db(signal, order)
+            await self._notify_trade_opened(signal, order)
 
         return order
 
@@ -622,10 +619,14 @@ class TradeExecutor:
         except Exception:
             logger.exception("Failed to log open trade to DB")
 
-    async def _close_trade_in_db(self, signal: Signal, order: dict) -> None:
-        """UPDATE the existing open trade row with exit price and P&L."""
+    async def _close_trade_in_db(self, signal: Signal, order: dict) -> dict | None:
+        """UPDATE the existing open trade row with exit price and P&L.
+
+        Returns a dict with the computed P&L values for downstream use
+        (Telegram notification), or None on failure.
+        """
         if self.db is None:
-            return
+            return None
         try:
             fill_price = order.get("average") or order.get("price") or signal.price
             filled_amount = order.get("filled") or signal.amount
@@ -658,7 +659,7 @@ class TradeExecutor:
                     "leverage": signal.leverage,
                     "position_type": signal.position_type,
                 })
-                return
+                return None
 
             # Calculate P&L from the original entry
             entry_price = open_trade.get("entry_price", fill_price)
@@ -670,15 +671,15 @@ class TradeExecutor:
             # LONG/spot buy-then-sell: (exit - entry) * coin_amount
             # SHORT sell-then-buy: (entry - exit) * coin_amount
             #
-            # IMPORTANT: For Delta futures, entry_amount is in CONTRACTS (e.g. 1),
-            # not coin amount (e.g. 0.01 ETH). Must convert back using contract_size.
+            # IMPORTANT: For Delta futures, entry_amount is in CONTRACTS (e.g. 50),
+            # not coin amount (e.g. 50 XRP). Must convert using contract_size.
             #
             # Fees are deducted: round-trip fee = (entry_notional + exit_notional) * taker_rate
             coin_amount = entry_amount
             exchange_id = open_trade.get("exchange", signal.exchange_id)
             if exchange_id == "delta":
                 contract_size = DELTA_CONTRACT_SIZE.get(signal.pair, 0.01)
-                coin_amount = entry_amount * contract_size  # 1 contract × 0.01 = 0.01 ETH
+                coin_amount = entry_amount * contract_size  # 50 contracts × 1.0 = 50 XRP
 
             if position_type in ("long", "spot"):
                 gross_pnl = (fill_price - entry_price) * coin_amount
@@ -738,8 +739,18 @@ class TradeExecutor:
             if self.risk_manager is not None:
                 self.risk_manager.record_close(signal.pair, pnl)
 
+            # Return computed values so Telegram uses the SAME numbers
+            return {
+                "entry_price": entry_price,
+                "exit_price": fill_price,
+                "pnl": round(pnl, 8),
+                "pnl_pct": round(pnl_pct, 4),
+                "opened_at": open_trade.get("opened_at") or open_trade.get("created_at"),
+            }
+
         except Exception:
             logger.exception("Failed to close trade in DB")
+            return None
 
     async def _notify_trade_opened(self, signal: Signal, order: dict) -> None:
         """Telegram notification for a new position opened."""
@@ -776,40 +787,50 @@ class TradeExecutor:
         except Exception:
             logger.exception("Failed to send trade opened alert")
 
-    async def _notify_trade_closed(self, signal: Signal, order: dict) -> None:
-        """Telegram notification for a position closed, with P&L."""
+    async def _notify_trade_closed(
+        self, signal: Signal, order: dict, close_result: dict | None = None,
+    ) -> None:
+        """Telegram notification for a position closed, with P&L.
+
+        close_result is the dict returned by _close_trade_in_db containing
+        the authoritative P&L values. This ensures Telegram shows the SAME
+        numbers that were saved to the database.
+        """
         if self.alerts is None:
             return
         try:
             fill_price = order.get("average") or order.get("price") or signal.price
 
-            # Look up the entry from the DB to compute P&L
-            entry_price = fill_price  # fallback
-            pnl = 0.0
-            pnl_pct = 0.0
-            duration_min: float | None = None
-
-            if self.db is not None:
-                # The trade was just closed in _close_trade_in_db — fetch it
-                closed_trade = await self.db.get_latest_closed_trade(
-                    pair=signal.pair,
-                    exchange=signal.exchange_id,
-                )
-                if closed_trade:
-                    entry_price = closed_trade.get("entry_price", fill_price)
-                    pnl = closed_trade.get("pnl", 0.0) or 0.0
-                    pnl_pct = closed_trade.get("pnl_pct", 0.0) or 0.0
-                    # Duration from timestamps
-                    created = closed_trade.get("created_at") or closed_trade.get("timestamp")
-                    closed_at = closed_trade.get("closed_at")
-                    if created and closed_at:
-                        from datetime import datetime
-                        try:
-                            t_open = datetime.fromisoformat(created.replace("Z", "+00:00"))
-                            t_close = datetime.fromisoformat(closed_at.replace("Z", "+00:00"))
-                            duration_min = (t_close - t_open).total_seconds() / 60
-                        except Exception:
-                            pass
+            # Use the P&L computed by _close_trade_in_db (single source of truth)
+            if close_result:
+                entry_price = close_result.get("entry_price", fill_price)
+                pnl = close_result.get("pnl", 0.0) or 0.0
+                pnl_pct = close_result.get("pnl_pct", 0.0) or 0.0
+                # Duration from open → close
+                opened_at = close_result.get("opened_at")
+                duration_min: float | None = None
+                if opened_at:
+                    from datetime import datetime
+                    try:
+                        t_open = datetime.fromisoformat(str(opened_at).replace("Z", "+00:00"))
+                        duration_min = (datetime.now(t_open.tzinfo) - t_open).total_seconds() / 60
+                    except Exception:
+                        pass
+            else:
+                # Fallback: try DB query (should rarely happen)
+                entry_price = fill_price
+                pnl = 0.0
+                pnl_pct = 0.0
+                duration_min = None
+                if self.db is not None:
+                    closed_trade = await self.db.get_latest_closed_trade(
+                        pair=signal.pair,
+                        exchange=signal.exchange_id,
+                    )
+                    if closed_trade:
+                        entry_price = closed_trade.get("entry_price", fill_price)
+                        pnl = closed_trade.get("pnl", 0.0) or 0.0
+                        pnl_pct = closed_trade.get("pnl_pct", 0.0) or 0.0
 
             await self.alerts.send_trade_closed(
                 pair=signal.pair,

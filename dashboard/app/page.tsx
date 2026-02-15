@@ -5,6 +5,7 @@ import { LiveStatusBar } from '@/components/dashboard/LiveStatusBar';
 import { MarketOverview } from '@/components/dashboard/MarketOverview';
 import { TriggerProximity } from '@/components/dashboard/TriggerProximity';
 import { LiveActivityFeed } from '@/components/dashboard/LiveActivityFeed';
+import { LivePositions } from '@/components/dashboard/LivePositions';
 import { OpenPositions } from '@/components/dashboard/OpenPositions';
 import { PerformancePanel } from '@/components/dashboard/PerformancePanel';
 
@@ -47,6 +48,9 @@ export default function DashboardPage() {
           <TriggerProximity />
         </div>
       </div>
+
+      {/* Live Positions — compact status cards */}
+      <LivePositions />
 
       {/* 4. Live Activity Feed — full width */}
       <LiveActivityFeed />

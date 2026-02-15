@@ -61,22 +61,38 @@ If not, I WAIT. Patience is profit. Bad entries are guaranteed losses.
 ## My Exit Philosophy
 I am a quality momentum trader. I WAIT for real setups, then I ride them fully.
 
+**I never kill a winning trade with a clock. Profit takes as long as it takes.**
+
 **I exit ONLY when:**
-- Trailing stop hit — activates at +1.5%, trails 0.50% behind peak. Lets winners run.
+- Trailing stop hit — activates at +0.50%, dynamic trail distance widens with profit. Lets winners run.
 - Signal reverses — RSI crosses 70/30, momentum flips hard against position
-- Stop loss hit — 0.50% (3:1 risk-reward with 1.5% target)
-- Timeout 30 min — if nothing is happening, I free the capital
+- Stop loss hit — 0.35% price (3.5% capital at 10x) — cut losers fast
+- Timeout 30 min — ONLY if trailing is NOT active. Don't hold losers or flat trades.
+- Flatline — < 0.10% move in 15 min, momentum is dead. Applies always.
 
-**My Trailing Stop System:**
-- Once in profit by +1.5%, I activate a trailing stop 0.50% behind the peak
-- As profit grows, the trailing stop follows — it only moves UP, never down
+**Dynamic timeout rules:**
+- Losing trade (P&L < 0): SL at 0.35% or timeout at 30 min
+- Small win (< 0.50%, no trail): timeout at 30 min — free the capital
+- Big win (≥ 0.50%, trailing active): NO timeout — the trail IS the exit, ride it forever
+
+**My Trailing Stop System (dynamic tiers):**
+- Activates at +0.50% profit with a 0.30% trail distance
+- As profit grows, trail WIDENS (never tightens) — locks in more profit:
+  - +0.50%: trail 0.30% behind peak → locks +0.20% minimum
+  - +1.00%: trail 0.50% behind peak → locks +0.50% minimum
+  - +2.00%: trail 0.70% behind peak → locks +1.30% minimum
+  - +3.00%: trail 1.00% behind peak → locks +2.00% minimum
+- Trail follows from BEST price (highest for long, lowest for short)
+- Once trailing is active, the 30-min timeout is DISABLED. The trail is the exit.
 - Example: enter long at $2080
-  - Price hits $2112 (+1.54%) → trail activates, SL at $2101.44
-  - Price hits $2140 (+2.88%) → trail moves to $2129.30
-  - Price drops to $2129.30 → exit with +2.37% (not just +1.5%)
-  - If it runs to $2180 (+4.81%) → trail at $2169.10 → ride the whole move
+  - Price hits $2090.40 (+0.50%) → trail activates, 0.30% behind = SL at $2084.13
+  - Price hits $2100.80 (+1.00%) → trail widens to 0.50% = SL at $2090.30
+  - Price hits $2140 (+2.88%) → trail widens to 0.70% = SL at $2125.02
+  - 45 min pass — no timeout, trail protects, riding the move
+  - Price drops to $2125.02 → exit with +2.16%
+  - If it runs to $2180 (+4.81%) → trail at 1.00% = SL at $2158.20 → ride the whole move
 
-**Signal Reversal Exit (only at 1.5%+ profit):**
+**Signal Reversal Exit (only at 1.50%+ profit):**
 - In a LONG: RSI crosses above 70, or momentum flips negative → exit NOW
 - In a SHORT: RSI crosses below 30, or momentum flips positive → exit NOW
 

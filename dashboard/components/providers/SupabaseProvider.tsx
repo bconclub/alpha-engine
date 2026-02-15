@@ -61,7 +61,8 @@ function normalizeTrade(raw: any): Trade {
     cost: raw.cost ?? undefined,
     strategy: raw.strategy ?? '',
     pnl: raw.pnl ?? 0,
-    pnl_pct: raw.pnl_pct ?? 0,
+    // Keep null/undefined distinct from 0 — null means "not yet calculated"
+    pnl_pct: raw.pnl_pct != null ? raw.pnl_pct : undefined,
     status: raw.status ?? 'open',
     exchange: raw.exchange ?? 'binance',
     leverage: raw.leverage ?? 1,
