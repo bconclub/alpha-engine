@@ -52,6 +52,8 @@ export interface StrategyLog {
   entry_distance_pct?: number;
   current_price?: number;
   price_change_15m?: number;
+  price_change_1h?: number;
+  price_change_24h?: number;
   plus_di?: number;
   minus_di?: number;
   direction?: string;  // "bullish" | "bearish" | "neutral"

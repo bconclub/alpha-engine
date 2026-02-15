@@ -5,11 +5,15 @@ import { useSupabase } from '@/components/providers/SupabaseProvider';
 import { cn } from '@/lib/utils';
 import type { StrategyLog, Exchange } from '@/lib/types';
 
-// ── Engine thresholds (Trend Sniper v4.1 — loosened) ────────────────
-const RSI_LONG_THRESHOLD = 40;
-const RSI_SHORT_THRESHOLD = 60;
+// ── Engine thresholds (Trend-Guided Sniper v4.2) ────────────────────
+const RSI_LONG_THRESHOLD = 40;        // standard (trend-guided: 45)
+const RSI_SHORT_THRESHOLD = 60;       // standard (trend-guided: 55)
+const RSI_TREND_LONG = 45;            // loosened when 15m is bullish
+const RSI_TREND_SHORT = 55;           // loosened when 15m is bearish
 const MOMENTUM_MIN_PCT = 0.15;
 const VOL_SPIKE_RATIO = 1.2;
+const BB_TREND_UPPER = 0.85;          // top 15% of BB + bearish = short
+const BB_TREND_LOWER = 0.15;          // bottom 15% of BB + bullish = long
 
 interface IndicatorStatus {
   active: boolean;
@@ -79,11 +83,20 @@ function computeTrigger(log: StrategyLog): TriggerInfo {
   const allowLong = trend === 'bullish' || trend === 'neutral';
   const allowShort = trend === 'bearish' || trend === 'neutral';
 
+  // ── Trend-guided thresholds (v4.2) ─────────────────────────────────
+  // When 15m trend aligns, use looser RSI and momentum thresholds
+  const effRsiLong = trend === 'bullish' ? RSI_TREND_LONG : RSI_LONG_THRESHOLD;
+  const effRsiShort = trend === 'bearish' ? RSI_TREND_SHORT : RSI_SHORT_THRESHOLD;
+
   // ── Build 4 indicators for LONG ────────────────────────────────────
   const longIndicators: IndicatorStatus[] = [];
   let longCount = 0;
 
-  const momBull = priceChangePct != null && priceChangePct >= MOMENTUM_MIN_PCT;
+  // Momentum: any positive mom counts when 15m is bullish
+  const momBull = priceChangePct != null && (
+    priceChangePct >= MOMENTUM_MIN_PCT ||
+    (trend === 'bullish' && priceChangePct > 0)
+  );
   longIndicators.push({ active: momBull, label: 'MOM' });
   if (momBull) longCount++;
 
@@ -92,11 +105,18 @@ function computeTrigger(log: StrategyLog): TriggerInfo {
   longIndicators.push({ active: volBull, label: 'VOL' });
   if (volBull) longCount++;
 
-  const rsiLong = rsi != null && rsi < RSI_LONG_THRESHOLD;
+  const rsiLong = rsi != null && rsi < effRsiLong;
   longIndicators.push({ active: rsiLong, label: 'RSI' });
   if (rsiLong) longCount++;
 
-  const bbBreakLong = currentPrice != null && bbUpper != null && currentPrice > bbUpper;
+  // BB: includes trend+BB confluence (bullish + price near BB lower)
+  const bbRange = (bbUpper ?? 0) - (bbLower ?? 0);
+  const bbPos = bbRange > 0 && currentPrice != null && bbLower != null
+    ? (currentPrice - bbLower) / bbRange : 0.5;
+  const bbBreakLong = currentPrice != null && (
+    (bbUpper != null && currentPrice > bbUpper) ||
+    (trend === 'bullish' && bbPos < BB_TREND_LOWER)
+  );
   longIndicators.push({ active: bbBreakLong, label: 'BB' });
   if (bbBreakLong) longCount++;
 
@@ -106,7 +126,11 @@ function computeTrigger(log: StrategyLog): TriggerInfo {
   const shortIndicators: IndicatorStatus[] = [];
   let shortCount = 0;
 
-  const momBear = priceChangePct != null && priceChangePct <= -MOMENTUM_MIN_PCT;
+  // Momentum: any negative mom counts when 15m is bearish
+  const momBear = priceChangePct != null && (
+    priceChangePct <= -MOMENTUM_MIN_PCT ||
+    (trend === 'bearish' && priceChangePct < 0)
+  );
   shortIndicators.push({ active: momBear, label: 'MOM' });
   if (momBear) shortCount++;
 
@@ -114,17 +138,21 @@ function computeTrigger(log: StrategyLog): TriggerInfo {
   shortIndicators.push({ active: volBear, label: 'VOL' });
   if (volBear) shortCount++;
 
-  const rsiShort = rsi != null && rsi > RSI_SHORT_THRESHOLD;
+  const rsiShort = rsi != null && rsi > effRsiShort;
   shortIndicators.push({ active: rsiShort, label: 'RSI' });
   if (rsiShort) shortCount++;
 
-  const bbBreakShort = currentPrice != null && bbLower != null && currentPrice < bbLower;
+  // BB: includes trend+BB confluence (bearish + price near BB upper)
+  const bbBreakShort = currentPrice != null && (
+    (bbLower != null && currentPrice < bbLower) ||
+    (trend === 'bearish' && bbPos > BB_TREND_UPPER)
+  );
   shortIndicators.push({ active: bbBreakShort, label: 'BB' });
   if (bbBreakShort) shortCount++;
 
   const shortBlocked = shortCount >= 2 && !allowShort;
 
-  // ── Overall status (accounts for trend filter) ─────────────────────
+  // ── Overall status (accounts for trend guidance) ───────────────────
   const bestCount = isFutures ? Math.max(longCount, shortCount) : longCount;
 
   // Effective count: the best side that is NOT blocked by trend
@@ -139,8 +167,8 @@ function computeTrigger(log: StrategyLog): TriggerInfo {
     overallStatus = 'Awaiting data...';
     statusColor = 'text-zinc-600';
   } else if (bestCount >= 2 && effectiveBest < 2) {
-    // Signals ready but trend blocks them
-    overallStatus = `${bestCount}/4 — TREND BLOCKED`;
+    // Signals ready but counter-trend — still blocked
+    overallStatus = `${bestCount}/4 — COUNTER-TREND`;
     statusColor = 'text-[#ff9100]';
   } else if (effectiveBest >= 2) {
     overallStatus = `${effectiveBest}/4 — TRADE READY`;

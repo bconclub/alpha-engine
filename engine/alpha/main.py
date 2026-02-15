@@ -229,6 +229,44 @@ class AlphaBot:
 
         total_capital = self.risk_manager.capital
 
+        # ── Log per-pair affordability for Delta scalp ────────────────────
+        if self.delta and delta_bal is not None:
+            from alpha.trade_executor import DELTA_CONTRACT_SIZE
+
+            active_pairs: list[str] = []
+            skipped_pairs: list[str] = []
+            for pair in self.delta_pairs:
+                contract_size = DELTA_CONTRACT_SIZE.get(pair, 0)
+                if contract_size <= 0:
+                    logger.warning("[STARTUP] %s — unknown contract size, may not trade", pair)
+                    skipped_pairs.append(pair)
+                    continue
+                try:
+                    ticker = await self.delta.fetch_ticker(pair)
+                    price = float(ticker.get("last", 0) or 0)
+                except Exception:
+                    price = 0
+                if price > 0:
+                    collateral = (contract_size * price) / config.delta.leverage
+                    affordable = delta_bal >= collateral
+                    status = "ACTIVE" if affordable else "SKIPPED"
+                    logger.info(
+                        "[STARTUP] %s %s — 1 contract=$%.2f collateral (%dx), bal=$%.2f",
+                        pair, status, collateral, config.delta.leverage, delta_bal,
+                    )
+                    if affordable:
+                        active_pairs.append(pair)
+                    else:
+                        skipped_pairs.append(pair)
+                else:
+                    logger.warning("[STARTUP] %s — could not fetch price", pair)
+                    active_pairs.append(pair)  # still register, let runtime handle it
+            logger.info(
+                "[STARTUP] Active: %s | Skipped: %s",
+                ", ".join(active_pairs) or "none",
+                ", ".join(skipped_pairs) or "none",
+            )
+
         # Notify
         await self.alerts.send_bot_started(
             self.all_pairs, total_capital,

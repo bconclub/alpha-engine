@@ -24,12 +24,17 @@ BASE_DELAY = 1.0  # seconds
 
 # Delta Exchange India contract sizes (linear perpetual, settled in USD)
 # 1 ETH contract = 0.01 ETH, 1 BTC contract = 0.001 BTC
+# 1 SOL contract = 1.0 SOL, 1 XRP contract = 1.0 XRP
 # The amount in create_order is the number of INTEGER contracts.
 DELTA_CONTRACT_SIZE: dict[str, float] = {
-    "ETH/USD:USD": 0.01,     # 1 contract = 0.01 ETH
+    "ETH/USD:USD": 0.01,     # 1 contract = 0.01 ETH (~$20 notional)
     "ETHUSD": 0.01,          # alias
-    "BTC/USD:USD": 0.001,    # 1 contract = 0.001 BTC
+    "BTC/USD:USD": 0.001,    # 1 contract = 0.001 BTC (~$70 notional)
     "BTCUSD": 0.001,         # alias
+    "SOL/USD:USD": 1.0,      # 1 contract = 1.0 SOL (~$140 notional)
+    "SOLUSD": 1.0,           # alias
+    "XRP/USD:USD": 1.0,      # 1 contract = 1.0 XRP (~$0.55 notional)
+    "XRPUSD": 1.0,           # alias
 }
 
 

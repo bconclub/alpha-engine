@@ -43,6 +43,9 @@ class MarketAnalysis:
     bb_lower: float = 0.0
     # Short-term price change (% over last few candles)
     price_change_pct: float = 0.0
+    # 1h and 24h price changes (for dashboard Market Overview)
+    price_change_1h: float = 0.0
+    price_change_24h: float = 0.0
 
 
 class MarketAnalyzer:
@@ -74,6 +77,25 @@ class MarketAnalyzer:
         ohlcv = await self.exchange.fetch_ohlcv(pair, self.timeframe, limit=self.limit)
         df = self._to_dataframe(ohlcv)
         analysis = self._classify(df, pair)
+
+        # ── Enrich with 1h price change from candle data ─────────────────
+        # Approximate: 4 candles back for 15m timeframe ≈ 60 minutes
+        if len(df) >= 5:
+            price_1h_ago = float(df["close"].iloc[-5])
+            if price_1h_ago > 0:
+                analysis.price_change_1h = (
+                    (analysis.current_price - price_1h_ago) / price_1h_ago
+                ) * 100
+
+        # ── Enrich with 24h price change from exchange ticker ────────────
+        try:
+            ticker = await self.exchange.fetch_ticker(pair)
+            pct_24h = ticker.get("percentage")
+            if pct_24h is not None:
+                analysis.price_change_24h = float(pct_24h)
+        except Exception:
+            pass  # leave as 0.0
+
         self._last_analysis[pair] = analysis
 
         logger.info(

@@ -196,6 +196,8 @@ class StrategySelector:
                 "macd_histogram": analysis.macd_histogram,
                 "current_price": analysis.current_price,
                 "price_change_15m": analysis.price_change_pct,
+                "price_change_1h": analysis.price_change_1h,
+                "price_change_24h": analysis.price_change_24h,
                 "entry_distance_pct": entry_distance_pct,
                 "plus_di": analysis.plus_di,
                 "minus_di": analysis.minus_di,

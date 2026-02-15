@@ -1,14 +1,17 @@
-"""Alpha v4.1 — TREND-ALIGNED SNIPER: Trade WITH the trend, looser entries.
+"""Alpha v4.2 — TREND-GUIDED SNIPER: 15m trend GUIDES direction, loosened entries.
 
-PHILOSOPHY: Only enter in the direction of the 15-minute trend.
-Lower entry thresholds so the bot actually trades.
+PHILOSOPHY: The 15m trend GUIDES direction — it doesn't block trades entirely.
+When 15m is bearish, we LOOK for shorts with looser thresholds.
+When 15m is bullish, we LOOK for longs with looser thresholds.
 Adaptive widening: if idle 30+ min, thresholds loosen 20% more.
 
-CRITICAL RULE: Check 15-minute trend BEFORE entering.
-  - If 15m trend is bearish → only SHORT, never long
-  - If 15m trend is bullish → only LONG, never short
-  - If 15m trend is neutral → either direction (2-of-4 decides)
-  This single rule prevents most losses from counter-trend entries.
+TREND-GUIDED ENTRY (v4.2):
+  - If 15m bearish → look for SHORTs: RSI > 55 (was 60), any -momentum counts
+  - If 15m bullish → look for LONGs: RSI < 45 (was 40), any +momentum counts
+  - If 15m neutral → either direction, standard 2-of-4 decides
+  - CONFLUENCE: 15m bearish + price near BB upper → strong SHORT (enter now)
+  - CONFLUENCE: 15m bullish + price near BB lower → strong LONG (enter now)
+  Counter-trend entries still blocked (long in bearish, short in bullish).
 
 Risk Management (20x leverage):
   - Leverage: 20x — 0.35% against = 7% loss
@@ -18,12 +21,12 @@ Risk Management (20x leverage):
   - Max contracts: ETH 2, BTC 1 (smaller positions while improving)
   - Daily loss limit: 20% of capital → stop for the day
 
-Entry — TREND + 2-of-4 (loosened thresholds):
-  0. CHECK 15-MINUTE TREND FIRST (bullish/bearish/neutral)
-  1. Momentum: 0.15%+ in 60s (was 0.30%) — easier to trigger
-  2. Volume: 1.2x+ average (was 2.0x) — more volume signals fire
-  3. RSI: <40 for long, >60 for short (was <30/>70) — wider zone
-  4. BB breakout — price outside Bollinger Bands (unchanged)
+Entry — TREND-GUIDED + 2-of-4 (loosened thresholds):
+  0. GET 15-MINUTE TREND (bullish/bearish/neutral)
+  1. Momentum: 0.15%+ in 60s (trend-aligned: any positive/negative counts)
+  2. Volume: 1.2x+ average
+  3. RSI: <40 for long, >60 for short (trend-guided: <45/>55)
+  4. BB breakout — price outside Bollinger Bands
   Must have 2+ AND align with 15m trend.
 
 Adaptive Widening (idle 30+ min):
@@ -154,13 +157,19 @@ class ScalpStrategy(BaseStrategy):
     RSI_REVERSAL_SHORT = 30           # RSI < 30 while short → oversold, exit
     MOMENTUM_REVERSAL_PCT = -0.10     # strong momentum reversal against position
 
-    # ── Entry thresholds — TREND + 2-of-4 confirmation ─────────────────
-    # Loosened so the bot actually fires (was 0.30/2.0/30/70)
-    MOMENTUM_MIN_PCT = 0.15           # 0.15%+ move in 60s (was 0.30%)
+    # ── Entry thresholds — TREND-GUIDED + 2-of-4 confirmation ──────────
+    # Standard thresholds (loosened further when trend aligns):
+    MOMENTUM_MIN_PCT = 0.15           # 0.15%+ move in 60s (trend-aligned: any direction)
     VOL_SPIKE_RATIO = 1.2             # volume > 1.2x average (was 2.0x)
-    RSI_EXTREME_LONG = 40             # RSI < 40 = oversold zone → long (was 30)
-    RSI_EXTREME_SHORT = 60            # RSI > 60 = overbought zone → short (was 70)
+    RSI_EXTREME_LONG = 40             # RSI < 40 = oversold → long (trend-guided: < 45)
+    RSI_EXTREME_SHORT = 60            # RSI > 60 = overbought → short (trend-guided: > 55)
     BB_BREAKOUT = True                # price outside BB = breakout
+    # Trend-guided RSI thresholds (looser when 15m trend aligns):
+    RSI_TREND_LONG = 45               # RSI < 45 when 15m is bullish
+    RSI_TREND_SHORT = 55              # RSI > 55 when 15m is bearish
+    # Trend+BB confluence threshold:
+    BB_TREND_UPPER_PCT = 0.85         # price in top 15% of BB + bearish → short
+    BB_TREND_LOWER_PCT = 0.15         # price in bottom 15% of BB + bullish → long
 
     # ── Adaptive widening (if idle too long, loosen by 20%) ──────────
     IDLE_WIDEN_SECONDS = 30 * 60      # after 30 min idle, widen thresholds
@@ -170,11 +179,15 @@ class ScalpStrategy(BaseStrategy):
     MIN_EXPECTED_MOVE_PCT = 0.30      # lowered from 0.50% to match new momentum
     FEE_MULTIPLIER_MIN = 13.0         # 1.5% TP / 0.083% RT mixed = 18x
 
-    # ── Position sizing (REDUCED — smaller positions while improving) ──
+    # ── Position sizing (per-pair contract limits) ──────────────────────
     CAPITAL_PCT_SPOT = 50.0
     CAPITAL_PCT_FUTURES = 80.0
-    MAX_CONTRACTS_ETH = 2             # ETH: max 2 contracts (was 5)
-    MAX_CONTRACTS_BTC = 1             # BTC: max 1 contract (was 5)
+    PAIR_MAX_CONTRACTS: dict[str, int] = {
+        "BTC": 1,              # BTC: 1 contract (~$70 notional, ~$3.50 collateral at 20x)
+        "ETH": 2,              # ETH: 2 contracts (~$40 notional, ~$2 collateral at 20x)
+        "SOL": 1,              # SOL: 1 contract (~$140 notional, ~$7 collateral at 20x)
+        "XRP": 50,             # XRP: 50 contracts (~$27.50 notional, ~$1.38 at 20x)
+    }
     MAX_POSITIONS = 3
     MAX_SPREAD_PCT = 0.15
 
@@ -205,11 +218,9 @@ class ScalpStrategy(BaseStrategy):
         self._exchange_id: str = "delta" if is_futures else "binance"
         self._market_analyzer = market_analyzer  # for 15m trend direction
 
-        # Per-pair contract limits
-        if "BTC" in pair:
-            self._max_contracts = self.MAX_CONTRACTS_BTC
-        else:
-            self._max_contracts = self.MAX_CONTRACTS_ETH
+        # Per-pair contract limits (data-driven from PAIR_MAX_CONTRACTS dict)
+        base_asset = pair.split("/")[0] if "/" in pair else pair.replace("USD", "").replace(":USD", "")
+        self._max_contracts = self.PAIR_MAX_CONTRACTS.get(base_asset, 1)
 
         # Position state
         self.in_position = False
@@ -556,19 +567,21 @@ class ScalpStrategy(BaseStrategy):
         trend_15m: str = "neutral",
         widened: bool = False,
     ) -> tuple[str, str, bool] | None:
-        """Detect quality momentum aligned with 15m trend.
+        """Detect quality momentum GUIDED by 15m trend.
 
-        Returns (side, reason, use_limit) or None.
+        Returns (side, reason, use_limit, signal_count) or None.
 
-        CRITICAL: Only enter in the direction of the 15-minute trend.
-        - 15m bullish → only LONG entries allowed
-        - 15m bearish → only SHORT entries allowed
-        - 15m neutral → either direction (2-of-4 decides)
+        The 15m trend GUIDES direction — it doesn't block trades entirely.
+        - 15m bullish → look for LONGs with LOOSENED thresholds (RSI<45, any +mom)
+        - 15m bearish → look for SHORTs with LOOSENED thresholds (RSI>55, any -mom)
+        - 15m neutral → either direction, standard 2-of-4 decides
+        - 15m bearish + price near BB upper → strong SHORT setup, enter immediately
+        - 15m bullish + price near BB lower → strong LONG setup, enter immediately
 
-        Requires AT LEAST 2 of these 4 conditions:
+        Requires AT LEAST 2 of these 4 conditions (thresholds loosened with trend):
         1. Price moved 0.15%+ in last 60s (widened: 0.12%)
         2. Volume spike 1.2x+ (widened: ~1.0x)
-        3. RSI < 40 or > 60 (widened: < 44 or > 56)
+        3. RSI < 40 or > 60 (trend-guided: < 45 or > 55)
         4. BB breakout (price outside bands)
 
         If idle 30+ min, thresholds loosen 20% (adaptive widening).
@@ -579,13 +592,38 @@ class ScalpStrategy(BaseStrategy):
         eff_mom, eff_vol, eff_rsi_l, eff_rsi_s = self._effective_thresholds(widened)
         widen_tag = " WIDE" if widened else ""
 
+        # ── TREND-GUIDED threshold adjustments ───────────────────────────
+        # When 15m trend is clear, loosen thresholds in the trend direction
+        # so the bot actually enters WITH the trend instead of getting stuck.
+        if trend_15m == "bullish":
+            trend_rsi_l = self.RSI_TREND_LONG   # RSI < 45 = long (loosened from 40)
+            trend_rsi_s = eff_rsi_s             # standard for counter-trend
+            trend_mom_l = 0.0                   # any positive momentum counts
+            trend_mom_s = eff_mom               # standard for counter-trend
+        elif trend_15m == "bearish":
+            trend_rsi_l = eff_rsi_l             # standard for counter-trend
+            trend_rsi_s = self.RSI_TREND_SHORT  # RSI > 55 = short (loosened from 60)
+            trend_mom_l = eff_mom               # standard for counter-trend
+            trend_mom_s = 0.0                   # any negative momentum counts
+        else:  # neutral
+            trend_rsi_l = eff_rsi_l
+            trend_rsi_s = eff_rsi_s
+            trend_mom_l = eff_mom
+            trend_mom_s = eff_mom
+
         # ── Count bullish and bearish signals ────────────────────────────
         bull_signals: list[str] = []
         bear_signals: list[str] = []
 
-        # 1. Momentum (60s move)
-        if momentum_60s >= eff_mom:
+        # 1. Momentum (60s move) — loosened when trend aligns
+        # Bullish: standard needs 0.15%+, but if 15m is bullish, any +mom counts
+        if momentum_60s > 0 and (momentum_60s >= eff_mom or trend_mom_l == 0.0):
             bull_signals.append(f"MOM:{momentum_60s:+.2f}%")
+        elif momentum_60s >= eff_mom:
+            bull_signals.append(f"MOM:{momentum_60s:+.2f}%")
+        # Bearish: standard needs -0.15%, but if 15m is bearish, any -mom counts
+        if momentum_60s < 0 and (abs(momentum_60s) >= eff_mom or trend_mom_s == 0.0):
+            bear_signals.append(f"MOM:{momentum_60s:+.2f}%")
         elif momentum_60s <= -eff_mom:
             bear_signals.append(f"MOM:{momentum_60s:+.2f}%")
 
@@ -601,11 +639,11 @@ class ScalpStrategy(BaseStrategy):
                 bull_signals.append(f"VOL:{vol_ratio:.1f}x")
                 bear_signals.append(f"VOL:{vol_ratio:.1f}x")
 
-        # 3. RSI extreme (using effective thresholds)
-        if rsi_now < eff_rsi_l:
-            bull_signals.append(f"RSI:{rsi_now:.0f}<{eff_rsi_l:.0f}")
-        if rsi_now > eff_rsi_s:
-            bear_signals.append(f"RSI:{rsi_now:.0f}>{eff_rsi_s:.0f}")
+        # 3. RSI extreme — loosened when trend aligns
+        if rsi_now < trend_rsi_l:
+            bull_signals.append(f"RSI:{rsi_now:.0f}<{trend_rsi_l:.0f}")
+        if rsi_now > trend_rsi_s:
+            bear_signals.append(f"RSI:{rsi_now:.0f}>{trend_rsi_s:.0f}")
 
         # 4. BB breakout
         if price > bb_upper:
@@ -613,8 +651,37 @@ class ScalpStrategy(BaseStrategy):
         if price < bb_lower:
             bear_signals.append(f"BB:breakdown<{bb_lower:.0f}")
 
-        # ── TREND FILTER: block entries against 15m trend ────────────────
-        # This is the #1 rule — prevents most losses
+        # ── TREND + BB CONFLUENCE: strong setups enter immediately ───────
+        # 15m bearish + price near BB upper = obvious SHORT
+        # 15m bullish + price near BB lower = obvious LONG
+        bb_range = bb_upper - bb_lower if bb_upper > bb_lower else 1.0
+        bb_position = (price - bb_lower) / bb_range  # 0.0 = lower, 1.0 = upper
+
+        if trend_15m == "bearish" and can_short and bb_position > self.BB_TREND_UPPER_PCT:
+            # Price is near top of BB band in a bearish trend — strong short
+            if len(bear_signals) < 2:
+                bear_signals.append(f"TREND+BB:bear@{bb_position:.0%}")
+            if len(bear_signals) >= 2:
+                reason = (
+                    f"SHORT TREND+BB: {' + '.join(bear_signals)} "
+                    f"[15m=bearish, BB@{bb_position:.0%}]{widen_tag}"
+                )
+                return ("short", reason, False, len(bear_signals))  # market order — urgent
+
+        if trend_15m == "bullish" and bb_position < self.BB_TREND_LOWER_PCT:
+            # Price is near bottom of BB band in a bullish trend — strong long
+            if len(bull_signals) < 2:
+                bull_signals.append(f"TREND+BB:bull@{bb_position:.0%}")
+            if len(bull_signals) >= 2:
+                reason = (
+                    f"LONG TREND+BB: {' + '.join(bull_signals)} "
+                    f"[15m=bullish, BB@{bb_position:.0%}]{widen_tag}"
+                )
+                return ("long", reason, False, len(bull_signals))  # market order — urgent
+
+        # ── TREND FILTER: guide direction, don't hard-block ──────────────
+        # 15m trend GUIDES direction: prefer trend-aligned entries.
+        # Counter-trend entries are only blocked (not just deprioritized).
         allow_long = trend_15m in ("bullish", "neutral")
         allow_short = trend_15m in ("bearish", "neutral")
 
@@ -641,7 +708,7 @@ class ScalpStrategy(BaseStrategy):
             # Would have entered long but 15m trend is bearish — BLOCK
             if self._tick_count % 10 == 0:
                 self.logger.info(
-                    "[%s] BLOCKED LONG — 15m trend=%s, signals=%s (would lose against trend)",
+                    "[%s] BLOCKED LONG — 15m trend=%s, signals=%s (trend guides SHORT)",
                     self.pair, trend_15m, "+".join(bull_signals),
                 )
             self.hourly_skipped += 1
@@ -668,7 +735,7 @@ class ScalpStrategy(BaseStrategy):
             # Would have entered short but 15m trend is bullish — BLOCK
             if self._tick_count % 10 == 0:
                 self.logger.info(
-                    "[%s] BLOCKED SHORT — 15m trend=%s, signals=%s (would lose against trend)",
+                    "[%s] BLOCKED SHORT — 15m trend=%s, signals=%s (trend guides LONG)",
                     self.pair, trend_15m, "+".join(bear_signals),
                 )
             self.hourly_skipped += 1
