@@ -27,15 +27,38 @@ interface TriggerInfo {
   currentPrice: number | null;
   bbUpper: number | null;
   bbLower: number | null;
+  // 15m trend direction (from engine)
+  trend: 'bullish' | 'bearish' | 'neutral';
   // 4 indicators per side
   longIndicators: IndicatorStatus[];
   longCount: number;
+  longBlocked: boolean;
   shortIndicators: IndicatorStatus[];
   shortCount: number;
+  shortBlocked: boolean;
   // Overall
   bestCount: number;
   overallStatus: string;
   statusColor: string;
+}
+
+/** Derive 15m trend direction — use DB field if present, else compute from DI/ADX. */
+function deriveTrend(log: StrategyLog): 'bullish' | 'bearish' | 'neutral' {
+  // Prefer the direction field written by the engine (after migration)
+  if (log.direction === 'bullish' || log.direction === 'bearish' || log.direction === 'neutral') {
+    return log.direction;
+  }
+  // Fallback: replicate engine logic from plus_di / minus_di / adx
+  const adx = log.adx ?? 0;
+  const plusDi = log.plus_di ?? 0;
+  const minusDi = log.minus_di ?? 0;
+  if (adx > 25 && Math.abs(plusDi - minusDi) > 5) {
+    return plusDi > minusDi ? 'bullish' : 'bearish';
+  }
+  if (adx >= 20) {
+    return plusDi > minusDi ? 'bullish' : 'bearish';
+  }
+  return 'neutral';
 }
 
 function computeTrigger(log: StrategyLog): TriggerInfo {
@@ -50,6 +73,11 @@ function computeTrigger(log: StrategyLog): TriggerInfo {
   const bbUpper = log.bb_upper ?? null;
   const bbLower = log.bb_lower ?? null;
   const hasData = rsi != null;
+
+  // ── 15m trend direction ────────────────────────────────────────────
+  const trend = deriveTrend(log);
+  const allowLong = trend === 'bullish' || trend === 'neutral';
+  const allowShort = trend === 'bearish' || trend === 'neutral';
 
   // ── Build 4 indicators for LONG ────────────────────────────────────
   const longIndicators: IndicatorStatus[] = [];
@@ -72,6 +100,8 @@ function computeTrigger(log: StrategyLog): TriggerInfo {
   longIndicators.push({ active: bbBreakLong, label: 'BB' });
   if (bbBreakLong) longCount++;
 
+  const longBlocked = longCount >= 2 && !allowLong;
+
   // ── Build 4 indicators for SHORT ───────────────────────────────────
   const shortIndicators: IndicatorStatus[] = [];
   let shortCount = 0;
@@ -92,8 +122,15 @@ function computeTrigger(log: StrategyLog): TriggerInfo {
   shortIndicators.push({ active: bbBreakShort, label: 'BB' });
   if (bbBreakShort) shortCount++;
 
-  // ── Overall status ─────────────────────────────────────────────────
+  const shortBlocked = shortCount >= 2 && !allowShort;
+
+  // ── Overall status (accounts for trend filter) ─────────────────────
   const bestCount = isFutures ? Math.max(longCount, shortCount) : longCount;
+
+  // Effective count: the best side that is NOT blocked by trend
+  const effectiveLong = allowLong ? longCount : 0;
+  const effectiveShort = isFutures ? (allowShort ? shortCount : 0) : 0;
+  const effectiveBest = Math.max(effectiveLong, effectiveShort);
 
   let overallStatus: string;
   let statusColor: string;
@@ -101,8 +138,12 @@ function computeTrigger(log: StrategyLog): TriggerInfo {
   if (!hasData) {
     overallStatus = 'Awaiting data...';
     statusColor = 'text-zinc-600';
-  } else if (bestCount >= 2) {
-    overallStatus = `${bestCount}/4 — TRADE READY`;
+  } else if (bestCount >= 2 && effectiveBest < 2) {
+    // Signals ready but trend blocks them
+    overallStatus = `${bestCount}/4 — TREND BLOCKED`;
+    statusColor = 'text-[#ff9100]';
+  } else if (effectiveBest >= 2) {
+    overallStatus = `${effectiveBest}/4 — TRADE READY`;
     statusColor = 'text-[#00c853]';
   } else if (bestCount === 1) {
     overallStatus = '1/4 — Needs 1 more';
@@ -115,8 +156,9 @@ function computeTrigger(log: StrategyLog): TriggerInfo {
   return {
     pair, exchange, isFutures, hasData,
     rsi, volumeRatio, priceChangePct, currentPrice, bbUpper, bbLower,
-    longIndicators, longCount,
-    shortIndicators, shortCount,
+    trend,
+    longIndicators, longCount, longBlocked,
+    shortIndicators, shortCount, shortBlocked,
     bestCount, overallStatus, statusColor,
   };
 }
@@ -161,29 +203,52 @@ function Dot({ active, label }: { active: boolean; label: string }) {
   );
 }
 
+// ── Trend badge ─────────────────────────────────────────────────────
+function TrendBadge({ trend }: { trend: 'bullish' | 'bearish' | 'neutral' }) {
+  const cfg = {
+    bullish:  { icon: '↑', label: '15m Bull', color: 'text-[#00c853]', bg: 'bg-[#00c853]/10' },
+    bearish:  { icon: '↓', label: '15m Bear', color: 'text-[#ff1744]', bg: 'bg-[#ff1744]/10' },
+    neutral:  { icon: '→', label: '15m Flat', color: 'text-zinc-400',  bg: 'bg-zinc-700/30' },
+  }[trend];
+
+  return (
+    <span className={cn(
+      'inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded text-[9px] font-mono font-medium',
+      cfg.color, cfg.bg,
+    )}>
+      {cfg.icon} {cfg.label}
+    </span>
+  );
+}
+
 // ── Side row: bar + dots underneath ──────────────────────────────────
 function SideRow({
   side,
   indicators,
   count,
+  blocked,
 }: {
   side: 'Long' | 'Short';
   indicators: IndicatorStatus[];
   count: number;
+  blocked: boolean;
 }) {
-  const countColor =
-    count >= 2 ? 'text-[#00c853]' :
-    count === 1 ? 'text-[#ffd600]' :
-    'text-zinc-600';
+  const countColor = blocked
+    ? 'text-[#ff9100]'
+    : count >= 2 ? 'text-[#00c853]'
+    : count === 1 ? 'text-[#ffd600]'
+    : 'text-zinc-600';
+
+  const suffix = blocked ? `${count}/4 ✕` : count >= 2 ? `${count}/4 ✓` : `${count}/4`;
 
   return (
-    <div className="space-y-1">
+    <div className={cn('space-y-1', blocked && 'opacity-50')}>
       {/* Bar row — fills based on signal count */}
       <div className="flex items-center gap-2">
         <span className="text-[10px] text-zinc-500 w-8 shrink-0">{side}</span>
-        <SignalBar count={count} />
+        <SignalBar count={blocked ? 0 : count} />
         <span className={cn('text-[10px] font-mono w-16 text-right', countColor)}>
-          {count >= 2 ? `${count}/4 ✓` : `${count}/4`}
+          {suffix}
         </span>
       </div>
       {/* Dots row (aligned under the bar) */}
@@ -264,9 +329,12 @@ export function TriggerProximity() {
                     </span>
                   )}
                 </div>
-                <span className={cn('text-[11px] font-medium', t.statusColor)}>
-                  {t.overallStatus}
-                </span>
+                <div className="flex items-center gap-2">
+                  {t.isFutures && t.hasData && <TrendBadge trend={t.trend} />}
+                  <span className={cn('text-[11px] font-medium', t.statusColor)}>
+                    {t.overallStatus}
+                  </span>
+                </div>
               </div>
 
               {t.hasData ? (
@@ -276,6 +344,7 @@ export function TriggerProximity() {
                     side="Long"
                     indicators={t.longIndicators}
                     count={t.longCount}
+                    blocked={t.longBlocked}
                   />
                   {/* Short: bar + dots (futures only) */}
                   {t.isFutures && (
@@ -283,6 +352,7 @@ export function TriggerProximity() {
                       side="Short"
                       indicators={t.shortIndicators}
                       count={t.shortCount}
+                      blocked={t.shortBlocked}
                     />
                   )}
                   {/* Compact values */}

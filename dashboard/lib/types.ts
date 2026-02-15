@@ -54,6 +54,7 @@ export interface StrategyLog {
   price_change_15m?: number;
   plus_di?: number;
   minus_di?: number;
+  direction?: string;  // "bullish" | "bearish" | "neutral"
 }
 
 export interface BotStatus {

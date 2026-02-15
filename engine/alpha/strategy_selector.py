@@ -199,6 +199,7 @@ class StrategySelector:
                 "entry_distance_pct": entry_distance_pct,
                 "plus_di": analysis.plus_di,
                 "minus_di": analysis.minus_di,
+                "direction": analysis.direction,
                 "strategy_selected": strategy.value if strategy else "paused",
                 "reason": reason,
             })
