@@ -114,7 +114,15 @@ class BaseStrategy(ABC):
                 break
             except Exception:
                 self.logger.exception("Error in %s check loop", self.name.value)
-            await asyncio.sleep(self.check_interval_sec)
+            await asyncio.sleep(self.get_tick_interval())
+
+    def get_tick_interval(self) -> int:
+        """Return the current tick interval in seconds.
+
+        Override in subclass for dynamic intervals (e.g., faster when in position).
+        Default: returns the static check_interval_sec.
+        """
+        return self.check_interval_sec
 
     # -- Hooks for subclasses --------------------------------------------------
 

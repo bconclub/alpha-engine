@@ -1,4 +1,4 @@
-"""Alpha v5.3 — ATR-DYNAMIC SL/TP: per-asset volatility-adjusted risk management.
+"""Alpha v5.4 — FAST EXIT: 1s ticks, aggressive trailing, profit decay protection.
 
 PHILOSOPHY: Two strong positions beat four weak ones. Focus capital on the
 best signals. After a loss, pause and let the market settle before re-entering.
@@ -25,15 +25,21 @@ Risk Management (20x leverage) — ATR-DYNAMIC:
   - TP = max(pair_floor, ATR_1m * 4.0) — reward > 2.5x risk
   - Per-pair floors: BTC/ETH 0.35%/1.5%, SOL 0.50%/2.0%, XRP 0.60%/2.0%
   - SL cap: 1.5%, TP cap: 5.0%
-  - Trailing: activates at +0.30% — protect profits EARLY
+  - Trailing: activates at +0.20% — protect profits EARLY
   - Max hold: 5 min — scalping is quick
+
+TICK SPEED — DYNAMIC:
+  - 1s ticks when in position (fetch_ticker for speed)
+  - 5s ticks when scanning (full OHLCV for indicators)
+  - Full OHLCV refresh every 5th in-position tick (ATR/RSI update)
 
 Exit — FAST, PROTECT PROFITS:
   1. Stop loss — ATR-dynamic, cut losers fast
-  2. Breakeven SL — if not profitable by 2 min, tighten SL to entry
-  3. Trailing stop — activates at +0.30%, dynamic trail widens with profit
-  4. Profit pullback — if peak > 0.50% and drops 40% from peak, EXIT
-  5. Signal reversal — exit at +0.30% profit if RSI/momentum reverses
+  2. Breakeven SL — if not profitable by 60s, tighten SL to entry
+  3. Profit pullback — if peak > 0.50% and drops 40% from peak, EXIT
+  3.5. Profit decay — if peak was > 0.30% and drops to < 0.10%, EXIT
+  4. Signal reversal — exit at +0.30% profit if RSI/momentum reverses
+  5. Trailing stop — activates at +0.20%, dynamic trail widens with profit
   6. Timeout — 5 min max (only if not trailing)
   7. Flatline — 2 min with < 0.05% move = dead momentum, exit
 """
@@ -126,13 +132,15 @@ def _soul_check(context: str) -> str:
 
 
 class ScalpStrategy(BaseStrategy):
-    """Focused Signal v5.3 — ATR-dynamic SL/TP per asset volatility.
+    """Focused Signal v5.4 — Fast exit: 1s ticks, aggressive trail, profit decay.
 
     2-of-4 signals (momentum, volume, RSI, BB mean-reversion) with uniform
     thresholds. Max 2 positions. 2nd only if 1st is green and signal is 3/4+.
     Post-SL cooldown: 2 min. After 3 consecutive losses: 5 min pause.
     SL/TP computed from 1m ATR: SL = max(floor, ATR*1.5), TP = max(floor, ATR*4).
     Per-pair floors: BTC/ETH 0.35%/1.5%, SOL 0.5%/2.0%, XRP 0.6%/2.0%.
+    Dynamic ticks: 1s when in position, 5s when scanning.
+    Trail activates at +0.20%. Profit decay exit if peak > 0.30% drops to < 0.10%.
     """
 
     name = StrategyName.SCALP
@@ -159,16 +167,20 @@ class ScalpStrategy(BaseStrategy):
     }
     ATR_SL_MULTIPLIER = 1.5          # SL = ATR_1m_pct * 1.5 (avoid noise stops)
     ATR_TP_MULTIPLIER = 4.0          # TP = ATR_1m_pct * 4.0 (reward > 2.5x risk)
-    TRAILING_ACTIVATE_PCT = 0.30      # activate trail at +0.30% — protect profits EARLY
-    TRAILING_DISTANCE_PCT = 0.30      # initial trail: 0.30% behind peak
+    TRAILING_ACTIVATE_PCT = 0.20      # activate trail at +0.20% — lock profits FAST
+    TRAILING_DISTANCE_PCT = 0.15      # initial trail: tight 0.15% behind peak
     MAX_HOLD_SECONDS = 5 * 60         # 5 min max — scalping is quick
     FLATLINE_SECONDS = 2 * 60         # 2 min flat = dead momentum, exit
     FLATLINE_MIN_MOVE_PCT = 0.05      # "flat" means < 0.05% total move
 
     # ── Breakeven & profit protection ─────────────────────────────────
-    BREAKEVEN_AFTER_SECONDS = 2 * 60  # tighten SL to breakeven after 2 min if not profitable
+    BREAKEVEN_AFTER_SECONDS = 60      # 60s — tighten SL to breakeven FAST
     PROFIT_PULLBACK_MIN_PEAK = 0.50   # peak must be > 0.50% to trigger pullback exit
     PROFIT_PULLBACK_PCT = 40.0        # exit if profit drops 40% from peak
+
+    # ── Profit decay — don't let green trades go to zero ────────────
+    PROFIT_DECAY_PEAK_MIN = 0.30      # peak must have been > 0.30%
+    PROFIT_DECAY_EXIT_AT = 0.10       # exit if decays to < 0.10%
 
     # ── Signal reversal — exit earlier in quick scalp mode ───────────
     REVERSAL_MIN_PROFIT_PCT = 0.30    # exit on reversal at just +0.30% (was 1.50%)
@@ -178,7 +190,8 @@ class ScalpStrategy(BaseStrategy):
     # Trail distance ONLY increases, never tightens once widened.
     # At 20x leverage: +3% price = +60% capital, trailing 1% = locks +2% min (40% capital)
     TRAIL_TIERS: list[tuple[float, float]] = [
-        (0.50, 0.30),   # +0.5% to +1%: tight 0.30% trail
+        (0.20, 0.15),   # +0.2% to +0.5%: very tight, lock it in
+        (0.50, 0.25),   # +0.5% to +1%: slightly wider
         (1.00, 0.50),   # +1% to +2%: give room to run
         (2.00, 0.70),   # +2% to +3%: widen further
         (3.00, 1.00),   # +3%+: max breathing room, locks +2% min
@@ -299,6 +312,8 @@ class ScalpStrategy(BaseStrategy):
         self.lowest_since_entry: float = float("inf")
         self._trailing_active: bool = False
         self._trail_distance_pct: float = self.TRAILING_DISTANCE_PCT  # dynamic, only widens
+        self._peak_unrealized_pnl: float = 0.0  # track peak P&L for decay exit
+        self._in_position_tick: int = 0  # counts 1s ticks while in position (for OHLCV refresh)
 
         # Previous RSI for reversal detection
         self._prev_rsi: float = 50.0
@@ -349,16 +364,17 @@ class ScalpStrategy(BaseStrategy):
             rt_taker = 0.20
         tiers_str = " → ".join(f"+{p}%:{d}%" for p, d in self.TRAIL_TIERS)
         self.logger.info(
-            "[%s] FOCUSED SIGNAL v5.3 ACTIVE (%s) — tick=%ds, "
+            "[%s] FOCUSED SIGNAL v5.4 ACTIVE (%s) — tick=1s/5s(dynamic), "
             "SL=%.2f%%(floor,ATR-dynamic) TP=%.2f%% Trail@%.1f%% [%s] MaxHold=%ds Breakeven@%ds "
-            "Pullback=%.0f%%@%.1f%% Flatline=%ds/%.2f%% "
+            "Pullback=%.0f%%@%.1f%% Decay=peak>%.1f%%→exit<%.1f%% Flatline=%ds/%.2f%% "
             "MaxPos=%d MaxContracts=%d SLcool=%ds LossStreak=%d→%ds "
             "15m=INFO_ONLY DailyLossLimit=%.0f%%%s",
-            self.pair, tag, self.check_interval_sec,
+            self.pair, tag,
             self._sl_pct, self._tp_pct,
             self.TRAILING_ACTIVATE_PCT, tiers_str,
             self.MAX_HOLD_SECONDS, self.BREAKEVEN_AFTER_SECONDS,
             self.PROFIT_PULLBACK_PCT, self.PROFIT_PULLBACK_MIN_PEAK,
+            self.PROFIT_DECAY_PEAK_MIN, self.PROFIT_DECAY_EXIT_AT,
             self.FLATLINE_SECONDS, self.FLATLINE_MIN_MOVE_PCT,
             self.MAX_POSITIONS, self._max_contracts,
             self.SL_COOLDOWN_SECONDS, self.CONSECUTIVE_LOSS_LIMIT,
@@ -367,6 +383,10 @@ class ScalpStrategy(BaseStrategy):
             pos_info,
         )
         self.logger.info("[%s] Soul: %s", self.pair, soul_msg)
+
+    def get_tick_interval(self) -> int:
+        """Dynamic tick: 1s when holding a position, 5s when scanning."""
+        return 1 if self.in_position else 5
 
     async def on_stop(self) -> None:
         self.logger.info(
@@ -468,36 +488,61 @@ class ScalpStrategy(BaseStrategy):
                 )
             return signals
 
-        # ── Fetch 1m candles ───────────────────────────────────────────
-        ohlcv = await exchange.fetch_ohlcv(self.pair, "1m", limit=30)
-        df = pd.DataFrame(ohlcv, columns=["timestamp", "open", "high", "low", "close", "volume"])
-        close = df["close"]
-        volume = df["volume"]
-        current_price = float(close.iloc[-1])
+        # ── FAST PATH: when in position, use fetch_ticker (1s) instead of fetch_ohlcv (5s) ──
+        # Full OHLCV only every 5th in-position tick (for indicator refresh) or when scanning
+        rsi_now = self._prev_rsi  # default to cached RSI for fast ticks
+        bb_upper = 0.0
+        bb_lower = 0.0
+        vol_ratio = 0.0
+        momentum_60s = 0.0
+        momentum_120s = 0.0
+        _need_full_indicators = True
 
-        # ── Update dynamic ATR-based SL/TP ────────────────────────────
-        self._update_dynamic_sl_tp(df, current_price)
+        if self.in_position:
+            self._in_position_tick += 1
+            if self._in_position_tick % 5 != 0:
+                # FAST TICK: just fetch price via ticker (much lighter than OHLCV)
+                try:
+                    ticker = await exchange.fetch_ticker(self.pair)
+                    current_price = float(ticker.get("last", 0) or 0)
+                except Exception:
+                    return signals  # skip this tick if ticker fails
+                _need_full_indicators = False
+            else:
+                # Every 5th tick: do full OHLCV refresh for indicators + ATR
+                _need_full_indicators = True
 
-        # ── Compute indicators ─────────────────────────────────────────
-        rsi_series = ta.momentum.RSIIndicator(close, window=14).rsi()
-        rsi_now = float(rsi_series.iloc[-1]) if not rsi_series.empty else 50.0
+        if _need_full_indicators:
+            # Full OHLCV fetch — for entry detection OR periodic in-position refresh
+            ohlcv = await exchange.fetch_ohlcv(self.pair, "1m", limit=30)
+            df = pd.DataFrame(ohlcv, columns=["timestamp", "open", "high", "low", "close", "volume"])
+            close = df["close"]
+            volume = df["volume"]
+            current_price = float(close.iloc[-1])
 
-        bb = ta.volatility.BollingerBands(close, window=20, window_dev=2)
-        bb_upper = float(bb.bollinger_hband().iloc[-1])
-        bb_lower = float(bb.bollinger_lband().iloc[-1])
+            # Update dynamic ATR-based SL/TP
+            self._update_dynamic_sl_tp(df, current_price)
 
-        # Volume ratio (current vs 10-candle average)
-        avg_vol = float(volume.iloc[-11:-1].mean()) if len(volume) >= 11 else float(volume.mean())
-        current_vol = float(volume.iloc[-1])
-        vol_ratio = current_vol / avg_vol if avg_vol > 0 else 0
+            # Compute indicators
+            rsi_series = ta.momentum.RSIIndicator(close, window=14).rsi()
+            rsi_now = float(rsi_series.iloc[-1]) if not rsi_series.empty else 50.0
 
-        # 60-second momentum (last 1 full candle)
-        price_1m_ago = float(close.iloc[-2]) if len(close) >= 2 else current_price
-        momentum_60s = ((current_price - price_1m_ago) / price_1m_ago * 100) if price_1m_ago > 0 else 0
+            bb = ta.volatility.BollingerBands(close, window=20, window_dev=2)
+            bb_upper = float(bb.bollinger_hband().iloc[-1])
+            bb_lower = float(bb.bollinger_lband().iloc[-1])
 
-        # 2-candle momentum (120 seconds) for trend confirmation
-        price_2m_ago = float(close.iloc[-3]) if len(close) >= 3 else price_1m_ago
-        momentum_120s = ((current_price - price_2m_ago) / price_2m_ago * 100) if price_2m_ago > 0 else 0
+            # Volume ratio (current vs 10-candle average)
+            avg_vol = float(volume.iloc[-11:-1].mean()) if len(volume) >= 11 else float(volume.mean())
+            current_vol = float(volume.iloc[-1])
+            vol_ratio = current_vol / avg_vol if avg_vol > 0 else 0
+
+            # 60-second momentum (last 1 full candle)
+            price_1m_ago = float(close.iloc[-2]) if len(close) >= 2 else current_price
+            momentum_60s = ((current_price - price_1m_ago) / price_1m_ago * 100) if price_1m_ago > 0 else 0
+
+            # 2-candle momentum (120 seconds) for trend confirmation
+            price_2m_ago = float(close.iloc[-3]) if len(close) >= 3 else price_1m_ago
+            momentum_120s = ((current_price - price_2m_ago) / price_2m_ago * 100) if price_2m_ago > 0 else 0
 
         # ── Heartbeat every 60 seconds ─────────────────────────────────
         if now - self._last_heartbeat >= 60:
@@ -883,17 +928,21 @@ class ScalpStrategy(BaseStrategy):
         """Check exit conditions — QUICK SCALP style.
 
         Priority:
-        1. Stop loss — 0.35% price, cut losers fast
-        2. Breakeven SL — tighten to entry if not profitable by 2 min
+        1. Stop loss — ATR-dynamic, cut losers fast
+        2. Breakeven SL — tighten to entry if not profitable by 60s
         3. Profit pullback — if peak > 0.50% and drops 40% from peak, EXIT
+        3.5. Profit decay — if peak was > 0.30% and drops to < 0.10%, EXIT
         4. Signal reversal — exit at +0.30% profit if reversal detected
-        5. Trailing stop — activates at +0.30%, dynamic trail widens with profit
+        5. Trailing stop — activates at +0.20%, dynamic trail widens with profit
         6. Timeout — 5 min max (only if not trailing)
         7. Flatline — 2 min with < 0.05% move = dead momentum
         """
         signals: list[Signal] = []
         hold_seconds = time.monotonic() - self.entry_time
         pnl_pct = self._calc_pnl_pct(current_price)
+
+        # Track peak unrealized P&L (for decay exit)
+        self._peak_unrealized_pnl = max(self._peak_unrealized_pnl, pnl_pct)
 
         if self.position_side == "long":
             self.highest_since_entry = max(self.highest_since_entry, current_price)
@@ -927,6 +976,15 @@ class ScalpStrategy(BaseStrategy):
                         self.pair, peak_pnl, pnl_pct, pullback_pct,
                     )
                     return self._do_exit(current_price, pnl_pct, "long", "PULLBACK", hold_seconds)
+
+            # ── 3.5. PROFIT DECAY — don't let green go to zero ────────
+            if (self._peak_unrealized_pnl >= self.PROFIT_DECAY_PEAK_MIN
+                    and pnl_pct < self.PROFIT_DECAY_EXIT_AT):
+                self.logger.info(
+                    "[%s] PROFIT DECAY — peak was +%.2f%% but decayed to +%.2f%% (< %.2f%%) | cutting",
+                    self.pair, self._peak_unrealized_pnl, pnl_pct, self.PROFIT_DECAY_EXIT_AT,
+                )
+                return self._do_exit(current_price, pnl_pct, "long", "DECAY", hold_seconds)
 
             # ── 4. SIGNAL REVERSAL — exit early when in profit ─────────
             if pnl_pct >= self.REVERSAL_MIN_PROFIT_PCT:
@@ -1020,6 +1078,15 @@ class ScalpStrategy(BaseStrategy):
                         self.pair, peak_pnl, pnl_pct, pullback_pct,
                     )
                     return self._do_exit(current_price, pnl_pct, "short", "PULLBACK", hold_seconds)
+
+            # ── 3.5. PROFIT DECAY — don't let green go to zero ────────
+            if (self._peak_unrealized_pnl >= self.PROFIT_DECAY_PEAK_MIN
+                    and pnl_pct < self.PROFIT_DECAY_EXIT_AT):
+                self.logger.info(
+                    "[%s] PROFIT DECAY — peak was +%.2f%% but decayed to +%.2f%% (< %.2f%%) | cutting",
+                    self.pair, self._peak_unrealized_pnl, pnl_pct, self.PROFIT_DECAY_EXIT_AT,
+                )
+                return self._do_exit(current_price, pnl_pct, "short", "DECAY", hold_seconds)
 
             # ── 4. SIGNAL REVERSAL — exit early when in profit ─────────
             if pnl_pct >= self.REVERSAL_MIN_PROFIT_PCT:
@@ -1499,6 +1566,8 @@ class ScalpStrategy(BaseStrategy):
         self.lowest_since_entry = price
         self._trailing_active = False
         self._trail_distance_pct = self.TRAILING_DISTANCE_PCT  # reset to initial tier
+        self._peak_unrealized_pnl = 0.0  # reset peak P&L tracker for decay exit
+        self._in_position_tick = 0  # reset tick counter for OHLCV refresh cadence
         self._hourly_trades.append(time.time())
 
     def _record_scalp_result(self, pnl_pct: float, exit_type: str) -> None:
@@ -1585,6 +1654,8 @@ class ScalpStrategy(BaseStrategy):
         self.entry_amount = 0.0
         self._trailing_active = False
         self._trail_distance_pct = self.TRAILING_DISTANCE_PCT
+        self._peak_unrealized_pnl = 0.0  # reset for next trade
+        self._in_position_tick = 0  # reset tick counter
         self._last_position_exit = now
         ScalpStrategy._live_pnl.pop(self.pair, None)  # clean up live P&L tracker
 
