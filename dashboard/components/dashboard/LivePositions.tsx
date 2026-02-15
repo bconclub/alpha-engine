@@ -29,7 +29,8 @@ interface PositionDisplay {
   leverage: number;
   pricePnlPct: number | null;    // raw price move %
   capitalPnlPct: number | null;  // leveraged capital return %
-  pnlUsd: number | null;         // dollar P&L
+  pnlUsd: number | null;         // dollar P&L (gross, no fees)
+  collateral: number | null;     // actual capital at risk
   duration: string;
   trailActive: boolean;
   trailStopPrice: number | null;
@@ -68,16 +69,19 @@ export function LivePositions() {
       let pricePnlPct: number | null = null;
       let capitalPnlPct: number | null = null;
       let pnlUsd: number | null = null;
+      let collateral: number | null = null;
 
       if (currentPrice != null && pos.entry_price > 0) {
+        // Price move %
         if (pos.position_type === 'short') {
           pricePnlPct = ((pos.entry_price - currentPrice) / pos.entry_price) * 100;
         } else {
           pricePnlPct = ((currentPrice - pos.entry_price) / pos.entry_price) * 100;
         }
+        // Capital return % = price move × leverage
         capitalPnlPct = pricePnlPct * leverage;
 
-        // Dollar P&L
+        // Dollar P&L (gross — fees deducted on close)
         let coinAmount = pos.amount;
         if (pos.exchange === 'delta') {
           const contractSize = DELTA_CONTRACT_SIZE[pos.pair] ?? 1.0;
@@ -88,23 +92,24 @@ export function LivePositions() {
         } else {
           pnlUsd = (currentPrice - pos.entry_price) * coinAmount;
         }
+
+        // Collateral = notional / leverage
+        const notional = pos.entry_price * coinAmount;
+        collateral = leverage > 1 ? notional / leverage : notional;
       }
 
       // Determine trailing status:
-      // If P&L >= 0.50%, trail is likely active (matches engine TRAILING_ACTIVATE_PCT)
+      // If price P&L >= 0.50%, trail is likely active (matches engine TRAILING_ACTIVATE_PCT)
       const trailActive = pricePnlPct != null && pricePnlPct >= 0.50;
 
       // Estimate trail stop price based on dynamic tiers
       let trailStopPrice: number | null = null;
       if (trailActive && currentPrice != null && pricePnlPct != null) {
-        // Determine trail distance from tiers
-        let trailDist = 0.30; // default
+        let trailDist = 0.30;
         const tiers: [number, number][] = [[0.50, 0.30], [1.00, 0.50], [2.00, 0.70], [3.00, 1.00]];
         for (const [minProfit, dist] of tiers) {
           if (pricePnlPct >= minProfit) trailDist = dist;
         }
-        // Trail tracks from best price (we approximate with current price)
-        // For shorts: trail above lowest; for longs: trail below highest
         if (pos.position_type === 'short') {
           trailStopPrice = currentPrice * (1 + trailDist / 100);
         } else {
@@ -124,6 +129,7 @@ export function LivePositions() {
         pricePnlPct,
         capitalPnlPct,
         pnlUsd,
+        collateral,
         duration: durationSince(pos.opened_at),
         trailActive,
         trailStopPrice,
@@ -134,7 +140,7 @@ export function LivePositions() {
     });
   }, [openPositions, currentPrices]);
 
-  if (positions.length === 0) return null; // Don't render if no positions
+  if (positions.length === 0) return null;
 
   return (
     <div className="bg-[#0d1117] border border-zinc-800 rounded-xl p-3 md:p-4">
@@ -163,58 +169,26 @@ export function LivePositions() {
                 bgColor,
               )}
             >
-              {/* Main row: Pair + Side + P&L + Status */}
-              <div className="flex items-center justify-between gap-2">
-                {/* Left: pair info */}
+              {/* Row 1: Pair + Side + Status + Duration */}
+              <div className="flex items-center justify-between gap-2 mb-1.5">
                 <div className="flex items-center gap-2 min-w-0">
-                  {/* Position type indicator */}
                   <span
                     className={cn(
-                      'w-1.5 h-6 rounded-sm shrink-0',
+                      'w-1.5 h-5 rounded-sm shrink-0',
                       pos.positionType === 'short' ? 'bg-[#ff1744]' : 'bg-[#00c853]',
                     )}
                   />
-                  <div className="min-w-0">
-                    <div className="flex items-center gap-1.5">
-                      <span className="text-sm font-bold text-white">{pos.pairShort}</span>
-                      <span className={cn(
-                        'text-[10px] font-semibold px-1.5 py-0.5 rounded',
-                        pos.positionType === 'short'
-                          ? 'bg-[#ff1744]/10 text-[#ff1744]'
-                          : 'bg-[#00c853]/10 text-[#00c853]',
-                      )}>
-                        {pos.positionType.toUpperCase()}
-                      </span>
-                      <span className="text-[10px] text-zinc-500">
-                        @ ${formatNumber(pos.entryPrice)}
-                      </span>
-                    </div>
-                  </div>
+                  <span className="text-sm font-bold text-white">{pos.pairShort}</span>
+                  <span className={cn(
+                    'text-[10px] font-semibold px-1.5 py-0.5 rounded',
+                    pos.positionType === 'short'
+                      ? 'bg-[#ff1744]/10 text-[#ff1744]'
+                      : 'bg-[#00c853]/10 text-[#00c853]',
+                  )}>
+                    {pos.positionType.toUpperCase()} {pos.leverage}x
+                  </span>
                 </div>
-
-                {/* Center: P&L */}
-                <div className="flex items-center gap-3 shrink-0">
-                  {pos.pricePnlPct != null ? (
-                    <div className="text-right">
-                      <div className={cn('text-sm font-mono font-bold', pnlColor)}>
-                        {pos.pricePnlPct >= 0 ? '+' : ''}{pos.pricePnlPct.toFixed(2)}%
-                        <span className="text-[10px] font-normal ml-1">
-                          ({pos.capitalPnlPct != null ? `${pos.capitalPnlPct >= 0 ? '+' : ''}${pos.capitalPnlPct.toFixed(0)}%` : '—'})
-                        </span>
-                      </div>
-                      {pos.pnlUsd != null && (
-                        <div className={cn('text-[10px] font-mono', pnlColor)}>
-                          {pos.pnlUsd >= 0 ? '+' : ''}{formatCurrency(pos.pnlUsd)}
-                        </div>
-                      )}
-                    </div>
-                  ) : (
-                    <span className="text-xs text-zinc-500">Calculating...</span>
-                  )}
-                </div>
-
-                {/* Right: Status badge */}
-                <div className="flex flex-col items-end gap-0.5 shrink-0">
+                <div className="flex items-center gap-2 shrink-0">
                   {pos.trailActive ? (
                     <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-medium bg-[#00c853]/10 text-[#00c853]">
                       <span className="w-1.5 h-1.5 rounded-full bg-[#00c853] animate-pulse" />
@@ -233,20 +207,52 @@ export function LivePositions() {
                 </div>
               </div>
 
-              {/* Bottom row: Trail info + details */}
-              <div className="flex items-center gap-3 mt-1.5 text-[10px] font-mono">
+              {/* Row 2: Labeled P&L grid — clear what each number means */}
+              {pos.pricePnlPct != null ? (
+                <div className="grid grid-cols-2 sm:grid-cols-4 gap-x-4 gap-y-1 text-xs font-mono">
+                  {/* P&L $ — the big number */}
+                  <div>
+                    <div className="text-[9px] text-zinc-500 uppercase">P&L</div>
+                    <div className={cn('font-bold', pnlColor)}>
+                      {pos.pnlUsd != null ? `${pos.pnlUsd >= 0 ? '+' : ''}${formatCurrency(pos.pnlUsd)}` : '—'}
+                    </div>
+                  </div>
+                  {/* Capital return % — your actual ROI */}
+                  <div>
+                    <div className="text-[9px] text-zinc-500 uppercase">Return</div>
+                    <div className={cn('font-bold', pnlColor)}>
+                      {pos.capitalPnlPct != null ? `${pos.capitalPnlPct >= 0 ? '+' : ''}${pos.capitalPnlPct.toFixed(1)}%` : '—'}
+                    </div>
+                  </div>
+                  {/* Entry → Now */}
+                  <div>
+                    <div className="text-[9px] text-zinc-500 uppercase">Entry → Now</div>
+                    <div className="text-zinc-300">
+                      ${formatNumber(pos.entryPrice)} → ${pos.currentPrice != null ? formatNumber(pos.currentPrice) : '...'}
+                    </div>
+                  </div>
+                  {/* Price move % + size */}
+                  <div>
+                    <div className="text-[9px] text-zinc-500 uppercase">Price Move</div>
+                    <div className={cn(pnlColor)}>
+                      {pos.pricePnlPct >= 0 ? '+' : ''}{pos.pricePnlPct.toFixed(3)}%
+                    </div>
+                  </div>
+                </div>
+              ) : (
+                <span className="text-xs text-zinc-500">Calculating...</span>
+              )}
+
+              {/* Row 3: Trail info + position size */}
+              <div className="flex items-center gap-3 mt-1.5 text-[10px] font-mono text-zinc-500">
                 {pos.trailActive && pos.trailStopPrice != null && (
-                  <span className="text-zinc-400">
-                    trail: <span className="text-zinc-300">${formatNumber(pos.trailStopPrice)}</span>
+                  <span>
+                    trail stop: <span className="text-zinc-300">${formatNumber(pos.trailStopPrice)}</span>
                   </span>
                 )}
-                {pos.currentPrice != null && (
-                  <span className="text-zinc-500">
-                    now: ${formatNumber(pos.currentPrice)}
-                  </span>
-                )}
-                <span className="text-zinc-600">
-                  {pos.contracts}{pos.exchange === 'delta' ? 'ct' : ''} @ {pos.leverage}x
+                <span>
+                  {pos.contracts}{pos.exchange === 'delta' ? ' ct' : ''}
+                  {pos.collateral != null && ` · $${pos.collateral.toFixed(2)} collateral`}
                 </span>
               </div>
             </Link>
