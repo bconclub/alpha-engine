@@ -34,10 +34,10 @@ class RiskManager:
     Enforces risk rules before any trade is executed.
 
     Rules:
-    - Max position per trade: check COLLATERAL (margin) for futures, order value for spot
-    - Max 2 concurrent positions across ALL pairs/exchanges
+    - Max position per trade: check COLLATERAL (margin) against 80% of exchange capital
+    - Max 3 concurrent positions across ALL pairs/exchanges (3 per exchange)
     - Max 1 position per pair at a time
-    - Total exposure capped at 60% of capital (collateral-based for futures)
+    - Total exposure capped at 90% of capital (collateral-based for futures)
     - Daily loss limit: stop bot at threshold
     - Per-trade stop-loss: 2%
     - Win-rate circuit breaker: if < 40% over last 20 trades -> pause

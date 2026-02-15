@@ -1151,6 +1151,13 @@ class AlphaBot:
                 "public": config.delta.base_url,
                 "private": config.delta.base_url,
             }
+            # ── LEVERAGE SAFETY CHECK ─────────────────────────────────────
+            if config.delta.leverage < 20:
+                logger.critical(
+                    "!!! LEVERAGE IS %dx — MUST BE 20x !!! "
+                    "Set DELTA_LEVERAGE=20 in .env and restart!",
+                    config.delta.leverage,
+                )
             logger.info(
                 "Delta Exchange India initialized (futures enabled, testnet=%s, leverage=%dx, url=%s)",
                 config.delta.testnet, config.delta.leverage, config.delta.base_url,
