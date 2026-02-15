@@ -10,7 +10,11 @@ import { OpenPositions } from '@/components/dashboard/OpenPositions';
 import { PerformancePanel } from '@/components/dashboard/PerformancePanel';
 
 function ConnectionBanner() {
-  const { isConnected, trades, strategyLog } = useSupabase();
+  const { isConnected, trades, strategyLog, botStatus } = useSupabase();
+
+  const shortingEnabled = botStatus?.shorting_enabled ?? false;
+  const leverageLevel = botStatus?.leverage ?? botStatus?.leverage_level ?? 1;
+  const activeStrategiesCount = botStatus?.active_strategy_count ?? botStatus?.active_strategies_count ?? 0;
 
   return (
     <div className="bg-zinc-900/60 border border-zinc-800 rounded-lg px-3 md:px-4 py-2 flex flex-wrap items-center gap-2 md:gap-3 text-xs">
@@ -18,12 +22,22 @@ function ConnectionBanner() {
       <span className="text-zinc-400">
         {isConnected ? 'Connected' : 'Disconnected'}
       </span>
-      <span className="text-zinc-600 hidden sm:inline">|</span>
-      <span className="text-zinc-400 hidden sm:inline">
+      {/* Mobile: show key indicators inline */}
+      <span className="text-zinc-700 md:hidden">|</span>
+      <span className={`md:hidden ${shortingEnabled ? 'text-[#00c853]' : 'text-zinc-600'}`}>
+        Short {shortingEnabled ? 'ON' : 'OFF'}
+      </span>
+      <span className="text-zinc-700 md:hidden">|</span>
+      <span className="text-[#ffd600] font-mono md:hidden">{leverageLevel}x</span>
+      <span className="text-zinc-700 md:hidden">|</span>
+      <span className="text-[#2196f3] font-mono md:hidden">{activeStrategiesCount} strats</span>
+      {/* Desktop: show trades & logs */}
+      <span className="text-zinc-600 hidden md:inline">|</span>
+      <span className="text-zinc-400 hidden md:inline">
         {trades.length} trades
       </span>
-      <span className="text-zinc-600 hidden sm:inline">|</span>
-      <span className="text-zinc-400 hidden sm:inline">
+      <span className="text-zinc-600 hidden md:inline">|</span>
+      <span className="text-zinc-400 hidden md:inline">
         {strategyLog.length} logs
       </span>
     </div>
