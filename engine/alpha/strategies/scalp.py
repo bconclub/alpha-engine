@@ -1151,6 +1151,111 @@ class ScalpStrategy(BaseStrategy):
 
         return signals
 
+    def check_exits_immediate(self, current_price: float) -> None:
+        """Price-only exit check — called by WebSocket PriceFeed on every tick.
+
+        Runs SL, breakeven, trailing, pullback, decay, timeout, flatline checks.
+        Does NOT check signal reversal (needs RSI/momentum from OHLCV).
+        If exit triggered: schedules async execution and marks position closed.
+        """
+        if not self.in_position or not self.position_side:
+            return
+
+        hold_seconds = time.monotonic() - self.entry_time
+        pnl_pct = self._calc_pnl_pct(current_price)
+        side = self.position_side
+
+        # Update peak tracking
+        self._peak_unrealized_pnl = max(self._peak_unrealized_pnl, pnl_pct)
+        if side == "long":
+            self.highest_since_entry = max(self.highest_since_entry, current_price)
+        else:
+            self.lowest_since_entry = min(self.lowest_since_entry, current_price)
+
+        # Update live P&L for class-level tracker
+        ScalpStrategy._live_pnl[self.pair] = pnl_pct
+
+        exit_type: str | None = None
+
+        # ── 1. STOP LOSS ──────────────────────────────────────────────
+        if side == "long":
+            sl_price = self.entry_price * (1 - self._sl_pct / 100)
+            if current_price <= sl_price:
+                exit_type = "SL"
+        else:
+            sl_price = self.entry_price * (1 + self._sl_pct / 100)
+            if current_price >= sl_price:
+                exit_type = "SL"
+
+        # ── 2. BREAKEVEN ──────────────────────────────────────────────
+        if not exit_type and hold_seconds >= self.BREAKEVEN_AFTER_SECONDS and pnl_pct <= 0 and not self._trailing_active:
+            exit_type = "BREAKEVEN"
+
+        # ── 3. PROFIT PULLBACK ────────────────────────────────────────
+        if not exit_type and pnl_pct > 0:
+            if side == "long":
+                peak_pnl = ((self.highest_since_entry - self.entry_price) / self.entry_price) * 100
+            else:
+                peak_pnl = ((self.entry_price - self.lowest_since_entry) / self.entry_price) * 100
+            if peak_pnl >= self.PROFIT_PULLBACK_MIN_PEAK:
+                pullback_pct = ((peak_pnl - pnl_pct) / peak_pnl) * 100 if peak_pnl > 0 else 0
+                if pullback_pct >= self.PROFIT_PULLBACK_PCT:
+                    exit_type = "PULLBACK"
+
+        # ── 3.5. PROFIT DECAY ────────────────────────────────────────
+        if not exit_type and self._peak_unrealized_pnl >= self.PROFIT_DECAY_PEAK_MIN and pnl_pct < self.PROFIT_DECAY_EXIT_AT:
+            exit_type = "DECAY"
+
+        # ── 5. TRAILING STOP ─────────────────────────────────────────
+        if not exit_type:
+            if pnl_pct >= self.TRAILING_ACTIVATE_PCT and not self._trailing_active:
+                self._trailing_active = True
+                self._update_trail_distance(pnl_pct)
+
+            if self._trailing_active:
+                self._update_trail_distance(pnl_pct)
+                if side == "long":
+                    trail_stop = self.highest_since_entry * (1 - self._trail_distance_pct / 100)
+                    if current_price <= trail_stop:
+                        exit_type = "TRAIL"
+                else:
+                    trail_stop = self.lowest_since_entry * (1 + self._trail_distance_pct / 100)
+                    if current_price >= trail_stop:
+                        exit_type = "TRAIL"
+
+        # ── 6. TIMEOUT ───────────────────────────────────────────────
+        if not exit_type and hold_seconds >= self.MAX_HOLD_SECONDS and not self._trailing_active:
+            exit_type = "TIMEOUT"
+
+        # ── 7. FLATLINE ──────────────────────────────────────────────
+        if not exit_type and hold_seconds >= self.FLATLINE_SECONDS and abs(pnl_pct) < self.FLATLINE_MIN_MOVE_PCT:
+            exit_type = "FLAT"
+
+        # ── EXECUTE EXIT ─────────────────────────────────────────────
+        if exit_type:
+            self.logger.info(
+                "[%s] WS EXIT %s — %s @ $%.2f PnL=%+.2f%% (%+.1f%% capital at %dx) hold=%ds",
+                self.pair, exit_type, side, current_price,
+                pnl_pct, pnl_pct * self.leverage, self.leverage,
+                int(hold_seconds),
+            )
+            # Build exit signals and schedule execution
+            signals = self._do_exit(current_price, pnl_pct, side, f"WS-{exit_type}", hold_seconds)
+            for signal in signals:
+                asyncio.get_event_loop().create_task(self._execute_ws_exit(signal))
+
+    async def _execute_ws_exit(self, signal: Signal) -> None:
+        """Execute a WS-triggered exit signal."""
+        try:
+            if self.risk_manager.approve_signal(signal):
+                order = await self.executor.execute(signal)
+                if order is not None:
+                    self.logger.info("[%s] WS exit order filled", self.pair)
+                else:
+                    self.logger.warning("[%s] WS exit order failed/skipped", self.pair)
+        except Exception:
+            self.logger.exception("[%s] WS exit execution error", self.pair)
+
     def _do_exit(
         self, price: float, pnl_pct: float, side: str,
         exit_type: str, hold_seconds: float,

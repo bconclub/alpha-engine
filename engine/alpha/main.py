@@ -19,6 +19,7 @@ from alpha.alerts import AlertManager
 from alpha.config import config
 from alpha.db import Database
 from alpha.market_analyzer import MarketAnalyzer
+from alpha.price_feed import PriceFeed
 from alpha.risk_manager import RiskManager
 from alpha.strategies.base import Signal, StrategyName
 from alpha.strategies.options_scalp import OptionsScalpStrategy
@@ -55,6 +56,9 @@ class AlphaBot:
         self._scalp_strategies: dict[str, ScalpStrategy] = {}
         # Options overlay strategies: pair -> OptionsScalpStrategy
         self._options_strategies: dict[str, OptionsScalpStrategy] = {}
+
+        # WebSocket price feed for real-time exit checks
+        self._price_feed: PriceFeed | None = None
 
         # Scheduler
         self._scheduler = AsyncIOScheduler()
@@ -202,6 +206,30 @@ class AlphaBot:
         if self._options_strategies:
             logger.info("Options overlay started on %d pairs", len(self._options_strategies))
 
+        # Start WebSocket price feed for real-time exit checks
+        try:
+            binance_ws_exchange = None
+            if config.binance.api_key:
+                import ccxt.pro as ccxtpro
+                binance_ws_exchange = ccxtpro.binance({
+                    "apiKey": config.binance.api_key,
+                    "secret": config.binance.secret,
+                    "enableRateLimit": True,
+                    "options": {"defaultType": "spot"},
+                })
+
+            self._price_feed = PriceFeed(
+                strategies=self._scalp_strategies,
+                binance_exchange=binance_ws_exchange,
+                delta_pairs=self.delta_pairs,
+                binance_pairs=self.pairs,
+                delta_testnet=config.delta.testnet,
+            )
+            await self._price_feed.start()
+        except Exception:
+            logger.exception("PriceFeed failed to start — REST polling continues as fallback")
+            self._price_feed = None
+
         # Schedule periodic tasks
         self._scheduler.add_job(
             self._analysis_cycle, "interval",
@@ -305,6 +333,10 @@ class AlphaBot:
             return
         self._running = False
         logger.info("Shutting down: %s", reason)
+
+        # Stop WebSocket price feed first (prevents new exit triggers)
+        if self._price_feed:
+            await self._price_feed.stop()
 
         # Stop all active strategies concurrently (scalp + options overlays)
         stop_tasks = []
