@@ -23,7 +23,7 @@ import type { Strategy, Trade } from '@/lib/types';
 // Constants
 // ---------------------------------------------------------------------------
 
-const STRATEGIES: Strategy[] = ['scalp', 'futures_momentum', 'momentum', 'options_scalp'];
+const STRATEGIES: Strategy[] = ['scalp', 'options_scalp'];
 
 // ---------------------------------------------------------------------------
 // Helpers

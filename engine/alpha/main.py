@@ -20,15 +20,11 @@ from alpha.config import config
 from alpha.db import Database
 from alpha.market_analyzer import MarketAnalyzer
 from alpha.risk_manager import RiskManager
-from alpha.strategies.arbitrage import ArbitrageStrategy
-from alpha.strategies.base import BaseStrategy, StrategyName
-from alpha.strategies.futures_momentum import FuturesMomentumStrategy
-from alpha.strategies.grid import GridStrategy
-from alpha.strategies.momentum import MomentumStrategy
+from alpha.strategies.base import Signal, StrategyName
 from alpha.strategies.options_scalp import OptionsScalpStrategy
 from alpha.strategies.scalp import ScalpStrategy
 from alpha.strategy_selector import StrategySelector
-from alpha.trade_executor import TradeExecutor
+from alpha.trade_executor import TradeExecutor, DELTA_CONTRACT_SIZE
 from alpha.utils import iso_now, setup_logger
 
 logger = setup_logger("main")
@@ -55,11 +51,6 @@ class AlphaBot:
         self.pairs: list[str] = config.trading.pairs
         # Delta futures pairs
         self.delta_pairs: list[str] = config.delta.pairs
-
-        # Per-pair strategy instances:  pair -> {StrategyName -> instance}
-        self._strategies: dict[str, dict[StrategyName, BaseStrategy]] = {}
-        # Per-pair active strategy:  pair -> running strategy or None
-        self._active_strategies: dict[str, BaseStrategy | None] = {}
 
         # Scalp overlay strategies: pair -> ScalpStrategy (run independently)
         self._scalp_strategies: dict[str, ScalpStrategy] = {}
@@ -164,18 +155,7 @@ class AlphaBot:
             delta_pairs=self.delta_pairs if self.delta else None,
         )
 
-        # Register strategies — Delta only
-        if self.delta:
-            for pair in self.delta_pairs:
-                self._strategies[pair] = {
-                    StrategyName.FUTURES_MOMENTUM: FuturesMomentumStrategy(
-                        pair, self.executor, self.risk_manager,
-                        exchange=self.delta,
-                    ),
-                }
-                self._active_strategies[pair] = None
-
-        # Register scalp overlay — Delta only (with 15m trend filter)
+        # Register scalp strategies — Delta only (with 15m trend filter)
         if self.delta:
             for pair in self.delta_pairs:
                 self._scalp_strategies[pair] = ScalpStrategy(
@@ -199,6 +179,11 @@ class AlphaBot:
 
         # Inject restored position state into strategy instances
         self._restore_strategy_state()
+
+        # ── Close orphaned positions from removed strategies ─────────────
+        # If any open trades exist from non-scalp strategies (e.g. futures_momentum),
+        # close them immediately at market to free up margin.
+        await self._close_orphaned_positions()
 
         # Start all scalp strategies immediately (they run as parallel overlays)
         for pair, scalp in self._scalp_strategies.items():
@@ -302,11 +287,8 @@ class AlphaBot:
         self._running = False
         logger.info("Shutting down: %s", reason)
 
-        # Stop all active strategies concurrently (primary + scalp)
+        # Stop all active strategies concurrently (scalp + options overlays)
         stop_tasks = []
-        for pair, strategy in self._active_strategies.items():
-            if strategy:
-                stop_tasks.append(strategy.stop())
         for pair, scalp in self._scalp_strategies.items():
             if scalp.is_active:
                 stop_tasks.append(scalp.stop())
@@ -315,7 +297,6 @@ class AlphaBot:
                 stop_tasks.append(opts.stop())
         if stop_tasks:
             await asyncio.gather(*stop_tasks, return_exceptions=True)
-        self._active_strategies = {p: None for p in self.all_pairs}
 
         # Save final state
         await self._save_status()
@@ -375,26 +356,19 @@ class AlphaBot:
                 ", ".join(f"{a.pair}={a.signal_strength:.0f}" for a in analyses),
             )
 
-            # 4. Select strategy per pair, switch, and collect changes for alert
-            strategy_changes: list[dict[str, Any]] = []
+            # 4. Log strategy selection per pair (for DB/dashboard) — no primary strategies
             all_analysis_dicts: list[dict[str, Any]] = []
 
             for analysis in analyses:
                 pair = analysis.pair
-
-                # Record old strategy before switching
-                old_strat = self._active_strategies.get(pair)
-                old_name = old_strat.name.value if old_strat else None
 
                 # Check for arb opportunity on Binance pairs only
                 arb_opportunity = False
                 if self.kucoin and pair in self.pairs:
                     arb_opportunity = await self._check_arb_opportunity(pair)
 
-                selected = await self.selector.select(analysis, arb_opportunity)  # type: ignore[union-attr]
-                await self._switch_strategy(pair, selected)
-
-                new_name = selected.value if selected else None
+                # selector.select() logs to strategy_log DB table (dashboard reads this)
+                await self.selector.select(analysis, arb_opportunity)  # type: ignore[union-attr]
 
                 # Collect analysis data for market update (ALL pairs)
                 all_analysis_dicts.append({
@@ -405,23 +379,10 @@ class AlphaBot:
                     "direction": analysis.direction,
                 })
 
-                # Detect change (skip initial assignment on startup)
-                if new_name != old_name and self._has_run_first_cycle:
-                    strategy_changes.append({
-                        "pair": pair,
-                        "old_strategy": old_name,
-                        "new_strategy": new_name,
-                        "reason": analysis.reason,
-                    })
-
             rm = self.risk_manager
 
             # 4b. Cache latest analysis data for the hourly market update
             self._latest_analyses = all_analysis_dicts
-
-            # 4c. Send batched strategy changes (only when something changed)
-            if strategy_changes:
-                await self.alerts.send_strategy_changes(strategy_changes)
 
             # Mark first cycle complete (suppress strategy change spam on startup)
             self._has_run_first_cycle = True
@@ -439,35 +400,6 @@ class AlphaBot:
 
         except Exception:
             logger.exception("Error in analysis cycle")
-
-    async def _switch_strategy(self, pair: str, name: StrategyName | None) -> None:
-        """Stop current strategy for a pair and start the new one."""
-        current = self._active_strategies.get(pair)
-        current_name = current.name if current else None
-
-        if current_name == name:
-            return  # no change
-
-        # Stop current
-        if current:
-            await current.stop()
-            self._active_strategies[pair] = None
-
-        if name is None:
-            logger.info("[%s] No strategy active (paused)", pair)
-            return
-
-        # Start new
-        pair_strategies = self._strategies.get(pair, {})
-        strategy = pair_strategies.get(name)
-        if strategy is None:
-            logger.error("[%s] Strategy %s not registered", pair, name)
-            return
-
-        self._active_strategies[pair] = strategy
-        await strategy.start()
-        # Strategy change alerts are now batched in _analysis_cycle
-        # via send_strategy_changes -- no per-pair alert here.
 
     async def _check_arb_opportunity(self, pair: str) -> bool:
         """Quick check if there's a cross-exchange spread for a pair."""
@@ -644,19 +576,20 @@ class AlphaBot:
         try:
             rm = self.risk_manager
 
-            # Build active strategies map (include scalp overlay)
+            # Build active strategies map (scalp + options overlays)
             active_map: dict[str, str | None] = {}
             for pair in self.all_pairs:
-                # Check scalp overlay first — it's the one actually trading
                 scalp = self._scalp_strategies.get(pair)
+                opts = self._options_strategies.get(pair)
                 if scalp and scalp.in_position:
                     side = scalp.position_side or "long"
                     active_map[pair] = f"scalp_{side}"
+                elif opts and getattr(opts, "in_position", False):
+                    active_map[pair] = "options_scalp"
                 elif scalp:
                     active_map[pair] = "scalp"
                 else:
-                    strat = self._active_strategies.get(pair)
-                    active_map[pair] = strat.name.value if strat else None
+                    active_map[pair] = None
 
             # Fetch live exchange balances (includes held assets)
             binance_bal = await self._fetch_portfolio_usd(self.binance)
@@ -771,23 +704,24 @@ class AlphaBot:
         """Persist bot state to Supabase for crash recovery + dashboard display."""
         rm = self.risk_manager
 
-        # Build per-pair info (include scalp overlay)
+        # Build per-pair info (scalp + options overlays)
         active_map: dict[str, str | None] = {}
         active_count = 0
         for pair in self.all_pairs:
             scalp = self._scalp_strategies.get(pair)
+            opts = self._options_strategies.get(pair)
             if scalp and scalp.in_position:
                 side = scalp.position_side or "long"
                 active_map[pair] = f"scalp_{side}"
+                active_count += 1
+            elif opts and getattr(opts, "in_position", False):
+                active_map[pair] = "options_scalp"
                 active_count += 1
             elif scalp:
                 active_map[pair] = "scalp"
                 active_count += 1
             else:
-                strat = self._active_strategies.get(pair)
-                active_map[pair] = strat.name.value if strat else None
-                if strat is not None:
-                    active_count += 1
+                active_map[pair] = None
 
         # Use primary pair's analysis for condition
         last = self.analyzer.last_analysis if self.analyzer else None
@@ -870,12 +804,8 @@ class AlphaBot:
             if command == "pause":
                 self.risk_manager.is_paused = True
                 self.risk_manager._pause_reason = params.get("reason", "Paused via dashboard")
-                # Stop all active strategies (primary + scalp)
+                # Stop all active strategies (scalp + options overlays)
                 stop_tasks = []
-                for pair, strategy in self._active_strategies.items():
-                    if strategy:
-                        stop_tasks.append(strategy.stop())
-                        self._active_strategies[pair] = None
                 for pair, scalp in self._scalp_strategies.items():
                     if scalp.is_active:
                         stop_tasks.append(scalp.stop())
@@ -901,22 +831,9 @@ class AlphaBot:
                 result_msg = "Bot resumed"
 
             elif command == "force_strategy":
-                strategy_name = params.get("strategy")
-                target_pair = params.get("pair", self.pairs[0])  # default to primary pair
-                if strategy_name:
-                    try:
-                        target = StrategyName(strategy_name)
-                        self.risk_manager.unpause()
-                        await self._switch_strategy(target_pair, target)
-                        short = target_pair.split("/")[0] if "/" in target_pair else target_pair
-                        await self.alerts.send_command_confirmation(
-                            "force_strategy", f"{strategy_name.capitalize()} on {short}",
-                        )
-                        result_msg = f"Forced {strategy_name} on {target_pair}"
-                    except ValueError:
-                        result_msg = f"Unknown strategy: {strategy_name}"
-                else:
-                    result_msg = "Missing 'strategy' param"
+                # Only scalp and options_scalp are active — force_strategy is a no-op
+                result_msg = "Only scalp and options_scalp strategies are active"
+                await self.alerts.send_command_confirmation("force_strategy", result_msg)
 
             elif command == "update_config":
                 if "max_position_pct" in params:
@@ -1211,13 +1128,15 @@ class AlphaBot:
         """Inject restored positions into strategy instances.
 
         Called AFTER strategies are created but BEFORE they start ticking.
-        This tells scalp/futures_momentum strategies about positions that
-        were open before the restart, so they manage exits instead of
-        opening duplicate positions.
+        This tells scalp strategies about positions that were open before
+        the restart, so they manage exits instead of opening duplicates.
+        Only scalp positions are restored — non-scalp orphans are closed
+        separately by _close_orphaned_positions().
         """
         if not hasattr(self, "_restored_trades") or not self._restored_trades:
             return
 
+        injected = 0
         for trade in self._restored_trades:
             pair = trade["pair"]
             exchange_id = trade["exchange_id"]
@@ -1226,7 +1145,7 @@ class AlphaBot:
             position_type = trade["position_type"]  # "long", "short", or "spot"
             strategy_name = trade.get("strategy", "")
 
-            # Try scalp strategy first (most common)
+            # Only inject scalp positions (our active strategy)
             scalp = self._scalp_strategies.get(pair)
             if scalp and strategy_name in ("scalp", ""):
                 scalp.in_position = True
@@ -1242,36 +1161,126 @@ class AlphaBot:
                     "%s %s %.6f @ $%.2f on %s",
                     pair, scalp.position_side, amount, entry_price, exchange_id,
                 )
+                injected += 1
                 continue
 
-            # Try futures_momentum strategy
-            if strategy_name == "futures_momentum":
-                pair_strats = self._strategies.get(pair, {})
-                fm = pair_strats.get(StrategyName.FUTURES_MOMENTUM)
-                if fm and hasattr(fm, "position_side"):
-                    fm.position_side = position_type
-                    fm.entry_price = entry_price
-                    fm.entry_amount = amount
-                    if position_type == "long":
-                        fm.highest_since_entry = entry_price
-                    else:
-                        fm.lowest_since_entry = entry_price
-                    logger.info(
-                        "Injected restored position into FuturesMomentumStrategy: "
-                        "%s %s %.6f @ $%.2f",
-                        pair, position_type, amount, entry_price,
-                    )
-                    continue
-
+            # Non-scalp positions will be closed by _close_orphaned_positions()
             logger.warning(
-                "Could not inject restored position %s (%s) into any strategy",
+                "Skipping restore for non-scalp position %s (%s strategy) — will be closed as orphan",
                 pair, strategy_name,
             )
 
         logger.info(
             "Strategy state restoration complete — %d positions injected",
-            len(self._restored_trades),
+            injected,
         )
+
+    async def _close_orphaned_positions(self) -> None:
+        """Close any open positions from non-scalp strategies (e.g. futures_momentum).
+
+        Called on startup to free up margin tied by strategies that have been removed.
+        Sends a market sell/buy to close the position, then marks the DB trade as closed.
+        """
+        if not self.db.is_connected:
+            return
+
+        open_trades = await self.db.get_all_open_trades()
+        if not open_trades:
+            return
+
+        # Only close non-scalp, non-options_scalp positions
+        allowed_strategies = {"scalp", "options_scalp", ""}
+        orphans = [
+            t for t in open_trades
+            if t.get("strategy", "") not in allowed_strategies
+        ]
+
+        if not orphans:
+            return
+
+        logger.warning(
+            "Found %d orphaned position(s) from removed strategies — closing at market",
+            len(orphans),
+        )
+
+        for trade in orphans:
+            pair = trade["pair"]
+            exchange_id = trade.get("exchange", "delta")
+            position_type = trade.get("position_type", "long")
+            amount = trade.get("amount", 0)
+            entry_price = trade.get("entry_price", 0)
+            order_id = trade.get("order_id", "")
+            strategy_name = trade.get("strategy", "unknown")
+
+            logger.info(
+                "Closing orphaned %s position: %s %s %.6f @ $%.2f (strategy=%s)",
+                strategy_name, pair, position_type, amount, entry_price, strategy_name,
+            )
+
+            try:
+                # Determine close side
+                close_side = "sell" if position_type == "long" else "buy"
+
+                # Get current price for P&L calc
+                exchange = self.delta if exchange_id == "delta" else self.binance
+                if exchange:
+                    ticker = await exchange.fetch_ticker(pair)
+                    current_price = float(ticker.get("last", 0) or 0)
+                else:
+                    current_price = entry_price
+
+                # For Delta: convert to contracts
+                if exchange_id == "delta":
+                    contract_size = DELTA_CONTRACT_SIZE.get(pair, 0.01)
+                    contracts = max(1, int(amount / contract_size))
+
+                    await exchange.create_order(  # type: ignore[union-attr]
+                        pair, "market", close_side, contracts,
+                        params={"reduce_only": True},
+                    )
+                    logger.info(
+                        "Closed orphaned position: %s %s %d contracts at market",
+                        pair, close_side, contracts,
+                    )
+                else:
+                    # Binance spot — sell the amount
+                    if exchange:
+                        await exchange.create_order(  # type: ignore[union-attr]
+                            pair, "market", close_side, amount,
+                        )
+
+                # Calculate P&L
+                if entry_price > 0 and current_price > 0:
+                    if position_type == "long":
+                        pnl = (current_price - entry_price) * amount
+                        pnl_pct = ((current_price - entry_price) / entry_price) * 100
+                    else:
+                        pnl = (entry_price - current_price) * amount
+                        pnl_pct = ((entry_price - current_price) / entry_price) * 100
+                else:
+                    pnl = 0.0
+                    pnl_pct = 0.0
+
+                # Close in DB
+                if order_id:
+                    await self.db.close_trade(order_id, current_price, pnl, pnl_pct)
+
+                # Send alert
+                await self.alerts.send_text(
+                    f"🧹 Closed orphaned {strategy_name} position\n"
+                    f"{pair} {position_type.upper()} @ ${entry_price:.2f}\n"
+                    f"Exit: ${current_price:.2f} | P&L: ${pnl:+.4f} ({pnl_pct:+.2f}%)\n"
+                    f"Reason: Strategy removed — freeing margin"
+                )
+
+            except Exception:
+                logger.exception("Failed to close orphaned position %s", pair)
+                # Try to at least mark it in DB so it doesn't block forever
+                try:
+                    if order_id:
+                        await self.db.close_trade(order_id, entry_price, 0.0, 0.0)
+                except Exception:
+                    pass
 
     # -- Exchange init ---------------------------------------------------------
 
