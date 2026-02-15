@@ -118,124 +118,119 @@ export function LiveStatusBar() {
   }, [lastHeartbeat]);
 
   return (
-    <div className="bg-[#0d1117] border border-zinc-800 rounded-xl p-4">
-      <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-4">
-        {/* Exchange Cards */}
-        <div className="flex flex-col sm:flex-row gap-3 flex-1 min-w-0">
-          {/* Binance Card */}
-          <div className="flex-1 bg-zinc-900/50 border border-zinc-800 rounded-lg px-4 py-3">
-            <div className="flex items-center gap-2 mb-1">
-              <span
-                className={cn(
-                  'w-2 h-2 rounded-full',
-                  binanceConnected && !isStale ? 'bg-[#00c853] animate-pulse' : 'bg-red-500',
-                )}
-              />
-              <span className="text-sm font-semibold text-[#f0b90b]">BINANCE</span>
-              <span className="text-[10px] text-zinc-500">(Spot)</span>
-            </div>
-            {binanceBalance > 0 ? (
-              <div className="flex items-baseline gap-2 min-w-0">
-                <span className="font-mono text-base md:text-lg text-white truncate">{formatCurrency(binanceBalance)}</span>
-              </div>
-            ) : binancePnl ? (
-              <div className="flex items-center gap-2 text-xs">
-                <span className="text-zinc-500">P&L:</span>
-                <span className={cn('font-mono', binancePnl.total_pnl >= 0 ? 'text-[#00c853]' : 'text-[#ff1744]')}>
-                  {formatPnL(binancePnl.total_pnl)}
-                </span>
-              </div>
-            ) : (
-              <span className="text-xs text-zinc-500">No data</span>
-            )}
-          </div>
+    <div className="bg-[#0d1117] border border-zinc-800 rounded-xl p-3 md:p-4">
+      {/* Mobile: 2-col 3-row grid | Desktop: single flex row */}
+      <div className="grid grid-cols-2 gap-2 md:flex md:flex-row md:items-center md:justify-between md:gap-4">
 
-          {/* Delta Card */}
-          <div className="flex-1 bg-zinc-900/50 border border-zinc-800 rounded-lg px-4 py-3">
-            <div className="flex items-center gap-2 mb-1">
-              <span
-                className={cn(
-                  'w-2 h-2 rounded-full',
-                  deltaConnected && !isStale ? 'bg-[#00c853] animate-pulse' : 'bg-red-500',
-                )}
-              />
-              <span className="text-sm font-semibold text-[#00d2ff]">DELTA</span>
-              <span className="text-[10px] text-zinc-500">(Futures)</span>
-            </div>
-            {deltaBalance > 0 ? (
-              <div className="flex items-baseline gap-2 min-w-0 flex-wrap">
-                <span className="font-mono text-base md:text-lg text-white truncate">{formatCurrency(deltaBalance)}</span>
-                {deltaBalanceInr != null && (
-                  <span className="text-[10px] text-zinc-500 shrink-0">~{deltaBalanceInr.toLocaleString()}</span>
-                )}
-              </div>
-            ) : deltaPnl ? (
-              <div className="flex items-center gap-2 text-xs">
-                <span className="text-zinc-500">P&L:</span>
-                <span className={cn('font-mono', deltaPnl.total_pnl >= 0 ? 'text-[#00c853]' : 'text-[#ff1744]')}>
-                  {formatPnL(deltaPnl.total_pnl)}
-                </span>
-              </div>
-            ) : (
-              <span className="text-xs text-zinc-500">No data</span>
-            )}
-          </div>
-
-          {/* P&L Summary Card — switchable time range */}
-          <div className="flex-1 bg-zinc-900/50 border border-zinc-800 rounded-lg px-4 py-3">
-            <div className="flex items-center gap-1.5 mb-1">
-              {(['24h', '7d', '14d', '30d'] as const).map((range) => (
-                <button
-                  key={range}
-                  onClick={() => setPnlRange(range)}
-                  className={cn(
-                    'px-1.5 py-0.5 rounded text-[10px] font-medium transition-colors',
-                    pnlRange === range
-                      ? 'bg-zinc-700 text-white'
-                      : 'text-zinc-500 hover:text-zinc-300',
-                  )}
-                >
-                  {range.toUpperCase()}
-                </button>
-              ))}
-            </div>
-            {pnlStats.total > 0 ? (
-              <>
-                <div className="flex items-baseline gap-2">
-                  <span className={cn(
-                    'font-mono text-base md:text-lg font-bold',
-                    pnlStats.pnl >= 0 ? 'text-[#00c853]' : 'text-[#ff1744]',
-                  )}>
-                    {pnlStats.pnl >= 0 ? '+' : ''}{formatCurrency(pnlStats.pnl)}
-                  </span>
-                </div>
-                <div className="text-[10px] text-zinc-500 font-mono">
-                  {pnlStats.wins}W / {pnlStats.losses}L · {pnlStats.winRate.toFixed(0)}% WR · {pnlStats.total} trades
-                </div>
-              </>
-            ) : (
-              <span className="text-xs text-zinc-500">No trades</span>
-            )}
-          </div>
-        </div>
-
-        {/* Center: Total Capital + Bot State */}
-        <div className="flex flex-col items-center gap-1 border-y md:border-y-0 md:border-x border-zinc-800 py-3 md:py-0 md:px-6">
-          <span className="text-[10px] uppercase tracking-wider text-zinc-500">Total Capital</span>
-          <span className="font-mono text-base md:text-xl font-bold text-white truncate max-w-full">
-            {formatCurrency(totalCapital)}
-          </span>
-          {hasFreshBalance && (
-            <div className="flex items-center gap-3 text-[10px] font-mono text-zinc-400">
-              {openPositionCount > 0 && (
-                <span className="text-amber-400">{openPositionCount} open</span>
-              )}
-            </div>
-          )}
-          <div className="flex items-center gap-3 mt-1">
+        {/* Row 1, Col 1 — Binance Card */}
+        <div className="md:flex-1 min-w-0 bg-zinc-900/50 border border-zinc-800 rounded-lg px-3 py-2 md:px-4 md:py-3">
+          <div className="flex items-center gap-1.5 md:gap-2 mb-1">
             <span
               className={cn(
-                'inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-medium',
+                'w-1.5 h-1.5 md:w-2 md:h-2 rounded-full shrink-0',
+                binanceConnected && !isStale ? 'bg-[#00c853] animate-pulse' : 'bg-red-500',
+              )}
+            />
+            <span className="text-xs md:text-sm font-semibold text-[#f0b90b]">BINANCE</span>
+            <span className="text-[9px] md:text-[10px] text-zinc-500">(Spot)</span>
+          </div>
+          {binanceBalance > 0 ? (
+            <div className="flex items-baseline gap-2 min-w-0">
+              <span className="font-mono text-sm md:text-lg text-white truncate">{formatCurrency(binanceBalance)}</span>
+            </div>
+          ) : binancePnl ? (
+            <div className="flex items-center gap-2 text-xs">
+              <span className="text-zinc-500">P&L:</span>
+              <span className={cn('font-mono', binancePnl.total_pnl >= 0 ? 'text-[#00c853]' : 'text-[#ff1744]')}>
+                {formatPnL(binancePnl.total_pnl)}
+              </span>
+            </div>
+          ) : (
+            <span className="text-xs text-zinc-500">No data</span>
+          )}
+        </div>
+
+        {/* Row 1, Col 2 — Delta Card */}
+        <div className="md:flex-1 min-w-0 bg-zinc-900/50 border border-zinc-800 rounded-lg px-3 py-2 md:px-4 md:py-3">
+          <div className="flex items-center gap-1.5 md:gap-2 mb-1">
+            <span
+              className={cn(
+                'w-1.5 h-1.5 md:w-2 md:h-2 rounded-full shrink-0',
+                deltaConnected && !isStale ? 'bg-[#00c853] animate-pulse' : 'bg-red-500',
+              )}
+            />
+            <span className="text-xs md:text-sm font-semibold text-[#00d2ff]">DELTA</span>
+            <span className="text-[9px] md:text-[10px] text-zinc-500">(Futures)</span>
+          </div>
+          {deltaBalance > 0 ? (
+            <div className="flex items-baseline gap-2 min-w-0 flex-wrap">
+              <span className="font-mono text-sm md:text-lg text-white truncate">{formatCurrency(deltaBalance)}</span>
+              {deltaBalanceInr != null && (
+                <span className="text-[9px] md:text-[10px] text-zinc-500 shrink-0">~{deltaBalanceInr.toLocaleString()}</span>
+              )}
+            </div>
+          ) : deltaPnl ? (
+            <div className="flex items-center gap-2 text-xs">
+              <span className="text-zinc-500">P&L:</span>
+              <span className={cn('font-mono', deltaPnl.total_pnl >= 0 ? 'text-[#00c853]' : 'text-[#ff1744]')}>
+                {formatPnL(deltaPnl.total_pnl)}
+              </span>
+            </div>
+          ) : (
+            <span className="text-xs text-zinc-500">No data</span>
+          )}
+        </div>
+
+        {/* Row 2, Col 1 — P&L Summary Card */}
+        <div className="md:flex-1 min-w-0 bg-zinc-900/50 border border-zinc-800 rounded-lg px-3 py-2 md:px-4 md:py-3">
+          <div className="flex items-center gap-1 md:gap-1.5 mb-1">
+            {(['24h', '7d', '14d', '30d'] as const).map((range) => (
+              <button
+                key={range}
+                onClick={() => setPnlRange(range)}
+                className={cn(
+                  'px-1 md:px-1.5 py-0.5 rounded text-[9px] md:text-[10px] font-medium transition-colors',
+                  pnlRange === range
+                    ? 'bg-zinc-700 text-white'
+                    : 'text-zinc-500 hover:text-zinc-300',
+                )}
+              >
+                {range.toUpperCase()}
+              </button>
+            ))}
+          </div>
+          {pnlStats.total > 0 ? (
+            <>
+              <div className="flex items-baseline gap-2">
+                <span className={cn(
+                  'font-mono text-sm md:text-lg font-bold',
+                  pnlStats.pnl >= 0 ? 'text-[#00c853]' : 'text-[#ff1744]',
+                )}>
+                  {pnlStats.pnl >= 0 ? '+' : ''}{formatCurrency(pnlStats.pnl)}
+                </span>
+              </div>
+              <div className="text-[9px] md:text-[10px] text-zinc-500 font-mono">
+                {pnlStats.wins}W / {pnlStats.losses}L · {pnlStats.winRate.toFixed(0)}% WR · {pnlStats.total} trades
+              </div>
+            </>
+          ) : (
+            <span className="text-xs text-zinc-500">No trades</span>
+          )}
+        </div>
+
+        {/* Row 2, Col 2 — Total Capital + Bot State */}
+        <div className="bg-zinc-900/50 border border-zinc-800 rounded-lg px-3 py-2 md:bg-transparent md:border-y-0 md:border-x md:border-zinc-800 md:rounded-none md:px-6 md:py-0 flex flex-col items-center gap-1">
+          <span className="text-[9px] md:text-[10px] uppercase tracking-wider text-zinc-500">Total Capital</span>
+          <span className="font-mono text-sm md:text-xl font-bold text-white truncate max-w-full">
+            {formatCurrency(totalCapital)}
+          </span>
+          {hasFreshBalance && openPositionCount > 0 && (
+            <span className="text-[9px] md:text-[10px] font-mono text-amber-400">{openPositionCount} open</span>
+          )}
+          <div className="flex items-center gap-2 md:gap-3 mt-0.5 md:mt-1">
+            <span
+              className={cn(
+                'inline-flex items-center gap-1 px-1.5 md:px-2 py-0.5 rounded-full text-[9px] md:text-[10px] font-medium',
                 botState === 'running'
                   ? 'bg-[#00c853]/10 text-[#00c853]'
                   : 'bg-[#ffd600]/10 text-[#ffd600]',
@@ -250,14 +245,14 @@ export function LiveStatusBar() {
               {botState === 'running' ? 'Running' : 'Paused'}
             </span>
             {uptimeSeconds > 0 && (
-              <span className="text-[10px] text-zinc-500">{formatUptime(uptimeSeconds)}</span>
+              <span className="text-[9px] md:text-[10px] text-zinc-500">{formatUptime(uptimeSeconds)}</span>
             )}
           </div>
         </div>
 
-        {/* Right: Indicators + Clock */}
-        <div className="flex items-center justify-between sm:justify-start gap-4">
-          <div className="flex flex-col gap-1.5 text-[10px]">
+        {/* Row 3, Col 1 — Indicators */}
+        <div className="bg-zinc-900/50 border border-zinc-800 rounded-lg px-3 py-2 md:bg-transparent md:border-0 md:rounded-none md:p-0">
+          <div className="flex flex-col gap-1 md:gap-1.5 text-[9px] md:text-[10px]">
             <div className="flex items-center gap-2">
               <span className="text-zinc-500">Shorting</span>
               <span className={shortingEnabled ? 'text-[#00c853]' : 'text-zinc-600'}>
@@ -273,13 +268,16 @@ export function LiveStatusBar() {
               <span className="text-[#2196f3] font-mono">{derivedStrategyCount}</span>
             </div>
           </div>
-          <div className="border-l border-zinc-800 pl-4 flex flex-col items-end gap-1">
-            <ISTClock />
-            <span className="text-[9px] text-zinc-600 font-mono">
-              v{process.env.APP_VERSION ?? '?'}
-            </span>
-          </div>
         </div>
+
+        {/* Row 3, Col 2 — Clock + Version */}
+        <div className="bg-zinc-900/50 border border-zinc-800 rounded-lg px-3 py-2 md:bg-transparent md:border-0 md:rounded-none md:border-l md:border-zinc-800 md:pl-4 flex flex-col items-center md:items-end gap-1">
+          <ISTClock />
+          <span className="text-[9px] text-zinc-600 font-mono">
+            v{process.env.APP_VERSION ?? '?'}
+          </span>
+        </div>
+
       </div>
     </div>
   );
