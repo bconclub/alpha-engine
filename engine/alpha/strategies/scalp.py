@@ -1,24 +1,30 @@
-"""Alpha v5.4 — FAST EXIT: 1s ticks, aggressive trailing, profit decay protection.
+"""Alpha v5.5 — SMART TREND: soft 15m weight, per-pair streaks, multi-TF momentum.
 
 PHILOSOPHY: Two strong positions beat four weak ones. Focus capital on the
-best signals. After a loss, pause and let the market settle before re-entering.
-Trust the 1-minute chart, not the lagging 15-minute trend.
+best signals. After a loss, pause THAT PAIR and let it settle — don't punish
+all pairs for one pair's bad luck. Use the 15m trend as a soft bias, not a wall.
 SL/TP adapt to each asset's actual volatility via 1-minute ATR.
 
-ENTRY — PURE 2-of-4 (no trend gating):
-  Any 2 of these 4 signals must fire. Same thresholds for both directions.
-  1. Momentum: 0.15%+ move in 60s
+ENTRY — 2-of-4 with 15m SOFT WEIGHT:
+  Signals (up to 6, counted against N/4 threshold):
+  1. Momentum 60s: 0.15%+ move in 60s
   2. Volume: 1.2x average spike
   3. RSI: < 40 (oversold → long) or > 60 (overbought → short)
-  4. BB mean-reversion: price near lower BB → long, price near upper BB → short
-  15m trend is logged for analysis but NEVER blocks or loosens entries.
-  Signals are RANKED by strength score — only the strongest get entered.
+  4. BB mean-reversion: price near lower BB → long, upper → short
+  5. Momentum 5m: 0.30%+ move over 5 candles (slow bleed detection)
+  6. Trend continuation: new 15-candle low/high + volume > average
+
+  15m TREND SOFT WEIGHT (not a blocker):
+  - Bearish 15m: SHORT needs 2/4, LONG needs 3/4 (counter-trend harder)
+  - Bullish 15m: LONG needs 2/4, SHORT needs 3/4 (counter-trend harder)
+  - Neutral: both need 2/4
 
 POSITION MANAGEMENT:
   - Max 2 simultaneous positions (focused capital)
   - 2nd position only if 1st is breakeven or profitable AND signal is 3/4+
-  - After SL hit: 2 min cooldown before any new entry (all pairs)
-  - After 3 consecutive losses: 5 min pause (all pairs)
+  - After SL hit: 2 min cooldown (PER PAIR — BTC SL doesn't pause XRP)
+  - After 3 consecutive losses on SAME pair: 5 min pause (that pair only)
+  - First trade after streak pause: requires 3/4 signals (re-entry gate)
 
 Risk Management (20x leverage) — ATR-DYNAMIC:
   - SL = max(pair_floor, ATR_1m * 1.5) — avoids noise stops
@@ -46,6 +52,7 @@ Exit — FAST, PROTECT PROFITS:
 
 from __future__ import annotations
 
+import asyncio
 import time
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
@@ -132,15 +139,15 @@ def _soul_check(context: str) -> str:
 
 
 class ScalpStrategy(BaseStrategy):
-    """Focused Signal v5.4 — Fast exit: 1s ticks, aggressive trail, profit decay.
+    """Smart Trend v5.5 — Soft 15m weight, per-pair streaks, multi-TF momentum.
 
-    2-of-4 signals (momentum, volume, RSI, BB mean-reversion) with uniform
-    thresholds. Max 2 positions. 2nd only if 1st is green and signal is 3/4+.
-    Post-SL cooldown: 2 min. After 3 consecutive losses: 5 min pause.
+    2-of-4 signals with 15m trend soft weight (counter-trend needs 3/4).
+    6 signal types: MOM60s, VOL, RSI, BB, MOM5m, TrendContinuation.
+    Per-pair streak tracking: BTC losses don't pause XRP.
+    Post-streak re-entry gate: first trade back needs 3/4 on that pair.
     SL/TP computed from 1m ATR: SL = max(floor, ATR*1.5), TP = max(floor, ATR*4).
-    Per-pair floors: BTC/ETH 0.35%/1.5%, SOL 0.5%/2.0%, XRP 0.6%/2.0%.
-    Dynamic ticks: 1s when in position, 5s when scanning.
-    Trail activates at +0.20%. Profit decay exit if peak > 0.30% drops to < 0.10%.
+    Dynamic ticks: 1s in position (ticker), 5s scanning (full OHLCV).
+    Trail at +0.20%. Profit decay exit if peak > 0.30% drops to < 0.10%.
     """
 
     name = StrategyName.SCALP
@@ -202,7 +209,7 @@ class ScalpStrategy(BaseStrategy):
     RSI_REVERSAL_SHORT = 30           # RSI < 30 while short → oversold, exit
     MOMENTUM_REVERSAL_PCT = -0.10     # strong momentum reversal against position
 
-    # ── Entry thresholds — PURE 2-of-4 (same for both directions) ──────
+    # ── Entry thresholds — 2-of-4 with 15m trend soft weight ────────────
     MOMENTUM_MIN_PCT = 0.15           # 0.15%+ move in 60s
     VOL_SPIKE_RATIO = 1.2             # volume > 1.2x average
     RSI_EXTREME_LONG = 40             # RSI < 40 = oversold → long
@@ -210,6 +217,11 @@ class ScalpStrategy(BaseStrategy):
     # BB mean-reversion thresholds (upper = short, lower = long):
     BB_MEAN_REVERT_UPPER = 0.85      # price in top 15% of BB → short signal
     BB_MEAN_REVERT_LOWER = 0.15      # price in bottom 15% of BB → long signal
+    # Multi-timeframe momentum: 5-minute (300s) slow bleed detection
+    MOMENTUM_5M_MIN_PCT = 0.30       # 0.30%+ move over 5 candles (slow bleed counts)
+    # Trend continuation: new 15-candle low/high + volume confirms trend
+    TREND_CONT_CANDLES = 15           # look back 15 candles for new low/high
+    TREND_CONT_VOL_RATIO = 1.0       # volume must be above average (1.0x+)
 
     # ── Adaptive widening (if idle too long, loosen by 20%) ──────────
     IDLE_WIDEN_SECONDS = 30 * 60      # after 30 min idle, widen thresholds
@@ -252,22 +264,25 @@ class ScalpStrategy(BaseStrategy):
     MAX_POSITIONS = 2                   # max 2 simultaneous — focus capital
     MAX_SPREAD_PCT = 0.15
 
-    # ── Cooldown / loss protection (class-level, shared across all pairs) ─
-    SL_COOLDOWN_SECONDS = 2 * 60       # 2 min pause after any SL hit
-    CONSECUTIVE_LOSS_LIMIT = 3          # after 3 consecutive losses...
-    STREAK_PAUSE_SECONDS = 5 * 60      # ...pause for 5 min
+    # ── Cooldown / loss protection (PER-PAIR: BTC streak doesn't affect XRP) ─
+    SL_COOLDOWN_SECONDS = 2 * 60       # 2 min pause after SL hit (per pair)
+    CONSECUTIVE_LOSS_LIMIT = 3          # after 3 consecutive losses on same pair...
+    STREAK_PAUSE_SECONDS = 5 * 60      # ...pause that pair for 5 min
+    POST_STREAK_STRENGTH = 3            # first trade after streak pause needs 3/4
     MIN_STRENGTH_FOR_2ND = 3            # 2nd position needs 3/4+ signal strength
 
     # ── Rate limiting / risk ──────────────────────────────────────────────
     MAX_TRADES_PER_HOUR = 10          # keep trading aggressively
     DAILY_LOSS_LIMIT_PCT = 20.0       # stop at 20% daily drawdown
 
-    # ── Class-level shared state (all pair instances share these) ────────
-    _last_sl_time: float = 0.0                 # monotonic time of last SL hit (any pair)
-    _consecutive_losses: int = 0                # streak of consecutive losses across all pairs
-    _streak_pause_until: float = 0.0            # monotonic time until streak pause ends
+    # ── Class-level shared state ──────────────────────────────────────────
     _live_pnl: dict[str, float] = {}           # pair → current unrealized P&L % (updated every tick)
     _pair_trade_history: dict[str, list[bool]] = {}  # base_asset → list of win/loss booleans (last N)
+    # ── Per-pair streak/cooldown (BTC losses don't pause XRP) ────────────
+    _pair_last_sl_time: dict[str, float] = {}            # base_asset → monotonic time of last SL
+    _pair_consecutive_losses: dict[str, int] = {}        # base_asset → streak count
+    _pair_streak_pause_until: dict[str, float] = {}      # base_asset → pause end time
+    _pair_post_streak: dict[str, bool] = {}              # base_asset → True if first trade after streak
 
     # ── Daily expiry (Delta India) ──────────────────────────────────────
     EXPIRY_HOUR_IST = 17
@@ -364,11 +379,11 @@ class ScalpStrategy(BaseStrategy):
             rt_taker = 0.20
         tiers_str = " → ".join(f"+{p}%:{d}%" for p, d in self.TRAIL_TIERS)
         self.logger.info(
-            "[%s] FOCUSED SIGNAL v5.4 ACTIVE (%s) — tick=1s/5s(dynamic), "
+            "[%s] SMART TREND v5.5 ACTIVE (%s) — tick=1s/5s(dynamic), "
             "SL=%.2f%%(floor,ATR-dynamic) TP=%.2f%% Trail@%.1f%% [%s] MaxHold=%ds Breakeven@%ds "
             "Pullback=%.0f%%@%.1f%% Decay=peak>%.1f%%→exit<%.1f%% Flatline=%ds/%.2f%% "
             "MaxPos=%d MaxContracts=%d SLcool=%ds LossStreak=%d→%ds "
-            "15m=INFO_ONLY DailyLossLimit=%.0f%%%s",
+            "15m=SOFT_WEIGHT DailyLossLimit=%.0f%%%s",
             self.pair, tag,
             self._sl_pct, self._tp_pct,
             self.TRAILING_ACTIVATE_PCT, tiers_str,
@@ -496,6 +511,8 @@ class ScalpStrategy(BaseStrategy):
         vol_ratio = 0.0
         momentum_60s = 0.0
         momentum_120s = 0.0
+        momentum_300s = 0.0
+        df: pd.DataFrame | None = None
         _need_full_indicators = True
 
         if self.in_position:
@@ -543,6 +560,10 @@ class ScalpStrategy(BaseStrategy):
             # 2-candle momentum (120 seconds) for trend confirmation
             price_2m_ago = float(close.iloc[-3]) if len(close) >= 3 else price_1m_ago
             momentum_120s = ((current_price - price_2m_ago) / price_2m_ago * 100) if price_2m_ago > 0 else 0
+
+            # 5-candle momentum (300 seconds) for slow bleed detection
+            price_5m_ago = float(close.iloc[-6]) if len(close) >= 6 else price_2m_ago
+            momentum_300s = ((current_price - price_5m_ago) / price_5m_ago * 100) if price_5m_ago > 0 else 0
 
         # ── Heartbeat every 60 seconds ─────────────────────────────────
         if now - self._last_heartbeat >= 60:
@@ -604,8 +625,9 @@ class ScalpStrategy(BaseStrategy):
         if total_scalp >= self.MAX_POSITIONS:
             return signals
 
-        # ── COOLDOWN: pause after SL hit (shared across all pairs) ────
-        sl_cooldown_remaining = ScalpStrategy._last_sl_time + self.SL_COOLDOWN_SECONDS - now
+        # ── COOLDOWN: pause after SL hit (PER PAIR) ────────────────
+        pair_sl_time = ScalpStrategy._pair_last_sl_time.get(self._base_asset, 0.0)
+        sl_cooldown_remaining = pair_sl_time + self.SL_COOLDOWN_SECONDS - now
         if sl_cooldown_remaining > 0:
             if self._tick_count % 12 == 0:
                 self.logger.info(
@@ -614,13 +636,15 @@ class ScalpStrategy(BaseStrategy):
                 )
             return signals
 
-        # ── STREAK PAUSE: after N consecutive losses, pause longer ────
-        if now < ScalpStrategy._streak_pause_until:
-            remaining = ScalpStrategy._streak_pause_until - now
+        # ── STREAK PAUSE: after N consecutive losses on THIS PAIR ───
+        pair_pause_until = ScalpStrategy._pair_streak_pause_until.get(self._base_asset, 0.0)
+        if now < pair_pause_until:
+            remaining = pair_pause_until - now
+            pair_losses = ScalpStrategy._pair_consecutive_losses.get(self._base_asset, 0)
             if self._tick_count % 12 == 0:
                 self.logger.info(
-                    "[%s] STREAK PAUSE — %d consecutive losses, %.0fs remaining",
-                    self.pair, ScalpStrategy._consecutive_losses, remaining,
+                    "[%s] STREAK PAUSE — %d consecutive losses on %s, %.0fs remaining",
+                    self.pair, pair_losses, self._base_asset, remaining,
                 )
             return signals
 
@@ -666,13 +690,14 @@ class ScalpStrategy(BaseStrategy):
         idle_seconds = now - self._last_position_exit
         is_widened = idle_seconds >= self.IDLE_WIDEN_SECONDS
 
-        # ── Quality momentum detection (pure 2-of-4 from 1m data) ──────
+        # ── Quality momentum detection (2-of-4 with trend soft weight) ──
         entry = self._detect_quality_entry(
             current_price, rsi_now, vol_ratio,
-            momentum_60s, momentum_120s,
+            momentum_60s, momentum_120s, momentum_300s,
             bb_upper, bb_lower,
             trend_15m,
             widened=is_widened,
+            df=df,
         )
 
         if entry is not None:
@@ -728,6 +753,14 @@ class ScalpStrategy(BaseStrategy):
                 "current_price": current_price,
                 "timestamp": time.monotonic(),
             }
+            # Clear post-streak gate on successful entry (first trade back done)
+            if ScalpStrategy._pair_post_streak.get(self._base_asset, False):
+                self.logger.info(
+                    "[%s] POST-STREAK GATE PASSED — %s re-entry with %d/4 signals",
+                    self.pair, self._base_asset, signal_strength,
+                )
+                ScalpStrategy._pair_post_streak[self._base_asset] = False
+
             soul_msg = _soul_check("quality entry")
             self.logger.info(
                 "[%s] SIGNAL ENTRY — %s | strength=%d/4 | Soul: %s",
@@ -753,8 +786,9 @@ class ScalpStrategy(BaseStrategy):
                 widen_tag = " [WIDENED]" if is_widened else ""
                 eff_mom, eff_vol, eff_rsi_l, eff_rsi_s = self._effective_thresholds(is_widened)
                 cooldown_tag = ""
-                if ScalpStrategy._consecutive_losses > 0:
-                    cooldown_tag = f" streak={ScalpStrategy._consecutive_losses}"
+                pair_losses = ScalpStrategy._pair_consecutive_losses.get(self._base_asset, 0)
+                if pair_losses > 0:
+                    cooldown_tag = f" streak={pair_losses}"
                 self.logger.info(
                     "[%s] WAITING %ds%s | 15m=%s | $%.2f | mom60=%+.3f%%/%.2f | RSI=%.1f/%d/%d | "
                     "vol=%.1fx/%.1f | BB[%.2f-%.2f]%s",
@@ -769,7 +803,7 @@ class ScalpStrategy(BaseStrategy):
         return signals
 
     # ======================================================================
-    # PURE SIGNAL ENTRY — 2-of-4 from 1m data, no trend gating
+    # SIGNAL ENTRY — 2-of-4 with 15m trend soft weight
     # ======================================================================
 
     def _effective_thresholds(self, widened: bool = False) -> tuple[float, float, float, float]:
@@ -796,25 +830,32 @@ class ScalpStrategy(BaseStrategy):
         vol_ratio: float,
         momentum_60s: float,
         momentum_120s: float,
+        momentum_300s: float,
         bb_upper: float,
         bb_lower: float,
         trend_15m: str = "neutral",
         widened: bool = False,
+        df: pd.DataFrame | None = None,
     ) -> tuple[str, str, bool, int] | None:
-        """Detect quality momentum using PURE 2-of-4 signals.
+        """Detect quality momentum using 2-of-4 signals with 15m trend soft weight.
 
         Returns (side, reason, use_limit, signal_count) or None.
 
-        15m trend is logged for analysis but NEVER gates entries or loosens
-        thresholds. All decisions come from 1m data — what's happening NOW.
+        SOFT TREND WEIGHT (15m):
+        - Trend-aligned: 2/4 signals required (standard)
+        - Counter-trend: 3/4 signals required (harder to go against trend)
+        - Neutral: 2/4 for both directions
 
-        Requires AT LEAST 2 of these 4 conditions (same thresholds for all):
-        1. Momentum: 0.15%+ move in 60s (widened: 0.12%)
-        2. Volume: 1.2x+ spike (widened: ~1.0x)
+        Signals (up to 6, but counted as max 4 for threshold):
+        1. Momentum 60s: 0.15%+ move in 60s
+        2. Volume: 1.2x+ spike
         3. RSI: < 40 oversold (long) or > 60 overbought (short)
         4. BB mean-reversion: price in bottom 15% of BB → long, top 15% → short
+        5. Momentum 5m: 0.30%+ move over 5 candles (slow bleed detection)
+        6. Trend continuation: new 15-candle low/high + volume > average
 
-        If idle 30+ min, thresholds loosen 20% (adaptive widening).
+        Signals 5 and 6 are BONUS — they count toward the total but the
+        threshold is still expressed as N-of-4 scale (2/4 or 3/4).
         """
         can_short = self.is_futures and config.delta.enable_shorting
 
@@ -822,7 +863,24 @@ class ScalpStrategy(BaseStrategy):
         eff_mom, eff_vol, eff_rsi_l, eff_rsi_s = self._effective_thresholds(widened)
         widen_tag = " WIDE" if widened else ""
 
-        # ── Count bullish and bearish signals (pure 1m data) ─────────────
+        # ── 15M TREND SOFT WEIGHT: determine required signal count ─────────
+        # Trend-aligned = easier (2/4), counter-trend = harder (3/4)
+        if trend_15m == "bearish":
+            required_long = 3   # counter-trend long: harder
+            required_short = 2  # trend-aligned short: standard
+        elif trend_15m == "bullish":
+            required_long = 2   # trend-aligned long: standard
+            required_short = 3  # counter-trend short: harder
+        else:  # neutral
+            required_long = 2
+            required_short = 2
+
+        # ── Post-streak gate: first trade after streak pause needs 3/4 ─────
+        if ScalpStrategy._pair_post_streak.get(self._base_asset, False):
+            required_long = max(required_long, self.POST_STREAK_STRENGTH)
+            required_short = max(required_short, self.POST_STREAK_STRENGTH)
+
+        # ── Count bullish and bearish signals ──────────────────────────────
         bull_signals: list[str] = []
         bear_signals: list[str] = []
 
@@ -839,7 +897,7 @@ class ScalpStrategy(BaseStrategy):
             elif momentum_60s < 0:
                 bear_signals.append(f"VOL:{vol_ratio:.1f}x")
             else:
-                # Flat candle with volume — add to both, 2-of-4 decides
+                # Flat candle with volume — add to both, signal count decides
                 bull_signals.append(f"VOL:{vol_ratio:.1f}x")
                 bear_signals.append(f"VOL:{vol_ratio:.1f}x")
 
@@ -860,39 +918,76 @@ class ScalpStrategy(BaseStrategy):
         if bb_position >= self.BB_MEAN_REVERT_UPPER and can_short:
             bear_signals.append(f"BB:high@{bb_position:.0%}")
 
-        # ── Check 2-of-4 requirement (LONG) ──────────────────────────────
-        # No trend blocking — both directions always allowed
-        if len(bull_signals) >= 2:
+        # 5. Multi-timeframe momentum (5-min / 300s) — slow bleed detection
+        #    Catches moves that are too slow for 60s threshold but significant over 5m
+        if momentum_300s >= self.MOMENTUM_5M_MIN_PCT:
+            if f"MOM:" not in " ".join(bull_signals):  # don't double-count if 60s already fired
+                bull_signals.append(f"MOM5m:{momentum_300s:+.2f}%")
+        if momentum_300s <= -self.MOMENTUM_5M_MIN_PCT:
+            if f"MOM:" not in " ".join(bear_signals):
+                bear_signals.append(f"MOM5m:{momentum_300s:+.2f}%")
+
+        # 6. Trend continuation: new 15-candle low/high + volume > average
+        #    "Price making new lows with volume = sellers in control"
+        if df is not None and len(df) >= self.TREND_CONT_CANDLES + 1:
+            close_arr = df["close"].values
+            volume_arr = df["volume"].values
+            current_close = float(close_arr[-1])
+            lookback = close_arr[-(self.TREND_CONT_CANDLES + 1):-1]  # previous 15 candles
+            avg_vol = float(volume_arr[-(self.TREND_CONT_CANDLES + 1):-1].mean())
+            current_vol = float(volume_arr[-1])
+
+            # New low in last 15 candles + volume above average → SHORT signal
+            if current_close < float(lookback.min()) and current_vol >= avg_vol * self.TREND_CONT_VOL_RATIO:
+                if can_short:
+                    bear_signals.append(f"TCONT:newLow+vol{current_vol/avg_vol:.1f}x")
+
+            # New high in last 15 candles + volume above average → LONG signal
+            if current_close > float(lookback.max()) and current_vol >= avg_vol * self.TREND_CONT_VOL_RATIO:
+                bull_signals.append(f"TCONT:newHigh+vol{current_vol/avg_vol:.1f}x")
+
+        # ── Check required signals (LONG) — trend-weighted ────────────────
+        if len(bull_signals) >= required_long:
             # Verify expected move is worth the fees
-            if abs(momentum_60s) < self.MIN_EXPECTED_MOVE_PCT and abs(momentum_120s) < self.MIN_EXPECTED_MOVE_PCT:
+            if (abs(momentum_60s) < self.MIN_EXPECTED_MOVE_PCT
+                    and abs(momentum_120s) < self.MIN_EXPECTED_MOVE_PCT
+                    and abs(momentum_300s) < self.MIN_EXPECTED_MOVE_PCT):
                 self.hourly_skipped += 1
                 if self._tick_count % 10 == 0:
                     soul_msg = _soul_check("fee skip")
                     self.logger.info(
-                        "[%s] SKIP LONG — signals=%s but move too small (60s=%+.2f%%, 120s=%+.2f%% < %.1f%%) | %s",
+                        "[%s] SKIP LONG — signals=%s but move too small "
+                        "(60s=%+.2f%% 120s=%+.2f%% 300s=%+.2f%% < %.1f%%) | %s",
                         self.pair, "+".join(bull_signals),
-                        momentum_60s, momentum_120s, self.MIN_EXPECTED_MOVE_PCT, soul_msg,
+                        momentum_60s, momentum_120s, momentum_300s,
+                        self.MIN_EXPECTED_MOVE_PCT, soul_msg,
                     )
                 return None
 
-            reason = f"LONG {len(bull_signals)}/4: {' + '.join(bull_signals)} [15m={trend_15m}]{widen_tag}"
+            req_tag = f" req={required_long}/4" if required_long > 2 else ""
+            reason = f"LONG {len(bull_signals)}/4: {' + '.join(bull_signals)} [15m={trend_15m}]{req_tag}{widen_tag}"
             use_limit = "MOM" not in bull_signals[0]
             return ("long", reason, use_limit, len(bull_signals))
 
-        # ── Check 2-of-4 requirement (SHORT) ─────────────────────────────
-        if len(bear_signals) >= 2 and can_short:
-            if abs(momentum_60s) < self.MIN_EXPECTED_MOVE_PCT and abs(momentum_120s) < self.MIN_EXPECTED_MOVE_PCT:
+        # ── Check required signals (SHORT) — trend-weighted ───────────────
+        if len(bear_signals) >= required_short and can_short:
+            if (abs(momentum_60s) < self.MIN_EXPECTED_MOVE_PCT
+                    and abs(momentum_120s) < self.MIN_EXPECTED_MOVE_PCT
+                    and abs(momentum_300s) < self.MIN_EXPECTED_MOVE_PCT):
                 self.hourly_skipped += 1
                 if self._tick_count % 10 == 0:
                     soul_msg = _soul_check("fee skip")
                     self.logger.info(
-                        "[%s] SKIP SHORT — signals=%s but move too small (60s=%+.2f%%, 120s=%+.2f%% < %.1f%%) | %s",
+                        "[%s] SKIP SHORT — signals=%s but move too small "
+                        "(60s=%+.2f%% 120s=%+.2f%% 300s=%+.2f%% < %.1f%%) | %s",
                         self.pair, "+".join(bear_signals),
-                        momentum_60s, momentum_120s, self.MIN_EXPECTED_MOVE_PCT, soul_msg,
+                        momentum_60s, momentum_120s, momentum_300s,
+                        self.MIN_EXPECTED_MOVE_PCT, soul_msg,
                     )
                 return None
 
-            reason = f"SHORT {len(bear_signals)}/4: {' + '.join(bear_signals)} [15m={trend_15m}]{widen_tag}"
+            req_tag = f" req={required_short}/4" if required_short > 2 else ""
+            reason = f"SHORT {len(bear_signals)}/4: {' + '.join(bear_signals)} [15m={trend_15m}]{req_tag}{widen_tag}"
             use_limit = "MOM" not in bear_signals[0]
             return ("short", reason, use_limit, len(bear_signals))
 
@@ -1716,27 +1811,32 @@ class ScalpStrategy(BaseStrategy):
 
         if pnl_pct >= 0:
             self.hourly_wins += 1
-            # Win resets consecutive loss streak
-            ScalpStrategy._consecutive_losses = 0
+            # Win resets consecutive loss streak for THIS PAIR
+            ScalpStrategy._pair_consecutive_losses[self._base_asset] = 0
+            ScalpStrategy._pair_post_streak[self._base_asset] = False
         else:
             self.hourly_losses += 1
-            # Track consecutive losses (shared across all pairs)
-            ScalpStrategy._consecutive_losses += 1
+            # Track consecutive losses PER PAIR (BTC losses don't pause XRP)
+            prev = ScalpStrategy._pair_consecutive_losses.get(self._base_asset, 0)
+            ScalpStrategy._pair_consecutive_losses[self._base_asset] = prev + 1
 
-            # SL cooldown: pause all entries for 2 min after any SL
-            if exit_type.lower() == "sl":
-                ScalpStrategy._last_sl_time = now
+            # SL cooldown: pause THIS PAIR for 2 min after SL
+            if exit_type.lower() in ("sl", "ws-sl"):
+                ScalpStrategy._pair_last_sl_time[self._base_asset] = now
                 self.logger.info(
-                    "[%s] SL COOLDOWN SET — no new entries for %ds (all pairs)",
-                    self.pair, self.SL_COOLDOWN_SECONDS,
+                    "[%s] SL COOLDOWN SET — no new %s entries for %ds",
+                    self.pair, self._base_asset, self.SL_COOLDOWN_SECONDS,
                 )
 
-            # Streak pause: after N consecutive losses, longer pause
-            if ScalpStrategy._consecutive_losses >= self.CONSECUTIVE_LOSS_LIMIT:
-                ScalpStrategy._streak_pause_until = now + self.STREAK_PAUSE_SECONDS
+            # Streak pause: after N consecutive losses on THIS PAIR
+            pair_losses = ScalpStrategy._pair_consecutive_losses[self._base_asset]
+            if pair_losses >= self.CONSECUTIVE_LOSS_LIMIT:
+                ScalpStrategy._pair_streak_pause_until[self._base_asset] = now + self.STREAK_PAUSE_SECONDS
+                ScalpStrategy._pair_post_streak[self._base_asset] = True  # first trade back needs 3/4
                 self.logger.warning(
-                    "[%s] STREAK PAUSE — %d consecutive losses! Pausing %ds (all pairs)",
-                    self.pair, ScalpStrategy._consecutive_losses, self.STREAK_PAUSE_SECONDS,
+                    "[%s] STREAK PAUSE — %d consecutive %s losses! Pausing %s for %ds",
+                    self.pair, pair_losses, self._base_asset,
+                    self._base_asset, self.STREAK_PAUSE_SECONDS,
                 )
 
         hold_sec = int(now - self.entry_time)
@@ -1744,7 +1844,8 @@ class ScalpStrategy(BaseStrategy):
 
         # Log with fee breakdown for visibility
         fee_ratio = abs(gross_pnl / est_fees) if est_fees > 0 else 0
-        streak_tag = f" streak={ScalpStrategy._consecutive_losses}" if ScalpStrategy._consecutive_losses > 0 else ""
+        pair_losses = ScalpStrategy._pair_consecutive_losses.get(self._base_asset, 0)
+        streak_tag = f" streak={pair_losses}" if pair_losses > 0 else ""
         self.logger.info(
             "[%s] CLOSED %s %+.2f%% price (%+.1f%% capital at %dx) | "
             "Gross=$%.4f Net=$%.4f fees=$%.4f (%.1fx) | %s | W/L=%d/%d%s",
