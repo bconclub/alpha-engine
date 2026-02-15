@@ -566,18 +566,18 @@ class TradeExecutor:
             signal.position_type == "spot" and signal.side == "sell"
         )
 
-        if is_exit:
-            # EXIT: update the existing open trade row in DB
-            await self._close_trade_in_db(signal, order)
-        else:
-            # ENTRY: insert a new trade row in DB
-            await self._open_trade_in_db(signal, order)
-
-        # Send Telegram alert (different message for entry vs exit)
+        # Send Telegram alert FIRST — user needs to know immediately.
+        # If DB insert fails later, at least the alert was already sent.
         if is_exit:
             await self._notify_trade_closed(signal, order)
         else:
             await self._notify_trade_opened(signal, order)
+
+        # Then log to DB (dashboard reads this via realtime subscription)
+        if is_exit:
+            await self._close_trade_in_db(signal, order)
+        else:
+            await self._open_trade_in_db(signal, order)
 
         return order
 

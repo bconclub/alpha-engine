@@ -251,8 +251,8 @@ function SupabaseProviderInner({ children }: { children: ReactNode }) {
           client!.from('trades').select('*').order('opened_at', { ascending: false }).limit(500),
           // bot_status uses created_at
           client!.from('bot_status').select('*').order('created_at', { ascending: false }).limit(1),
-          // strategy_log uses created_at
-          client!.from('strategy_log').select('*').order('created_at', { ascending: false }).limit(100),
+          // strategy_log uses created_at — fetch enough rows to cover all 4 pairs
+          client!.from('strategy_log').select('*').order('created_at', { ascending: false }).limit(200),
         ]);
 
         if (tradesRes.error) console.error('[Alpha] trades query error:', tradesRes.error.message);
@@ -278,6 +278,24 @@ function SupabaseProviderInner({ children }: { children: ReactNode }) {
 
     fetchInitialData();
     fetchViews();
+
+    // Poll every 60s as fallback (realtime may disconnect silently)
+    const pollInterval = setInterval(async () => {
+      try {
+        const logRes = await client!.from('strategy_log').select('*').order('created_at', { ascending: false }).limit(200);
+        if (logRes.data) setStrategyLog(logRes.data.map(normalizeStrategyLog));
+
+        const statusRes = await client!.from('bot_status').select('*').order('created_at', { ascending: false }).limit(1);
+        if (statusRes.data && statusRes.data.length > 0) setBotStatus(normalizeBotStatus(statusRes.data[0]));
+
+        const tradesRes = await client!.from('trades').select('*').order('opened_at', { ascending: false }).limit(500);
+        if (tradesRes.data) setTrades(tradesRes.data.map(normalizeTrade));
+      } catch (e) { console.warn('[Alpha] Poll refresh failed', e); }
+
+      fetchViews();
+    }, 60_000);
+
+    return () => clearInterval(pollInterval);
   }, [fetchViews, buildInitialFeed]);
 
   // ---------- Realtime subscriptions ----------

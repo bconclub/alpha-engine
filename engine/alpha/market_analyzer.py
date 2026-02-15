@@ -93,16 +93,25 @@ class MarketAnalyzer:
             pct_24h = ticker.get("percentage")
             if pct_24h is not None:
                 analysis.price_change_24h = float(pct_24h)
+            else:
+                # Delta Exchange may not provide 'percentage' — compute from open/last
+                open_price = ticker.get("open")
+                last_price = ticker.get("last")
+                if open_price and last_price and float(open_price) > 0:
+                    analysis.price_change_24h = (
+                        (float(last_price) - float(open_price)) / float(open_price)
+                    ) * 100
         except Exception:
             pass  # leave as 0.0
 
         self._last_analysis[pair] = analysis
 
         logger.info(
-            "[%s] %s | ADX=%.1f ATR=%.2f BBW=%.4f RSI=%.1f VolR=%.2f Str=%.0f | %s",
+            "[%s] %s | ADX=%.1f RSI=%.1f VolR=%.2f Str=%.0f | 1h=%.2f%% 24h=%.2f%% | %s",
             pair, analysis.condition.value,
-            analysis.adx, analysis.atr, analysis.bb_width,
-            analysis.rsi, analysis.volume_ratio, analysis.signal_strength,
+            analysis.adx, analysis.rsi, analysis.volume_ratio,
+            analysis.signal_strength,
+            analysis.price_change_1h, analysis.price_change_24h,
             analysis.reason,
         )
         return analysis

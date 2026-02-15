@@ -49,22 +49,30 @@ class Database:
         """Insert a new trade row and return its Supabase row ID."""
         if not self.is_connected:
             return None
-        loop = asyncio.get_running_loop()
-        result = await loop.run_in_executor(
-            None,
-            lambda: (
-                self._client.table(self.TABLE_TRADES)  # type: ignore[union-attr]
-                .insert(data)
-                .execute()
-            ),
-        )
-        row_id = result.data[0].get("id") if result.data else None
-        logger.debug(
-            "Trade logged (id=%s): %s %s %s @ %s",
-            row_id, data.get("side"), data.get("pair"),
-            data.get("strategy"), data.get("entry_price"),
-        )
-        return row_id
+        try:
+            loop = asyncio.get_running_loop()
+            result = await loop.run_in_executor(
+                None,
+                lambda: (
+                    self._client.table(self.TABLE_TRADES)  # type: ignore[union-attr]
+                    .insert(data)
+                    .execute()
+                ),
+            )
+            row_id = result.data[0].get("id") if result.data else None
+            logger.info(
+                "Trade logged (id=%s): %s %s %s @ %s on %s",
+                row_id, data.get("side"), data.get("pair"),
+                data.get("strategy"), data.get("entry_price"), data.get("exchange"),
+            )
+            return row_id
+        except Exception as e:
+            logger.error(
+                "DB INSERT FAILED for trade: %s | pair=%s side=%s strategy=%s exchange=%s | %s",
+                type(e).__name__, data.get("pair"), data.get("side"),
+                data.get("strategy"), data.get("exchange"), e,
+            )
+            return None
 
     async def close_trade(
         self, order_id: str, exit_price: float, pnl: float, pnl_pct: float
@@ -319,8 +327,14 @@ class Database:
     # ── Internal ─────────────────────────────────────────────────────────────
 
     async def _insert(self, table: str, data: dict[str, Any]) -> None:
-        loop = asyncio.get_running_loop()
-        await loop.run_in_executor(
-            None,
-            lambda: self._client.table(table).insert(data).execute(),  # type: ignore[union-attr]
-        )
+        try:
+            loop = asyncio.get_running_loop()
+            await loop.run_in_executor(
+                None,
+                lambda: self._client.table(table).insert(data).execute(),  # type: ignore[union-attr]
+            )
+        except Exception as e:
+            logger.error(
+                "DB INSERT FAILED for %s: %s | pair=%s | %s",
+                table, type(e).__name__, data.get("pair", "?"), e,
+            )
