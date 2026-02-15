@@ -58,7 +58,7 @@ class DeltaConfig:
     api_key: str = field(default_factory=lambda: _env("DELTA_API_KEY"))
     secret: str = field(default_factory=lambda: _env("DELTA_SECRET"))
     testnet: bool = field(default_factory=lambda: _env_bool("DELTA_TESTNET", True))
-    leverage: int = field(default_factory=lambda: _env_int("DELTA_LEVERAGE", 10))
+    leverage: int = field(default_factory=lambda: _env_int("DELTA_LEVERAGE", 20))
     pairs: list[str] = field(default_factory=lambda: _env_list("DELTA_PAIRS"))
     enable_shorting: bool = field(default_factory=lambda: _env_bool("ENABLE_SHORTING", True))
 

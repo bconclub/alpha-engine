@@ -10,10 +10,10 @@ CRITICAL RULE: Check 15-minute trend BEFORE entering.
   - If 15m trend is neutral → either direction (2-of-4 decides)
   This single rule prevents most losses from counter-trend entries.
 
-Risk Management (10x leverage):
-  - Leverage: 10x (NOT 20x — 0.7% against = 7% loss, not 14%)
-  - SL: 0.35% price (3.5% capital at 10x) — tighter than before
-  - TP: 1.50% minimum (15% capital at 10x)
+Risk Management (20x leverage):
+  - Leverage: 20x — 0.35% against = 7% loss
+  - SL: 0.35% price (7% capital at 20x) — cut fast
+  - TP: 1.50% minimum (30% capital at 20x)
   - R:R = 1.50/0.35 = 4.3:1
   - Max contracts: ETH 2, BTC 1 (smaller positions while improving)
   - Daily loss limit: 20% of capital → stop for the day
@@ -134,15 +134,15 @@ class ScalpStrategy(BaseStrategy):
     TP > SL (4.3:1 R:R). Checks 15m trend before entry.
     Lowered entry thresholds so the bot actually trades.
     Adaptive widening: if idle 30+ min, thresholds loosen 20%.
-    10x leverage, tighter SL (0.35%), smaller positions.
+    20x leverage, tighter SL (0.35%), smaller positions.
     """
 
     name = StrategyName.SCALP
     check_interval_sec = 5  # 5 second ticks — patient, not frantic
 
     # ── Exit thresholds — TP MUST BE BIGGER THAN SL (4.3:1 R:R) ──────
-    STOP_LOSS_PCT = 0.35              # 0.35% price SL (3.5% capital at 10x) — cut FAST
-    MIN_TP_PCT = 1.50                 # minimum 1.5% target (15% capital at 10x)
+    STOP_LOSS_PCT = 0.35              # 0.35% price SL (7% capital at 20x) — cut FAST
+    MIN_TP_PCT = 1.50                 # minimum 1.5% target (30% capital at 20x)
     TRAILING_ACTIVATE_PCT = 1.50      # activate trail at +1.5% — the minimum target
     TRAILING_DISTANCE_PCT = 0.35      # trail 0.35% behind peak — tight trail
     MAX_HOLD_SECONDS = 30 * 60        # 30 min max — free capital if flat
@@ -200,7 +200,7 @@ class ScalpStrategy(BaseStrategy):
         super().__init__(pair, executor, risk_manager)
         self.trade_exchange: ccxt.Exchange | None = exchange
         self.is_futures = is_futures
-        self.leverage: int = min(config.delta.leverage, 10) if is_futures else 1  # CAP at 10x
+        self.leverage: int = min(config.delta.leverage, 20) if is_futures else 1  # CAP at 20x
         self.capital_pct: float = self.CAPITAL_PCT_FUTURES if is_futures else self.CAPITAL_PCT_SPOT
         self._exchange_id: str = "delta" if is_futures else "binance"
         self._market_analyzer = market_analyzer  # for 15m trend direction

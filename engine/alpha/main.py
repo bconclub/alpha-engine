@@ -1270,10 +1270,10 @@ class AlphaBot:
                 "private": config.delta.base_url,
             }
             # ── LEVERAGE SAFETY CHECK ─────────────────────────────────────
-            if config.delta.leverage > 10:
+            if config.delta.leverage > 20:
                 logger.warning(
-                    "!!! LEVERAGE IS %dx — recommended max is 10x for safety !!! "
-                    "Set DELTA_LEVERAGE=10 in .env",
+                    "!!! LEVERAGE IS %dx — max supported is 20x !!! "
+                    "Set DELTA_LEVERAGE=20 in .env",
                     config.delta.leverage,
                 )
             logger.info(
