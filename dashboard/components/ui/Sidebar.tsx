@@ -133,6 +133,7 @@ export function Sidebar() {
             isConnected ? 'bg-[#00c853] animate-pulse' : 'bg-red-500',
           )} />
           <span className="text-base font-bold tracking-widest text-white">ALPHA</span>
+          <span className="text-[9px] font-mono text-zinc-600">v{process.env.APP_VERSION ?? '?'}</span>
         </div>
         <div className="w-9" /> {/* spacer for centering */}
       </div>
