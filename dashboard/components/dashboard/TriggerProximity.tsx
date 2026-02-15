@@ -27,12 +27,7 @@ interface TriggerInfo {
   currentPrice: number | null;
   bbUpper: number | null;
   bbLower: number | null;
-  // Proximity (RSI distance)
-  longDistancePct: number;
-  shortDistancePct: number;
-  longReady: boolean;
-  shortReady: boolean;
-  // 4 indicators
+  // 4 indicators per side
   longIndicators: IndicatorStatus[];
   longCount: number;
   shortIndicators: IndicatorStatus[];
@@ -55,27 +50,6 @@ function computeTrigger(log: StrategyLog): TriggerInfo {
   const bbUpper = log.bb_upper ?? null;
   const bbLower = log.bb_lower ?? null;
   const hasData = rsi != null;
-
-  // ── RSI proximity (for bars) ───────────────────────────────────────
-  let longDistancePct = 100;
-  let shortDistancePct = 100;
-  let longReady = false;
-  let shortReady = false;
-
-  if (rsi != null) {
-    if (rsi <= RSI_LONG_THRESHOLD) {
-      longDistancePct = 0;
-      longReady = true;
-    } else {
-      longDistancePct = ((rsi - RSI_LONG_THRESHOLD) / RSI_LONG_THRESHOLD) * 100;
-    }
-    if (rsi >= RSI_SHORT_THRESHOLD) {
-      shortDistancePct = 0;
-      shortReady = true;
-    } else {
-      shortDistancePct = ((RSI_SHORT_THRESHOLD - rsi) / (100 - RSI_SHORT_THRESHOLD)) * 100;
-    }
-  }
 
   // ── Build 4 indicators for LONG ────────────────────────────────────
   const longIndicators: IndicatorStatus[] = [];
@@ -141,21 +115,19 @@ function computeTrigger(log: StrategyLog): TriggerInfo {
   return {
     pair, exchange, isFutures, hasData,
     rsi, volumeRatio, priceChangePct, currentPrice, bbUpper, bbLower,
-    longDistancePct, shortDistancePct, longReady, shortReady,
     longIndicators, longCount,
     shortIndicators, shortCount,
     bestCount, overallStatus, statusColor,
   };
 }
 
-// ── Proximity bar (Long/Short fill showing RSI distance) ─────────────
-function ProximityBar({ distance, ready }: { distance: number; ready: boolean }) {
-  const filled = ready ? 100 : Math.max(0, Math.min(100, 100 - distance));
-  const color = ready
-    ? '#00c853'
-    : distance < 25
-      ? '#ffd600'
-      : '#71717a'; // zinc-500
+// ── Signal bar (fills based on signal count, not RSI) ─────────────────
+function SignalBar({ count }: { count: number }) {
+  const filled = (count / 4) * 100;
+  const color =
+    count >= 2 ? '#00c853' :   // green — trade ready
+    count === 1 ? '#ffd600' :  // yellow — 1 signal
+    '#71717a';                 // gray — nothing
 
   return (
     <div className="flex-1 h-1.5 bg-zinc-800 rounded-full overflow-hidden">
@@ -192,14 +164,10 @@ function Dot({ active, label }: { active: boolean; label: string }) {
 // ── Side row: bar + dots underneath ──────────────────────────────────
 function SideRow({
   side,
-  distance,
-  ready,
   indicators,
   count,
 }: {
   side: 'Long' | 'Short';
-  distance: number;
-  ready: boolean;
   indicators: IndicatorStatus[];
   count: number;
 }) {
@@ -210,12 +178,12 @@ function SideRow({
 
   return (
     <div className="space-y-1">
-      {/* Bar row */}
+      {/* Bar row — fills based on signal count */}
       <div className="flex items-center gap-2">
         <span className="text-[10px] text-zinc-500 w-8 shrink-0">{side}</span>
-        <ProximityBar distance={distance} ready={ready} />
-        <span className="text-[10px] font-mono text-zinc-500 w-16 text-right">
-          {ready ? 'RSI ✓' : `${distance.toFixed(0)}% away`}
+        <SignalBar count={count} />
+        <span className={cn('text-[10px] font-mono w-16 text-right', countColor)}>
+          {count >= 2 ? `${count}/4 ✓` : `${count}/4`}
         </span>
       </div>
       {/* Dots row (aligned under the bar) */}
@@ -225,9 +193,6 @@ function SideRow({
             <Dot key={i} active={ind.active} label={ind.label} />
           ))}
         </div>
-        <span className={cn('text-[9px] font-mono ml-auto mr-0', countColor)}>
-          {count}/4
-        </span>
       </div>
     </div>
   );
@@ -309,8 +274,6 @@ export function TriggerProximity() {
                   {/* Long: bar + dots */}
                   <SideRow
                     side="Long"
-                    distance={t.longDistancePct}
-                    ready={t.longReady}
                     indicators={t.longIndicators}
                     count={t.longCount}
                   />
@@ -318,8 +281,6 @@ export function TriggerProximity() {
                   {t.isFutures && (
                     <SideRow
                       side="Short"
-                      distance={t.shortDistancePct}
-                      ready={t.shortReady}
                       indicators={t.shortIndicators}
                       count={t.shortCount}
                     />
