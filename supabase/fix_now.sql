@@ -125,7 +125,84 @@ from public.trades
 where status = 'open'
 order by opened_at desc;
 
--- ── 12. Verify: check P&L values on closed trades ──
+-- ── 12. BACKFILL: recalculate P&L on closed trades with missing values ──
+-- Many old trades have pnl=0 or pnl=NULL because the engine didn't write P&L
+-- before v3.3.6. This recalculates from entry_price, exit_price, amount, and
+-- the correct Delta contract sizes.
+--
+-- Contract sizes: BTC=0.001, ETH=0.01, SOL=1.0, XRP=1.0
+-- Fee rate: ~0.059% per side (taker + 18% GST) = ~0.118% round-trip
+--
+update public.trades
+set pnl = (
+  case
+    -- Coin amount = contracts × contract_size
+    -- For Delta futures:
+    when exchange = 'delta' then
+      case position_type
+        when 'short' then
+          (entry_price - exit_price) * amount *
+          case
+            when pair like 'BTC%' then 0.001
+            when pair like 'ETH%' then 0.01
+            when pair like 'SOL%' then 1.0
+            when pair like 'XRP%' then 1.0
+            else 0.01
+          end
+          -- Subtract round-trip fees
+          - (entry_price + exit_price) * amount *
+          case
+            when pair like 'BTC%' then 0.001
+            when pair like 'ETH%' then 0.01
+            when pair like 'SOL%' then 1.0
+            when pair like 'XRP%' then 1.0
+            else 0.01
+          end * 0.00059
+        else -- long
+          (exit_price - entry_price) * amount *
+          case
+            when pair like 'BTC%' then 0.001
+            when pair like 'ETH%' then 0.01
+            when pair like 'SOL%' then 1.0
+            when pair like 'XRP%' then 1.0
+            else 0.01
+          end
+          - (entry_price + exit_price) * amount *
+          case
+            when pair like 'BTC%' then 0.001
+            when pair like 'ETH%' then 0.01
+            when pair like 'SOL%' then 1.0
+            when pair like 'XRP%' then 1.0
+            else 0.01
+          end * 0.00059
+      end
+    -- For Binance spot: amount is already in coins
+    else
+      case position_type
+        when 'short' then (entry_price - exit_price) * amount - (entry_price + exit_price) * amount * 0.001
+        else (exit_price - entry_price) * amount - (entry_price + exit_price) * amount * 0.001
+      end
+  end
+),
+pnl_pct = (
+  case
+    when entry_price > 0 and leverage > 0 then
+      -- pnl_pct = (gross_pnl / collateral) * 100
+      -- collateral = entry_price * coin_amount / leverage
+      case position_type
+        when 'short' then ((entry_price - exit_price) / entry_price * 100) * leverage
+        else ((exit_price - entry_price) / entry_price * 100) * leverage
+      end
+    else 0
+  end
+)
+where status = 'closed'
+  and exit_price is not null
+  and exit_price > 0
+  and entry_price > 0
+  and (pnl is null or pnl = 0);
+
+-- ── 13. Verify: check P&L values on closed trades ──
 -- If pnl is always 0 or NULL, the trade_executor isn't writing P&L correctly.
 select id, pair, position_type, entry_price, exit_price,
        pnl, pnl_pct, status, reason, opened_at, closed_at
