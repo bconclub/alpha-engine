@@ -81,7 +81,7 @@ export function OpenPositions() {
       {!openPositions || openPositions.length === 0 ? (
         <p className="text-sm text-zinc-500 text-center py-8">No open positions</p>
       ) : (
-        <div className="space-y-3 max-h-none md:max-h-[500px] overflow-y-auto pr-1">
+        <div className="space-y-3 max-h-none md:max-h-[500px] overflow-y-auto overflow-x-hidden pr-1">
           {openPositions.map((pos) => {
             const entryPrice = pos.entry_price;
             const currentPrice = pos.current_price ?? entryPrice;

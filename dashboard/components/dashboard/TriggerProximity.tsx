@@ -303,7 +303,7 @@ export function TriggerProximity() {
       {triggers.length === 0 ? (
         <p className="text-sm text-zinc-500 text-center py-8">No pairs tracked yet</p>
       ) : (
-        <div className="space-y-3 max-h-none md:max-h-[600px] overflow-y-auto pr-1">
+        <div className="space-y-3 max-h-none md:max-h-[600px] overflow-y-auto overflow-x-hidden pr-1">
           {triggers.map((t) => (
             <div
               key={`${t.pair}-${t.exchange}`}

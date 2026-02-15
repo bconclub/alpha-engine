@@ -18,9 +18,9 @@ export default function RootLayout({
 }>) {
   return (
     <html lang="en" className="dark">
-      <body className="bg-[#0d1117] text-white antialiased">
+      <body className="bg-[#0d1117] text-white antialiased overflow-x-hidden">
         <SupabaseProvider>
-          <div className="min-h-screen flex">
+          <div className="min-h-screen flex overflow-x-hidden">
             {/* Left sidebar */}
             <Sidebar />
 

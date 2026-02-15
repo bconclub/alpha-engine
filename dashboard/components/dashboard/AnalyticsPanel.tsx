@@ -363,7 +363,7 @@ export function AnalyticsPanel() {
   // ---- Render ----
 
   return (
-    <div className="bg-[#0d1117] border border-zinc-800 rounded-xl overflow-hidden">
+    <div className="bg-[#0d1117] border border-zinc-800 rounded-xl overflow-hidden min-w-0">
       {/* Header */}
       <div className="p-5 border-b border-zinc-800/60">
         <h3 className="text-sm font-medium text-zinc-400 uppercase tracking-wider">

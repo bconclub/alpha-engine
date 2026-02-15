@@ -97,9 +97,9 @@ export function LiveStatusBar() {
               <span className="text-[10px] text-zinc-500">(Spot)</span>
             </div>
             {binanceBalance > 0 ? (
-              <div className="flex items-baseline gap-3">
-                <span className="font-mono text-lg text-white">{formatCurrency(binanceBalance)}</span>
-                <span className="text-[10px] text-zinc-500">USDT</span>
+              <div className="flex items-baseline gap-2 min-w-0">
+                <span className="font-mono text-base md:text-lg text-white truncate">{formatCurrency(binanceBalance)}</span>
+                <span className="text-[10px] text-zinc-500 shrink-0">USDT</span>
               </div>
             ) : binancePnl ? (
               <div className="space-y-1">
@@ -135,10 +135,10 @@ export function LiveStatusBar() {
               <span className="text-[10px] text-zinc-500">(Futures)</span>
             </div>
             {deltaBalance > 0 ? (
-              <div className="flex items-baseline gap-3">
-                <span className="font-mono text-lg text-white">{formatCurrency(deltaBalance)}</span>
+              <div className="flex items-baseline gap-2 min-w-0 flex-wrap">
+                <span className="font-mono text-base md:text-lg text-white truncate">{formatCurrency(deltaBalance)}</span>
                 {deltaBalanceInr != null && (
-                  <span className="text-[10px] text-zinc-500">~INR {deltaBalanceInr.toLocaleString()}</span>
+                  <span className="text-[10px] text-zinc-500 shrink-0">~INR {deltaBalanceInr.toLocaleString()}</span>
                 )}
               </div>
             ) : deltaPnl ? (
@@ -166,7 +166,7 @@ export function LiveStatusBar() {
         {/* Center: Total Capital + Bot State */}
         <div className="flex flex-col items-center gap-1 border-y md:border-y-0 md:border-x border-zinc-800 py-3 md:py-0 md:px-6">
           <span className="text-[10px] uppercase tracking-wider text-zinc-500">Total Capital</span>
-          <span className="font-mono text-lg md:text-xl font-bold text-white">
+          <span className="font-mono text-base md:text-xl font-bold text-white truncate max-w-full">
             {formatCurrency(totalCapital)}
           </span>
           <div className="flex items-center gap-3 mt-1">

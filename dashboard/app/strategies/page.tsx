@@ -175,16 +175,16 @@ export default function StrategiesPage() {
             Strategy Performance by Exchange
           </h3>
           <div className="overflow-x-auto">
-            <table className="w-full min-w-[600px] text-sm">
+            <table className="w-full text-sm">
               <thead>
                 <tr className="text-left text-xs text-zinc-500 border-b border-zinc-800">
-                  <th className="pb-2 pr-4 font-medium">Strategy</th>
-                  <th className="pb-2 pr-4 font-medium">Exchange</th>
-                  <th className="pb-2 pr-4 font-medium text-right">Trades</th>
-                  <th className="pb-2 pr-4 font-medium text-right">Win Rate</th>
-                  <th className="pb-2 pr-4 font-medium text-right">Total P&L</th>
-                  <th className="pb-2 pr-4 font-medium text-right">Best Trade</th>
-                  <th className="pb-2 font-medium text-right">Worst Trade</th>
+                  <th className="pb-2 pr-3 font-medium">Strategy</th>
+                  <th className="pb-2 pr-3 font-medium hidden sm:table-cell">Exchange</th>
+                  <th className="pb-2 pr-3 font-medium text-right">Trades</th>
+                  <th className="pb-2 pr-3 font-medium text-right hidden sm:table-cell">Win Rate</th>
+                  <th className="pb-2 pr-3 font-medium text-right">P&L</th>
+                  <th className="pb-2 pr-3 font-medium text-right hidden md:table-cell">Best</th>
+                  <th className="pb-2 font-medium text-right hidden md:table-cell">Worst</th>
                 </tr>
               </thead>
               <tbody>
@@ -196,12 +196,12 @@ export default function StrategiesPage() {
                       idx % 2 === 0 ? 'bg-transparent' : 'bg-zinc-900/30',
                     )}
                   >
-                    <td className="py-2.5 pr-4">
+                    <td className="py-2.5 pr-3">
                       <Badge variant={getStrategyBadgeVariant(sp.strategy)}>
                         {getStrategyLabel(sp.strategy)}
                       </Badge>
                     </td>
-                    <td className="py-2.5 pr-4">
+                    <td className="py-2.5 pr-3 hidden sm:table-cell">
                       <span className="inline-flex items-center gap-1.5">
                         <span
                           className="w-2 h-2 rounded-full inline-block"
@@ -210,13 +210,13 @@ export default function StrategiesPage() {
                         <span className="text-zinc-300">{getExchangeLabel(sp.exchange)}</span>
                       </span>
                     </td>
-                    <td className="py-2.5 pr-4 text-right font-mono text-zinc-300">{sp.total_trades}</td>
-                    <td className="py-2.5 pr-4 text-right font-mono text-zinc-300">{formatPercentage(sp.win_rate_pct)}</td>
-                    <td className={cn('py-2.5 pr-4 text-right font-mono', sp.total_pnl >= 0 ? 'text-emerald-400' : 'text-red-400')}>
+                    <td className="py-2.5 pr-3 text-right font-mono text-zinc-300">{sp.total_trades}</td>
+                    <td className="py-2.5 pr-3 text-right font-mono text-zinc-300 hidden sm:table-cell">{formatPercentage(sp.win_rate_pct)}</td>
+                    <td className={cn('py-2.5 pr-3 text-right font-mono', sp.total_pnl >= 0 ? 'text-emerald-400' : 'text-red-400')}>
                       {formatPnL(sp.total_pnl)}
                     </td>
-                    <td className="py-2.5 pr-4 text-right font-mono text-emerald-400">{formatPnL(sp.best_trade)}</td>
-                    <td className="py-2.5 text-right font-mono text-red-400">{formatPnL(sp.worst_trade)}</td>
+                    <td className="py-2.5 pr-3 text-right font-mono text-emerald-400 hidden md:table-cell">{formatPnL(sp.best_trade)}</td>
+                    <td className="py-2.5 text-right font-mono text-red-400 hidden md:table-cell">{formatPnL(sp.worst_trade)}</td>
                   </tr>
                 ))}
               </tbody>
