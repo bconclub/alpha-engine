@@ -194,8 +194,9 @@ class ScalpStrategy(BaseStrategy):
     FEE_MULTIPLIER_MIN = 13.0         # 1.5% TP / 0.083% RT mixed = 18x
 
     # ── Position sizing (per-pair contract limits) ──────────────────────
-    CAPITAL_PCT_SPOT = 50.0
+    CAPITAL_PCT_SPOT = 35.0             # 35% of Binance USDT per trade (middle of 30-40%)
     CAPITAL_PCT_FUTURES = 80.0
+    MIN_NOTIONAL_SPOT = 6.00            # $6 min to avoid dust on exit (Binance $5 min + buffer)
     PAIR_MAX_CONTRACTS: dict[str, int] = {
         "BTC": 1,              # BTC: 1 contract (~$70 notional, ~$3.50 collateral at 20x)
         "ETH": 2,              # ETH: 2 contracts (~$40 notional, ~$2 collateral at 20x)
@@ -291,8 +292,9 @@ class ScalpStrategy(BaseStrategy):
             rt_mixed = config.delta.mixed_round_trip * 100
             rt_taker = config.delta.taker_round_trip * 100
         else:
-            rt_mixed = 0.2
-            rt_taker = 0.2
+            # Binance spot: 0.1% per side (check for BNB discount)
+            rt_mixed = 0.20  # 0.1% × 2 = 0.2% round trip
+            rt_taker = 0.20
         trend_source = "15m analyzer" if self._market_analyzer else "NONE (no trend filter!)"
         tiers_str = " → ".join(f"+{p}%:{d}%" for p, d in self.TRAIL_TIERS)
         self.logger.info(
@@ -473,7 +475,7 @@ class ScalpStrategy(BaseStrategy):
 
         # Balance check
         available = self.risk_manager.get_available_capital(self._exchange_id)
-        min_balance = 5.50 if self._exchange_id == "binance" else 1.00
+        min_balance = self.MIN_NOTIONAL_SPOT if self._exchange_id == "binance" else 1.00
         if available < min_balance:
             if self._tick_count % 60 == 0:
                 self.logger.info(
@@ -1047,13 +1049,26 @@ class ScalpStrategy(BaseStrategy):
                 self.risk_manager.max_position_pct,
             )
         else:
+            # Spot sizing: use CAPITAL_PCT_SPOT of available balance
             exchange_capital = self.risk_manager.get_exchange_capital(self._exchange_id)
             capital = exchange_capital * (self.capital_pct / 100)
             capital = min(capital, available)
+
+            # Enforce minimum notional — skip if below $6 (avoids dust on exit)
+            if capital < self.MIN_NOTIONAL_SPOT:
+                if self._tick_count % 60 == 0:
+                    self.logger.info(
+                        "[%s] Spot order $%.2f < $%.2f min notional — skipping",
+                        self.pair, capital, self.MIN_NOTIONAL_SPOT,
+                    )
+                return None
+
             amount = capital / current_price
-            self.logger.debug(
-                "[%s] Sizing (spot): $%.2f -> %.8f",
+            self.logger.info(
+                "[%s] Sizing (spot): $%.2f → %.8f %s (%.0f%% of $%.2f avail)",
                 self.pair, capital, amount,
+                self.pair.split("/")[0] if "/" in self.pair else self.pair,
+                self.capital_pct, available,
             )
 
         return amount

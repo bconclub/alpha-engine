@@ -96,8 +96,9 @@ class AlphaBot:
                     logger.info("  %s", line.strip().lstrip("#").strip())
 
         logger.info("=" * 60)
-        logger.info("  ALPHA v%s — Delta Scalping Agent", version)
-        logger.info("  DELTA ONLY — %s, %dx leverage",
+        logger.info("  ALPHA v%s — Multi-Exchange Scalping Agent", version)
+        logger.info("  BINANCE (spot): %s", ", ".join(self.pairs))
+        logger.info("  DELTA (futures): %s, %dx leverage",
                      ", ".join(self.delta_pairs), config.delta.leverage)
         logger.info("  Soul: Momentum is everything. Speed wins. Never idle.")
         logger.info("=" * 60)
@@ -106,9 +107,6 @@ class AlphaBot:
         await self._init_exchanges()
         await self.db.connect()
         await self.alerts.connect()
-
-        # Mark ALL Binance open trades as closed (dust, unsellable)
-        await self._close_all_binance_trades()
 
         # Restore state from DB if available
         await self._restore_state()
@@ -126,7 +124,7 @@ class AlphaBot:
 
         self.risk_manager.record_close = _tracked_record_close  # type: ignore[assignment]
 
-        # Build components — Delta only (Binance kept as fallback exchange reference)
+        # Build components — both Binance (spot) and Delta (futures)
         self.executor = TradeExecutor(
             self.binance,  # type: ignore[arg-type]
             db=self.db,
@@ -136,8 +134,11 @@ class AlphaBot:
             options_exchange=self.delta_options,
         )
 
-        # No Binance analyzer — Delta only
-        self.pairs = []  # clear Binance pairs entirely
+        # Binance analyzer for spot pairs
+        if self.binance and self.pairs:
+            self.analyzer = MarketAnalyzer(
+                self.binance, pair=self.pairs[0],
+            )
 
         if self.delta:
             self.delta_analyzer = MarketAnalyzer(
@@ -149,13 +150,13 @@ class AlphaBot:
             futures_pairs=set(self.delta_pairs) if self.delta else None,
         )
 
-        # Load Delta market limits only
+        # Load market limits for both exchanges
         await self.executor.load_market_limits(
-            [],  # no Binance pairs
+            self.pairs,  # Binance spot pairs
             delta_pairs=self.delta_pairs if self.delta else None,
         )
 
-        # Register scalp strategies — Delta only (with 15m trend filter)
+        # Register scalp strategies — Delta futures (with 15m trend filter)
         if self.delta:
             for pair in self.delta_pairs:
                 self._scalp_strategies[pair] = ScalpStrategy(
@@ -163,6 +164,16 @@ class AlphaBot:
                     exchange=self.delta,
                     is_futures=True,
                     market_analyzer=self.delta_analyzer,
+                )
+
+        # Register scalp strategies — Binance spot (same signals, no leverage, long-only)
+        if self.binance and self.pairs:
+            for pair in self.pairs:
+                self._scalp_strategies[pair] = ScalpStrategy(
+                    pair, self.executor, self.risk_manager,
+                    exchange=self.binance,
+                    is_futures=False,
+                    market_analyzer=self.analyzer,
                 )
 
         # Register options overlay — Delta only (reads signals from scalp)
@@ -247,10 +258,22 @@ class AlphaBot:
                     logger.warning("[STARTUP] %s — could not fetch price", pair)
                     active_pairs.append(pair)  # still register, let runtime handle it
             logger.info(
-                "[STARTUP] Active: %s | Skipped: %s",
+                "[STARTUP] Delta Active: %s | Skipped: %s",
                 ", ".join(active_pairs) or "none",
                 ", ".join(skipped_pairs) or "none",
             )
+
+        # ── Log Binance spot pair info ──────────────────────────────────
+        if self.binance and binance_bal is not None and self.pairs:
+            min_trade = 6.0  # MIN_NOTIONAL_SPOT
+            can_trade = binance_bal >= min_trade
+            logger.info(
+                "[STARTUP] Binance: $%.2f USDT | %d pairs | Min trade: $%.0f | %s",
+                binance_bal, len(self.pairs), min_trade,
+                "ACTIVE" if can_trade else "INSUFFICIENT — need $6+",
+            )
+            for pair in self.pairs:
+                logger.info("[STARTUP] Binance spot: %s (1x, long-only)", pair)
 
         # Notify
         await self.alerts.send_bot_started(
@@ -271,8 +294,9 @@ class AlphaBot:
 
         # Keep running
         logger.info(
-            "Bot running — DELTA ONLY — %d pairs, %dx leverage — Ctrl+C to stop",
-            len(self.delta_pairs) if self.delta else 0, config.delta.leverage,
+            "Bot running — Binance %d spot + Delta %d futures (%dx) — Ctrl+C to stop",
+            len(self.pairs), len(self.delta_pairs) if self.delta else 0,
+            config.delta.leverage,
         )
         try:
             while self._running:
@@ -870,25 +894,39 @@ class AlphaBot:
 
         await self.db.mark_command_executed(cmd_id, result_msg)
 
-    async def _close_all_binance_trades(self) -> None:
-        """Mark all open Binance trades as closed — they're unsellable dust."""
+    async def _close_binance_dust_trades(self) -> None:
+        """Mark Binance trades below $6 as closed dust (too small to sell).
+
+        Only closes trades that are genuinely unsellable — checks actual balance.
+        """
         try:
+            if not self.binance:
+                return
+            bal = await self.binance.fetch_balance()
+            free_map = bal.get("free", {})
+
             open_trades = await self.db.get_all_open_trades()
             binance_trades = [t for t in open_trades if t.get("exchange") == "binance"]
-            if binance_trades:
-                for trade in binance_trades:
+            dust_count = 0
+            for trade in binance_trades:
+                pair = trade.get("pair", "")
+                base = pair.split("/")[0] if "/" in pair else pair
+                held = float(free_map.get(base, 0) or 0)
+                entry_price = float(trade.get("entry_price", 0) or 0)
+                held_value = held * entry_price if entry_price > 0 else 0
+                if held_value < 5.0 and held_value > 0:
                     trade_id = trade.get("id")
                     if trade_id:
                         await self.db.update_trade(trade_id, {
                             "status": "closed",
                             "closed_at": iso_now(),
-                            "reason": "dust_unsellable_delta_only_mode",
+                            "reason": "dust_unsellable",
                         })
-                logger.info(
-                    "Closed %d Binance dust trades (Delta-only mode)", len(binance_trades),
-                )
+                        dust_count += 1
+            if dust_count:
+                logger.info("Closed %d Binance dust trades (< $5)", dust_count)
         except Exception:
-            logger.exception("Failed to close Binance trades")
+            logger.exception("Failed to check Binance dust trades")
 
     async def _restore_state(self) -> None:
         """Restore capital, state, and open positions from last saved status.

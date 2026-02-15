@@ -281,9 +281,11 @@ class TradeExecutor:
         return True
 
     def _enforce_binance_min(self, signal: Signal) -> Signal:
-        """Ensure Binance spot ENTRY orders meet the $5 minimum notional.
+        """Ensure Binance spot ENTRY orders meet the $6 minimum notional.
 
-        If order value < $5.01, bump the amount up to 5.01 / price.
+        If order value < $6.01, bump the amount up to 6.01 / price.
+        We use $6 (not Binance's $5) to prevent dust on exit — after fees,
+        the remaining amount must still be above Binance's $5 minimum to sell.
         Also round amount up to the exchange's LOT_SIZE step if available.
         Skips exit orders — exits sell what was bought, even if below minimum.
         """
@@ -294,7 +296,7 @@ class TradeExecutor:
             return signal
 
         order_value = signal.price * signal.amount
-        min_required = 5.01  # Binance $5 min + buffer
+        min_required = 6.01  # $6 min + buffer (prevents dust on exit)
 
         if order_value < min_required and signal.price > 0:
             new_amount = min_required / signal.price
