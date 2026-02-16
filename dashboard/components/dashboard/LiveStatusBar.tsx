@@ -448,7 +448,7 @@ export function LiveStatusBar() {
           <div className="border-l border-zinc-800 pl-4 flex flex-col items-end gap-1">
             <ISTClock />
             <span className="text-[9px] text-zinc-600 font-mono">
-              v{process.env.APP_VERSION ?? '?'}
+              engine v{process.env.ENGINE_VERSION ?? '?'} · dash v{process.env.APP_VERSION ?? '?'}
             </span>
           </div>
         </div>

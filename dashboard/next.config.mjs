@@ -1,6 +1,6 @@
 import { readFileSync } from 'fs';
 
-// Read version from VERSION file (auto-bumped by CI on every push)
+// Read dashboard version from VERSION file (auto-bumped by CI on every push)
 let appVersion = '?.?.?';
 try {
   appVersion = readFileSync('./VERSION', 'utf-8').trim();
@@ -12,10 +12,17 @@ try {
   } catch { /* keep default */ }
 }
 
+// Read engine version from engine/VERSION (one level up from dashboard/)
+let engineVersion = '?.?.?';
+try {
+  engineVersion = readFileSync('../engine/VERSION', 'utf-8').trim();
+} catch { /* keep default */ }
+
 /** @type {import('next').NextConfig} */
 const nextConfig = {
   env: {
     APP_VERSION: appVersion,
+    ENGINE_VERSION: engineVersion,
   },
 };
 
