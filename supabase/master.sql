@@ -198,7 +198,7 @@ create table if not exists public.bot_commands (
     created_at    timestamptz not null default now(),
 
     command       text not null
-                  check (command in ('pause', 'resume', 'force_strategy', 'update_config')),
+                  check (command in ('pause', 'resume', 'force_strategy', 'update_config', 'update_pair_config')),
     params        jsonb not null default '{}'::jsonb,
 
     executed      boolean     not null default false,

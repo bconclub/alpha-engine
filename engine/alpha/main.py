@@ -970,6 +970,12 @@ class AlphaBot:
                 else:
                     result_msg = f"Config updated: {params}"
                 await self.alerts.send_command_confirmation("update_config", result_msg)
+
+            elif command == "update_pair_config":
+                result_msg = self._apply_pair_config(params)
+                await self.alerts.send_command_confirmation(
+                    "update_pair_config", result_msg,
+                )
             else:
                 result_msg = f"Unknown command: {command}"
 
@@ -978,6 +984,78 @@ class AlphaBot:
             logger.exception("Failed to handle command %d", cmd_id)
 
         await self.db.mark_command_executed(cmd_id, result_msg)
+
+    def _apply_pair_config(self, params: dict) -> str:
+        """Hot-update scalp strategy config for a specific pair (Brain command).
+
+        Supported params: pair, sl, tp, trail_activate, bias, enabled,
+        timeout_minutes, phase1.
+        """
+        pair_str = params.get("pair", "")
+        if not pair_str:
+            return "Error: missing 'pair' param"
+
+        # Find the matching scalp strategy instance
+        scalp: ScalpStrategy | None = None
+        for p, s in self._scalp_strategies.items():
+            if p == pair_str or pair_str.startswith(p.split("/")[0]):
+                scalp = s
+                pair_str = p  # normalise to full pair
+                break
+
+        if scalp is None:
+            return f"Error: no scalp strategy for {pair_str}"
+
+        short = pair_str.split("/")[0]
+        changes: list[str] = []
+
+        if "sl" in params:
+            val = float(params["sl"])
+            scalp.PAIR_SL_FLOOR[short] = val
+            changes.append(f"SL={val}%")
+
+        if "tp" in params:
+            val = float(params["tp"])
+            scalp.PAIR_TP_FLOOR[short] = val
+            changes.append(f"TP={val}%")
+
+        if "trail_activate" in params:
+            val = float(params["trail_activate"])
+            scalp.TRAILING_ACTIVATE_PCT = val
+            changes.append(f"trail={val}%")
+
+        if "phase1" in params:
+            val = int(params["phase1"])
+            scalp.PHASE1_SECONDS = val
+            changes.append(f"phase1={val}s")
+
+        if "timeout_minutes" in params:
+            val = int(params["timeout_minutes"])
+            scalp.MAX_HOLD_SECONDS = val * 60
+            changes.append(f"timeout={val}m")
+
+        if "enabled" in params:
+            enabled = params["enabled"]
+            if enabled is False or str(enabled).lower() in ("false", "0"):
+                if scalp.is_active:
+                    # Schedule stop on next tick — can't await in sync method
+                    asyncio.ensure_future(scalp.stop())
+                changes.append("DISABLED")
+            else:
+                if not scalp.is_active:
+                    asyncio.ensure_future(scalp.start())
+                changes.append("ENABLED")
+
+        if "bias" in params:
+            bias = str(params["bias"]).lower()
+            # Store bias on the strategy instance for signal filtering
+            scalp._brain_bias = bias  # type: ignore[attr-defined]
+            changes.append(f"bias={bias}")
+
+        summary = ", ".join(changes) if changes else "no changes"
+        result_msg = f"BRAIN UPDATE: {pair_str} — {summary}"
+        logger.info(result_msg)
+        return result_msg
 
     async def _close_binance_dust_trades(self) -> None:
         """Mark Binance trades below $6 as closed dust (too small to sell).

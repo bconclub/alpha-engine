@@ -80,6 +80,16 @@ const navItems = [
     ),
   },
   {
+    name: 'Brain',
+    href: '/brain',
+    icon: (
+      <svg width="18" height="18" viewBox="0 0 20 20" fill="none" xmlns="http://www.w3.org/2000/svg">
+        <path d="M10 2C7.24 2 5 4.24 5 7c0 1.4.58 2.66 1.5 3.57V12a1 1 0 0 0 1 1h5a1 1 0 0 0 1-1v-1.43A4.98 4.98 0 0 0 15 7c0-2.76-2.24-5-5-5z" fill="currentColor" />
+        <path d="M7.5 14.5h5M8 16h4" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
+      </svg>
+    ),
+  },
+  {
     name: 'Settings',
     href: '/settings',
     icon: (

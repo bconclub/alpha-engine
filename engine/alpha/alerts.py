@@ -606,6 +606,7 @@ class AlertManager:
             "resume": ("\u25b6\ufe0f", "BOT RESUMED"),
             "force_strategy": ("\U0001f500", "STRATEGY FORCED"),
             "update_config": ("\u2699\ufe0f", "CONFIG UPDATED"),
+            "update_pair_config": ("\U0001f9e0", "BRAIN CONFIG"),
         }
         emoji, title = cmd_map.get(command, ("\u2139\ufe0f", command.upper()))
         msg = f"{emoji} <b>{title}</b> (via dashboard)"

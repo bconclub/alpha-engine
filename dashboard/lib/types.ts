@@ -102,8 +102,8 @@ export interface BotStatus {
 export interface BotCommand {
   id?: string;
   timestamp?: string;
-  command: 'pause' | 'resume' | 'force_strategy';
-  params: Record<string, string>;
+  command: 'pause' | 'resume' | 'force_strategy' | 'update_config' | 'update_pair_config';
+  params: Record<string, unknown>;
   executed?: boolean;
 }
 

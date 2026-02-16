@@ -164,8 +164,8 @@ create table if not exists public.bot_commands (
     created_at    timestamptz not null default now(),
 
     -- Command
-    command       text not null                          -- 'pause', 'resume', 'force_strategy', 'update_config'
-                  check (command in ('pause', 'resume', 'force_strategy', 'update_config')),
+    command       text not null                          -- 'pause', 'resume', 'force_strategy', 'update_config', 'update_pair_config'
+                  check (command in ('pause', 'resume', 'force_strategy', 'update_config', 'update_pair_config')),
     params        jsonb not null default '{}'::jsonb,    -- e.g. {"strategy": "grid"} or {"pair": "ETH/USDT"}
 
     -- Execution tracking
