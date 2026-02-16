@@ -529,6 +529,29 @@ class AlertManager:
         lines.append("\n<i>Consider reducing position or adding margin</i>")
         await self._send("\n".join(lines))
 
+    async def send_orphan_alert(
+        self,
+        pair: str,
+        side: str,
+        contracts: float,
+        action: str,
+        detail: str = "",
+    ) -> None:
+        """Urgent orphan position alert — capital-destroying bug notification."""
+        msg = (
+            f"\u26a0\ufe0f <b>ORPHAN POSITION</b> \u26a0\ufe0f\n\n"
+            f"<code>{pair}</code> {side.upper()} {contracts:.0f}ct\n"
+            f"Action: <b>{action}</b>\n"
+        )
+        if detail:
+            msg += f"<i>{html_escape(detail)}</i>\n"
+        msg += f"\n<i>Orphan detection protects against stuck positions</i>"
+        await self._send(msg)
+
+    async def send_text(self, text: str) -> None:
+        """Send a raw text message (for ad-hoc alerts)."""
+        await self._send(text)
+
     async def send_error_alert(self, message: str) -> None:
         msg = f"\u274c <b>ERROR</b>\n<code>{html_escape(message)}</code>"
         await self._send(msg)

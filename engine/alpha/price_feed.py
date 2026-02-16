@@ -95,6 +95,8 @@ class PriceFeed:
         self._delta_updates = 0
         self._binance_updates = 0
         self._exit_checks = 0
+        self._delta_messages_total = 0
+        self._delta_messages_parsed = 0
         self._last_stats_log = 0.0
 
     async def start(self) -> None:
@@ -152,7 +154,10 @@ class PriceFeed:
         strategy = self._strategies.get(pair)
         if strategy and strategy.in_position:
             self._exit_checks += 1
-            strategy.check_exits_immediate(price)
+            try:
+                strategy.check_exits_immediate(price)
+            except Exception:
+                logger.exception("[%s] Error in check_exits_immediate", pair)
 
     # ══════════════════════════════════════════════════════════════════
     # DELTA INDIA — Raw WebSocket via aiohttp
@@ -204,30 +209,80 @@ class PriceFeed:
                 backoff = min(backoff * 2, RECONNECT_MAX_SEC)
 
     def _handle_delta_message(self, raw: str) -> None:
-        """Parse Delta WS ticker message and dispatch price update."""
+        """Parse Delta WS ticker message and dispatch price update.
+
+        Delta WS v2/ticker message format:
+        {
+            "type": "v2/ticker",
+            "symbol": "BTCUSD",
+            "product_id": 123,
+            "mark_price": "67000.00",
+            "close": 67321,
+            ...
+        }
+
+        OR (some versions wrap in "ticker" key):
+        {
+            "type": "ticker",
+            "ticker": {
+                "symbol": "BTCUSD",
+                "mark_price": "67000.00",
+                "close": "67321",
+                ...
+            }
+        }
+
+        We handle BOTH formats to be robust.
+        """
+        self._delta_messages_total += 1
         try:
             data = json.loads(raw)
-
-            # Delta ticker messages have type "v2/ticker"
             msg_type = data.get("type", "")
-            if msg_type != "v2/ticker":
+
+            # ── Format 1: type="v2/ticker" with data at top level ──
+            if msg_type == "v2/ticker":
+                symbol = data.get("symbol", "")
+                price_str = data.get("mark_price") or data.get("close") or data.get("last_price")
+                if symbol and price_str:
+                    price = float(price_str)
+                    pair = _delta_symbol_to_ccxt(symbol, self._delta_pairs)
+                    if pair:
+                        self._delta_messages_parsed += 1
+                        self._on_price_update(pair, price, "delta")
+                    return
+
+            # ── Format 2: type="ticker" with data nested in "ticker" key ──
+            if msg_type == "ticker":
+                ticker_data = data.get("ticker", {})
+                if isinstance(ticker_data, dict):
+                    symbol = ticker_data.get("symbol", "")
+                    price_str = (
+                        ticker_data.get("mark_price")
+                        or ticker_data.get("close")
+                        or ticker_data.get("last_price")
+                    )
+                    if symbol and price_str:
+                        price = float(price_str)
+                        pair = _delta_symbol_to_ccxt(symbol, self._delta_pairs)
+                        if pair:
+                            self._delta_messages_parsed += 1
+                            self._on_price_update(pair, price, "delta")
+                    return
+
+            # ── Format 3: type="subscriptions" / "heartbeat" / "error" — skip ──
+            if msg_type in ("subscriptions", "heartbeat", ""):
                 return
 
-            # The ticker data is in data["symbol"] and data["close"] or data["mark_price"]
-            symbol = data.get("symbol", "")
-            # Use mark_price for futures (more accurate than last trade)
-            price_str = data.get("mark_price") or data.get("close") or data.get("last_price")
-            if not symbol or not price_str:
-                return
+            # ── Unknown format: log it once for debugging ──
+            if self._delta_messages_total <= 5:
+                logger.info(
+                    "Delta WS unknown msg type=%s keys=%s",
+                    msg_type, list(data.keys())[:10],
+                )
 
-            price = float(price_str)
-            # Map Delta symbol back to ccxt pair
-            pair = _delta_symbol_to_ccxt(symbol, self._delta_pairs)
-            if pair:
-                self._on_price_update(pair, price, "delta")
-
-        except (json.JSONDecodeError, ValueError, KeyError):
-            pass  # skip malformed messages
+        except (json.JSONDecodeError, ValueError, KeyError) as e:
+            if self._delta_messages_total <= 3:
+                logger.warning("Delta WS parse error: %s — raw: %s", e, raw[:200])
 
     # ══════════════════════════════════════════════════════════════════
     # BINANCE — ccxt.pro watch_ticker
@@ -278,17 +333,25 @@ class PriceFeed:
                 stale_tag = f" STALE: {', '.join(stale)}" if stale else ""
                 cached = len(self.price_cache)
 
+                # Show parse ratio for debugging
+                parse_tag = ""
+                if self._delta_messages_total > 0:
+                    parse_pct = (self._delta_messages_parsed / self._delta_messages_total) * 100
+                    parse_tag = f" delta_parse={self._delta_messages_parsed}/{self._delta_messages_total}({parse_pct:.0f}%)"
+
                 logger.info(
                     "PriceFeed stats — Delta: %d updates, Binance: %d updates, "
-                    "exit_checks: %d, cached: %d pairs%s",
+                    "exit_checks: %d, cached: %d pairs%s%s",
                     self._delta_updates, self._binance_updates,
-                    self._exit_checks, cached, stale_tag,
+                    self._exit_checks, cached, parse_tag, stale_tag,
                 )
 
                 # Reset counters
                 self._delta_updates = 0
                 self._binance_updates = 0
                 self._exit_checks = 0
+                self._delta_messages_total = 0
+                self._delta_messages_parsed = 0
 
             except asyncio.CancelledError:
                 break
