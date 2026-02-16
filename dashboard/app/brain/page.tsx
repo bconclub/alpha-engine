@@ -38,6 +38,7 @@ interface PairAnalysis {
   avgLossPnlPct: number;
   currentConfig: { sl: number; tp: number; trailActivate: number; phase1: number };
   recommendations: string[];
+  recentTrades: Trade[];
 }
 
 interface ExitRow {
@@ -219,6 +220,7 @@ function analyzePair(trades: Trade[], pairFilter: string): PairAnalysis {
     avgLossPnlPct: avg(lossPcts),
     currentConfig: config,
     recommendations,
+    recentTrades: pairTrades.slice(0, 5),
   };
 }
 
@@ -826,6 +828,43 @@ function PairCard({
           <p className="font-mono text-red-400">{formatPercentage(a.avgLossPnlPct)}</p>
         </div>
       </div>
+
+      {/* Last 5 trades */}
+      {a.recentTrades.length > 0 && (
+        <div className="mb-4">
+          <p className="text-[10px] text-zinc-500 uppercase tracking-wider mb-1.5">Last {a.recentTrades.length} Trades</p>
+          <div className="space-y-1">
+            {a.recentTrades.map((t) => {
+              const win = t.pnl > 0;
+              const exit = t.reason ? classifyExit(t.reason) : '—';
+              const hold = t.closed_at ? holdMinutes(t.timestamp, t.closed_at) : 0;
+              return (
+                <div
+                  key={t.id}
+                  className={cn(
+                    'flex items-center justify-between rounded px-2 py-1 text-[11px] font-mono',
+                    win ? 'bg-emerald-400/5' : 'bg-red-400/5',
+                  )}
+                >
+                  <div className="flex items-center gap-2">
+                    <span className={cn('font-medium', win ? 'text-emerald-400' : 'text-red-400')}>
+                      {win ? 'W' : 'L'}
+                    </span>
+                    <span className="text-zinc-500">
+                      {t.position_type === 'long' ? 'L' : t.position_type === 'short' ? 'S' : '·'}
+                    </span>
+                    <span className="text-zinc-400">{exit}</span>
+                    <span className="text-zinc-600">{hold > 0 ? `${hold.toFixed(0)}m` : ''}</span>
+                  </div>
+                  <span className={cn('font-medium', win ? 'text-emerald-400' : 'text-red-400')}>
+                    {formatPnL(t.pnl)}
+                  </span>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
 
       {/* Current config */}
       <div className="bg-zinc-800/30 rounded-lg p-2.5 mb-4 text-xs">
