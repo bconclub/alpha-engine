@@ -1,10 +1,14 @@
-"""Alpha v5.7 — LOOSENED ENTRIES + SIGNAL DIAGNOSTICS.
+"""Alpha v5.8 — TRAIL TIER TIGHTENING.
 
 PHILOSOPHY: Two strong positions beat four weak ones. Focus capital on the
 best signals. After a loss, pause THAT PAIR. Use 15m trend as soft bias.
 SL/TP adapt per-pair. SOL DISABLED (0% win rate).
 
-CHANGES FROM v5.6:
+CHANGES FROM v5.7:
+  - Trail tier split: +3% tier tightened 1.00% → 0.75%, new +5% tier at 1.00%
+  - A +4.99% trade now exits at ~+4.24% instead of ~+3.99%
+
+CHANGES FROM v5.6 (in v5.7):
   - Momentum threshold: 0.15% → 0.08% (catch moves earlier)
   - Volume threshold: 1.2x → 0.8x (most vol is <1x)
   - BTC strength gate: 3/4 → 2/4 (same as all pairs)
@@ -126,7 +130,7 @@ def _soul_check(context: str) -> str:
 
 
 class ScalpStrategy(BaseStrategy):
-    """Phase-based v5.7 — Loosened entries, signal diagnostics, spot-aware config.
+    """Phase-based v5.8 — Trail tier tightening, loosened entries, spot-aware config.
 
     3-phase exit system prevents instant exits after fill bounce.
     SOL disabled (0% win rate). Per-pair SL distances.
@@ -183,7 +187,8 @@ class ScalpStrategy(BaseStrategy):
         (0.50, 0.25),   # +0.5% to +1%: standard trail
         (1.00, 0.30),   # +1% to +2%: moderate trail
         (2.00, 0.50),   # +2% to +3%: widen, let it run
-        (3.00, 1.00),   # +3%+: max breathing room
+        (3.00, 0.75),   # +3% to +5%: tighter lock (was 1.00)
+        (5.00, 1.00),   # +5%+: max breathing room for big runners
     ]
 
     # ── Signal reversal thresholds ──────────────────────────────────────
@@ -397,7 +402,7 @@ class ScalpStrategy(BaseStrategy):
         disabled_tag = f" DISABLED={','.join(self.DISABLED_PAIRS)}" if self.DISABLED_PAIRS else ""
         max_pos = self.SPOT_MAX_POSITIONS if not self.is_futures else self.MAX_POSITIONS
         self.logger.info(
-            "[%s] PHASE-BASED v5.7 ACTIVE (%s) — tick=1s/5s(dynamic), "
+            "[%s] PHASE-BASED v5.8 ACTIVE (%s) — tick=1s/5s(dynamic), "
             "SL=%.2f%% TP=%.2f%% Phase1=%ds(skip@+%.1f%%) Phase2=%ds MaxHold=%ds "
             "Trail@+%.1f%%(%.2f%%) MoveToEntry@+%.1f%% Flat=%ds "
             "MaxPos=%d MaxContracts=%d SLcool=%ds LossStreak=%d→%ds "
