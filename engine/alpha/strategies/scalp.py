@@ -228,7 +228,9 @@ class ScalpStrategy(BaseStrategy):
     IDLE_WIDEN_FACTOR = 0.80          # multiply thresholds by 0.80 (20% looser)
 
     # ── Fee awareness (Delta India incl 18% GST) ──────────────────────
-    MIN_EXPECTED_MOVE_PCT = 0.30      # lowered from 0.50% to match new momentum
+    # NOTE: MIN_EXPECTED_MOVE_PCT fee filter REMOVED — it was blocking 385+
+    # legitimate entries per hour (RSI+VOL signals with low momentum).
+    # The 2-of-4 signal system IS the quality filter. If signals fire, enter.
     FEE_MULTIPLIER_MIN = 13.0         # 1.5% TP / 0.083% RT mixed = 18x
 
     # ── Position sizing — PERFORMANCE-BASED per-pair allocation ─────────
@@ -947,23 +949,9 @@ class ScalpStrategy(BaseStrategy):
                 bull_signals.append(f"TCONT:newHigh+vol{current_vol/avg_vol:.1f}x")
 
         # ── Check required signals (LONG) — trend-weighted ────────────────
+        # NO fee filter — if 2/4 signals fire, ENTER. The signal system IS the filter.
+        # RSI + VOL is a valid entry even when momentum is flat (price about to move).
         if len(bull_signals) >= required_long:
-            # Verify expected move is worth the fees
-            if (abs(momentum_60s) < self.MIN_EXPECTED_MOVE_PCT
-                    and abs(momentum_120s) < self.MIN_EXPECTED_MOVE_PCT
-                    and abs(momentum_300s) < self.MIN_EXPECTED_MOVE_PCT):
-                self.hourly_skipped += 1
-                if self._tick_count % 10 == 0:
-                    soul_msg = _soul_check("fee skip")
-                    self.logger.info(
-                        "[%s] SKIP LONG — signals=%s but move too small "
-                        "(60s=%+.2f%% 120s=%+.2f%% 300s=%+.2f%% < %.1f%%) | %s",
-                        self.pair, "+".join(bull_signals),
-                        momentum_60s, momentum_120s, momentum_300s,
-                        self.MIN_EXPECTED_MOVE_PCT, soul_msg,
-                    )
-                return None
-
             req_tag = f" req={required_long}/4" if required_long > 2 else ""
             reason = f"LONG {len(bull_signals)}/4: {' + '.join(bull_signals)} [15m={trend_15m}]{req_tag}{widen_tag}"
             use_limit = "MOM" not in bull_signals[0]
@@ -971,21 +959,6 @@ class ScalpStrategy(BaseStrategy):
 
         # ── Check required signals (SHORT) — trend-weighted ───────────────
         if len(bear_signals) >= required_short and can_short:
-            if (abs(momentum_60s) < self.MIN_EXPECTED_MOVE_PCT
-                    and abs(momentum_120s) < self.MIN_EXPECTED_MOVE_PCT
-                    and abs(momentum_300s) < self.MIN_EXPECTED_MOVE_PCT):
-                self.hourly_skipped += 1
-                if self._tick_count % 10 == 0:
-                    soul_msg = _soul_check("fee skip")
-                    self.logger.info(
-                        "[%s] SKIP SHORT — signals=%s but move too small "
-                        "(60s=%+.2f%% 120s=%+.2f%% 300s=%+.2f%% < %.1f%%) | %s",
-                        self.pair, "+".join(bear_signals),
-                        momentum_60s, momentum_120s, momentum_300s,
-                        self.MIN_EXPECTED_MOVE_PCT, soul_msg,
-                    )
-                return None
-
             req_tag = f" req={required_short}/4" if required_short > 2 else ""
             reason = f"SHORT {len(bear_signals)}/4: {' + '.join(bear_signals)} [15m={trend_15m}]{req_tag}{widen_tag}"
             use_limit = "MOM" not in bear_signals[0]
@@ -1355,7 +1328,7 @@ class ScalpStrategy(BaseStrategy):
             # Build exit signals and schedule execution
             signals = self._do_exit(current_price, pnl_pct, side, f"WS-{exit_type}", hold_seconds)
             for signal in signals:
-                asyncio.get_event_loop().create_task(self._execute_ws_exit(signal))
+                asyncio.get_running_loop().create_task(self._execute_ws_exit(signal))
 
     async def _execute_ws_exit(self, signal: Signal) -> None:
         """Execute a WS-triggered exit signal."""
