@@ -242,6 +242,7 @@ class AlphaBot:
         self._scheduler.add_job(self._hourly_report, "cron", minute=0)  # every hour
         self._scheduler.add_job(self._save_status, "interval", minutes=2)
         self._scheduler.add_job(self._reconcile_exchange_positions, "interval", seconds=60)
+        self._scheduler.add_job(self._telegram_health_check, "interval", minutes=5)
         self._scheduler.add_job(self._poll_commands, "interval", seconds=10)
         self._scheduler.start()
 
@@ -359,8 +360,11 @@ class AlphaBot:
         # Stop scheduler
         self._scheduler.shutdown(wait=False)
 
-        # Notify
+        # Notify (before closing Telegram session)
         await self.alerts.send_bot_stopped(reason)
+
+        # Close Telegram bot session (prevents "Unclosed client session" warnings)
+        await self.alerts.disconnect()
 
         # Close exchange connections
         if self.binance:
@@ -1431,6 +1435,19 @@ class AlphaBot:
             "Strategy state restoration complete — %d positions injected",
             injected,
         )
+
+    # ==================================================================
+    # TELEGRAM HEALTH CHECK — verify connection every 5 minutes
+    # ==================================================================
+
+    async def _telegram_health_check(self) -> None:
+        """Ping Telegram API every 5 minutes. Reconnect if dead."""
+        try:
+            ok = await self.alerts.health_check()
+            if not ok:
+                logger.warning("Telegram health check failed — alerts may be down")
+        except Exception:
+            logger.exception("Telegram health check error")
 
     # ==================================================================
     # ORPHAN PROTECTION — reconcile exchange positions every 60s

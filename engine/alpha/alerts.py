@@ -613,15 +613,56 @@ class AlertManager:
 
     # ── INTERNAL ──────────────────────────────────────────────────────────
 
+    async def disconnect(self) -> None:
+        """Close the Telegram bot session (prevents 'Unclosed client session' warnings)."""
+        if self._bot:
+            try:
+                await self._bot.shutdown()
+            except Exception:
+                pass
+            self._bot = None
+
+    async def health_check(self) -> bool:
+        """Ping Telegram API to verify connection is alive. Reconnect if dead."""
+        if not self._bot:
+            return False
+        try:
+            await self._bot.get_me()
+            return True
+        except Exception:
+            logger.warning("Telegram health check failed — reconnecting")
+            try:
+                await self.connect()
+                return self._bot is not None
+            except Exception:
+                logger.exception("Telegram reconnect failed")
+                return False
+
     async def _send(self, text: str) -> None:
-        if not self.is_connected:
+        if not self._chat_id:
             logger.debug("Alert (Telegram disabled): %s", text[:100])
             return
+        if not self._bot:
+            # Try to reconnect before giving up
+            await self.connect()
+        if not self._bot:
+            logger.debug("Alert (Telegram still disconnected): %s", text[:100])
+            return
         try:
-            await self._bot.send_message(  # type: ignore[union-attr]
+            await self._bot.send_message(
                 chat_id=self._chat_id,
                 text=text,
                 parse_mode=ParseMode.HTML,
             )
-        except Exception:
-            logger.exception("Failed to send Telegram message")
+        except Exception as e:
+            logger.warning("Telegram send failed: %s — reconnecting and retrying", e)
+            try:
+                await self.connect()
+                if self._bot:
+                    await self._bot.send_message(
+                        chat_id=self._chat_id,
+                        text=text,
+                        parse_mode=ParseMode.HTML,
+                    )
+            except Exception:
+                logger.exception("Telegram retry also failed — message lost")
