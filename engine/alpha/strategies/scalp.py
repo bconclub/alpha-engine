@@ -20,7 +20,7 @@ EXIT — 3-PHASE SYSTEM (the core change from v5.5):
     - 60s is enough for entry to settle, SL still protects us
   PHASE 2 (1-10 min): WATCH
     - If PnL > +0.3% → move SL to entry (real breakeven)
-    - If PnL > +0.2% → activate trailing (0.15% distance)
+    - If PnL > +0.35% → activate trailing (0.20% distance)
     - If still losing but above SL → keep holding
   PHASE 3 (10-30 min): TRAIL OR CUT
     - Trailing active → let it trail, tighten at +1%
@@ -153,8 +153,8 @@ class ScalpStrategy(BaseStrategy):
     MOVE_SL_TO_ENTRY_PCT = 0.30       # move SL to entry at +0.30% profit
 
     # ── Trailing (activates in phase 2+) ──────────────────────────────
-    TRAILING_ACTIVATE_PCT = 0.20      # activate trail at +0.20% — lock in profits earlier
-    TRAILING_DISTANCE_PCT = 0.15      # initial trail: 0.15% behind peak (tight at low profit)
+    TRAILING_ACTIVATE_PCT = 0.35      # activate at +0.35% — ensures fee coverage after pullback
+    TRAILING_DISTANCE_PCT = 0.20      # initial trail: 0.20% behind peak (exits at +0.15% min)
 
     # ── Profit protection ─────────────────────────────────────────────
     PROFIT_PULLBACK_MIN_PEAK = 0.50
@@ -167,9 +167,9 @@ class ScalpStrategy(BaseStrategy):
 
     # ── Dynamic trailing tiers — widen as profit grows ──────────────
     TRAIL_TIERS: list[tuple[float, float]] = [
-        (0.20, 0.15),   # +0.2% to +0.5%: very tight — lock it in early
+        (0.35, 0.20),   # +0.35% to +0.5%: tight — exits at +0.15% (covers fees)
         (0.50, 0.25),   # +0.5% to +1%: standard trail
-        (1.00, 0.15),   # +1% to +2%: tighten to lock more profit
+        (1.00, 0.30),   # +1% to +2%: moderate trail
         (2.00, 0.50),   # +2% to +3%: widen, let it run
         (3.00, 1.00),   # +3%+: max breathing room
     ]
@@ -648,18 +648,6 @@ class ScalpStrategy(BaseStrategy):
                 )
             return signals
 
-        # ── 2ND POSITION GATE: only if 1st is breakeven+ and signal 3/4+ ─
-        if total_scalp == 1:
-            # Check if any existing scalp position is losing via class-level tracker
-            first_losing = self._is_any_scalp_losing()
-            if first_losing:
-                if self._tick_count % 12 == 0:
-                    self.logger.info(
-                        "[%s] 2ND POS BLOCKED — 1st position is losing, wait for green",
-                        self.pair,
-                    )
-                return signals
-
         # Spread check
         try:
             ticker = await exchange.fetch_ticker(self.pair)
@@ -1006,7 +994,7 @@ class ScalpStrategy(BaseStrategy):
         """3-PHASE EXIT SYSTEM — let trades breathe, then manage.
 
         PHASE 1 (0-1 min): Only hard SL. Nothing else. Let trade settle.
-        PHASE 2 (1-10 min): Move SL to entry at +0.3%. Trail at +0.2%. Reversals.
+        PHASE 2 (1-10 min): Move SL to entry at +0.3%. Trail at +0.35%. Reversals.
         PHASE 3 (10-30 min): Trail or cut. Flatline exit. Hard timeout.
         """
         signals: list[Signal] = []
