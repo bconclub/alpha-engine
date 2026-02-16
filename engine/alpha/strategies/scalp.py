@@ -14,11 +14,11 @@ ENTRY — 2-of-4 with 15m SOFT WEIGHT:
   6. Trend continuation: new 15-candle extreme + volume
 
 EXIT — 3-PHASE SYSTEM (the core change from v5.5):
-  PHASE 1 (0-3 min): HANDS OFF
+  PHASE 1 (0-1 min): HANDS OFF
     - ONLY exit on hard SL (-0.35% for ETH, -0.40% for XRP, -0.30% for BTC)
     - NO breakeven, NO trailing, NO reversal, NO timeout
-    - Let the trade settle after fill bounce
-  PHASE 2 (3-10 min): WATCH
+    - 60s is enough for entry to settle, SL still protects us
+  PHASE 2 (1-10 min): WATCH
     - If PnL > +0.3% → move SL to entry (real breakeven)
     - If PnL > +0.2% → activate trailing (0.15% distance)
     - If still losing but above SL → keep holding
@@ -117,7 +117,7 @@ def _soul_check(context: str) -> str:
 
 
 class ScalpStrategy(BaseStrategy):
-    """Phase-based v5.6 — Fixed SL on entry, hands-off 3 min, then manage.
+    """Phase-based v5.6 — Fixed SL on entry, hands-off 1 min, then manage.
 
     3-phase exit system prevents instant exits after fill bounce.
     SOL disabled (0% win rate). Per-pair SL distances.
@@ -143,7 +143,7 @@ class ScalpStrategy(BaseStrategy):
     ATR_TP_MULTIPLIER = 4.0
 
     # ── 3-PHASE EXIT TIMING ──────────────────────────────────────────
-    PHASE1_SECONDS = 3 * 60           # 0-3 min: HANDS OFF — only hard SL
+    PHASE1_SECONDS = 60               # 0-1 min: HANDS OFF — only hard SL (was 3 min)
     PHASE2_SECONDS = 10 * 60          # 3-10 min: WATCH — move SL up if profitable
     MAX_HOLD_SECONDS = 30 * 60        # 30 min hard timeout
     FLATLINE_SECONDS = 10 * 60        # 10 min flat = dead momentum (phase 3 only)
@@ -236,6 +236,10 @@ class ScalpStrategy(BaseStrategy):
     MAX_POSITIONS = 2                   # max 2 simultaneous — focus capital
     MAX_SPREAD_PCT = 0.15
 
+    # ── Warmup — accept weaker signals for first 5 min after startup ────
+    WARMUP_SECONDS = 5 * 60            # 5 min warmup: 2/4 for all pairs (incl BTC)
+    WARMUP_MIN_STRENGTH = 2            # during warmup, all pairs accept 2/4
+
     # ── Cooldown / loss protection (PER-PAIR: BTC streak doesn't affect XRP) ─
     SL_COOLDOWN_SECONDS = 2 * 60       # 2 min pause after SL hit (per pair)
     CONSECUTIVE_LOSS_LIMIT = 3          # after 3 consecutive losses on same pair...
@@ -325,6 +329,7 @@ class ScalpStrategy(BaseStrategy):
         # Tick tracking
         self._tick_count: int = 0
         self._last_heartbeat: float = 0.0
+        self._strategy_start_time: float = 0.0  # set in on_start()
 
         # Shared signal state (read by options_scalp strategy)
         self.last_signal_state: dict[str, Any] | None = None
@@ -338,6 +343,7 @@ class ScalpStrategy(BaseStrategy):
             self.entry_price = 0.0
             self.entry_amount = 0.0
         self._tick_count = 0
+        self._strategy_start_time = time.monotonic()
         self._last_heartbeat = time.monotonic()
         self._last_position_exit = time.monotonic()
         tag = f"{self.leverage}x futures" if self.is_futures else "spot"
@@ -698,12 +704,18 @@ class ScalpStrategy(BaseStrategy):
             side, reason, use_limit, signal_strength = entry
 
             # ── PER-PAIR STRENGTH GATE: weak pairs need stronger signals ──
-            min_strength = self.PAIR_MIN_STRENGTH.get(self._base_asset, 2)
+            # During warmup (first 5 min), accept 2/4 for all pairs incl BTC
+            in_warmup = (time.monotonic() - self._strategy_start_time) < self.WARMUP_SECONDS
+            if in_warmup:
+                min_strength = self.WARMUP_MIN_STRENGTH
+            else:
+                min_strength = self.PAIR_MIN_STRENGTH.get(self._base_asset, 2)
             if signal_strength < min_strength:
                 if self._tick_count % 12 == 0:
+                    warmup_tag = " (WARMUP)" if in_warmup else ""
                     self.logger.info(
-                        "[%s] STRENGTH GATE — %s needs %d/4+ but got %d/4, skipping",
-                        self.pair, self._base_asset, min_strength, signal_strength,
+                        "[%s] STRENGTH GATE%s — %s needs %d/4+ but got %d/4, skipping",
+                        self.pair, warmup_tag, self._base_asset, min_strength, signal_strength,
                     )
                 self.last_signal_state = {
                     "side": side, "reason": reason,
@@ -993,8 +1005,8 @@ class ScalpStrategy(BaseStrategy):
     def _check_exits(self, current_price: float, rsi_now: float, momentum_60s: float) -> list[Signal]:
         """3-PHASE EXIT SYSTEM — let trades breathe, then manage.
 
-        PHASE 1 (0-3 min): Only hard SL. Nothing else. Let trade settle.
-        PHASE 2 (3-10 min): Move SL to entry at +0.3%. Trail at +0.2%. Reversals.
+        PHASE 1 (0-1 min): Only hard SL. Nothing else. Let trade settle.
+        PHASE 2 (1-10 min): Move SL to entry at +0.3%. Trail at +0.2%. Reversals.
         PHASE 3 (10-30 min): Trail or cut. Flatline exit. Hard timeout.
         """
         signals: list[Signal] = []
