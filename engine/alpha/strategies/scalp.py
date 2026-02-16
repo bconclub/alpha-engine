@@ -341,6 +341,10 @@ class ScalpStrategy(BaseStrategy):
 
         # No more forced entries — we wait for quality setups
         self._last_position_exit: float = 0.0
+        # Phantom cooldown: no new entries until this time (set by orphan reconciliation)
+        self._phantom_cooldown_until: float = 0.0
+        # Rate limit rejection logs
+        self._last_reject_log: float = 0.0
 
         # Stats for hourly summary
         self.hourly_wins: int = 0
@@ -647,6 +651,16 @@ class ScalpStrategy(BaseStrategy):
                 self.logger.info(
                     "[%s] STREAK PAUSE — %d consecutive losses on %s, %.0fs remaining",
                     self.pair, pair_losses, self._base_asset, remaining,
+                )
+            return signals
+
+        # ── PHANTOM COOLDOWN: no entries for 60s after phantom clear ──
+        if now < self._phantom_cooldown_until:
+            remaining = self._phantom_cooldown_until - now
+            if self._tick_count % 12 == 0:
+                self.logger.info(
+                    "[%s] PHANTOM COOLDOWN — %.0fs remaining before new entries",
+                    self.pair, remaining,
                 )
             return signals
 
@@ -1727,10 +1741,13 @@ class ScalpStrategy(BaseStrategy):
         """Called by _run_loop when an order fails."""
         pending_side = signal.metadata.get("pending_side")
         if pending_side:
-            self.logger.warning(
-                "[%s] REJECTED — NOT tracking %s (phantom prevention)",
-                self.pair, pending_side,
-            )
+            now = time.monotonic()
+            if now - self._last_reject_log >= 30:
+                self._last_reject_log = now
+                self.logger.warning(
+                    "[%s] REJECTED — NOT tracking %s (phantom prevention)",
+                    self.pair, pending_side,
+                )
 
     # ======================================================================
     # POSITION MANAGEMENT

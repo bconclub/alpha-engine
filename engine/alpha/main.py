@@ -1455,18 +1455,28 @@ class AlphaBot:
             logger.exception("Orphan reconciliation failed (Binance)")
 
     async def _reconcile_delta_positions(self) -> None:
-        """Reconcile Delta Exchange positions with bot memory."""
+        """Reconcile Delta Exchange positions with bot memory.
+
+        Runs on startup AND every 60 seconds. Three cases:
+
+        CASE 1 (ORPHAN): Exchange has position, bot doesn't → CLOSE immediately
+        CASE 2 (PHANTOM): Bot thinks position exists, exchange doesn't → clear state
+        CASE 3 (RESTORE): Exchange has position, bot doesn't but DB does → restore strategy
+
+        This is independent of price updates, strategy state, or anything else.
+        Pure exchange truth vs bot memory comparison.
+        """
         if not self.delta:
             return
 
-        # Fetch ALL open positions from Delta exchange
+        # ── Step 1: Fetch ALL open positions from Delta exchange ────────
         try:
             positions = await self.delta.fetch_positions()
         except Exception:
             logger.debug("Failed to fetch Delta positions for reconciliation")
             return
 
-        # Build map of what exchange has: symbol → (side, contracts, entry_price)
+        # Build map: symbol → {side, contracts, entry_price}
         exchange_positions: dict[str, dict[str, Any]] = {}
         for pos in positions:
             contracts = float(pos.get("contracts", 0) or 0)
@@ -1481,90 +1491,171 @@ class AlphaBot:
                 "entry_price": entry_px,
             }
 
-        # CASE 1: Exchange has position that bot doesn't track → ORPHAN → CLOSE
-        for pair in self.delta_pairs:
+        # ── Step 2: Check ALL exchange positions against bot state ──────
+        # Check EVERY position the exchange reports (not just configured pairs)
+        all_checked_pairs = set(self.delta_pairs) | set(exchange_positions.keys())
+
+        for pair in all_checked_pairs:
             epos = exchange_positions.get(pair)
             scalp = self._scalp_strategies.get(pair)
 
+            if epos and scalp and scalp.in_position:
+                # ALL GOOD — exchange has it, bot is managing it
+                continue
+
             if epos and (not scalp or not scalp.in_position):
-                # ORPHAN FOUND — exchange has it, bot doesn't
+                # Exchange has position, bot doesn't track it
                 side = epos["side"]
                 contracts = epos["contracts"]
                 entry_px = epos["entry_price"]
 
-                logger.warning(
-                    "ORPHAN DETECTED: %s %s %.0f contracts @ $%.2f — NOT in bot memory! CLOSING",
-                    pair, side, contracts, entry_px,
-                )
-
-                # Send Telegram alert
-                try:
-                    await self.alerts.send_orphan_alert(
-                        pair=pair, side=side, contracts=contracts,
-                        action="CLOSING AT MARKET",
-                        detail=f"Entry: ${entry_px:.2f} — bot has no record of this position",
+                # ── CASE 3: Try to RESTORE from DB before closing ──────
+                # If DB has an open trade for this pair, restore the strategy
+                # instead of closing. This handles restarts where strategy
+                # state wasn't properly injected.
+                restored = False
+                if scalp and self.db.is_connected:
+                    open_trade = await self.db.get_open_trade(
+                        pair=pair, exchange="delta",
                     )
-                except Exception:
-                    pass
+                    if open_trade and open_trade.get("status") == "open":
+                        # DB knows about this position — restore into strategy
+                        scalp.in_position = True
+                        scalp.position_side = side
+                        scalp.entry_price = entry_px
+                        scalp.entry_amount = contracts
+                        scalp.highest_since_entry = entry_px
+                        scalp.lowest_since_entry = entry_px
 
-                # Close at market
-                try:
-                    close_side = "sell" if side == "long" else "buy"
-                    await self.delta.create_order(
-                        pair, "market", close_side, int(contracts),
-                        params={"reduce_only": True},
-                    )
-                    logger.info(
-                        "ORPHAN CLOSED: %s %s %.0f contracts at market",
-                        pair, side, contracts,
-                    )
-
-                    # Mark closed in DB if there's a matching open trade
-                    if self.db.is_connected:
-                        open_trade = await self.db.get_open_trade(
-                            pair=pair, exchange="delta",
-                        )
-                        if open_trade:
+                        # Restore entry_time from DB opened_at
+                        opened_at_str = open_trade.get("opened_at")
+                        if opened_at_str:
                             try:
-                                ticker = await self.delta.fetch_ticker(pair)
-                                exit_price = float(ticker.get("last", 0) or 0) or entry_px
-                            except Exception:
-                                exit_price = entry_px
-                            pnl_pct = 0.0
-                            pnl = 0.0
-                            if entry_px > 0 and exit_price > 0:
-                                if side == "long":
-                                    pnl_pct = ((exit_price - entry_px) / entry_px) * 100
+                                from datetime import datetime, timezone
+                                if isinstance(opened_at_str, str):
+                                    opened_at_str = opened_at_str.replace("Z", "+00:00")
+                                    opened_dt = datetime.fromisoformat(opened_at_str)
                                 else:
-                                    pnl_pct = ((entry_px - exit_price) / entry_px) * 100
-                                from alpha.trade_executor import DELTA_CONTRACT_SIZE
-                                coin = contracts * DELTA_CONTRACT_SIZE.get(pair, 0.01)
-                                pnl = entry_px * coin * (pnl_pct / 100)
-                            order_id = open_trade.get("order_id", "")
-                            if order_id:
-                                await self.db.close_trade(order_id, exit_price, pnl, pnl_pct)
-                                logger.info("Orphan DB trade %s closed: P&L=%.2f%%", pair, pnl_pct)
+                                    opened_dt = opened_at_str
+                                seconds_ago = max(0, (datetime.now(timezone.utc) - opened_dt).total_seconds())
+                                scalp.entry_time = time.monotonic() - seconds_ago
+                            except Exception:
+                                scalp.entry_time = time.monotonic()
+                        else:
+                            scalp.entry_time = time.monotonic()
 
-                except Exception:
-                    logger.exception("Failed to close orphan %s — MANUAL INTERVENTION NEEDED", pair)
+                        logger.warning(
+                            "RESTORED: %s %s %.0f contracts @ $%.2f — "
+                            "exchange had position, bot didn't, DB confirmed open trade",
+                            pair, side, contracts, entry_px,
+                        )
+                        try:
+                            await self.alerts.send_orphan_alert(
+                                pair=pair, side=side, contracts=contracts,
+                                action="RESTORED INTO BOT",
+                                detail=f"Entry: ${entry_px:.2f} — found in DB, now managing exits",
+                            )
+                        except Exception:
+                            pass
+                        restored = True
+
+                if not restored:
+                    # ── CASE 1: True ORPHAN — no DB trade, close it ────────
+                    logger.warning(
+                        "ORPHAN DETECTED: %s %s %.0f contracts @ $%.2f — "
+                        "NOT in bot memory, no DB trade! CLOSING",
+                        pair, side, contracts, entry_px,
+                    )
                     try:
                         await self.alerts.send_orphan_alert(
                             pair=pair, side=side, contracts=contracts,
-                            action="CLOSE FAILED — MANUAL INTERVENTION NEEDED",
-                            detail="Auto-close order failed. Close manually on Delta Exchange!",
+                            action="CLOSING AT MARKET",
+                            detail=f"Entry: ${entry_px:.2f} — not in bot memory or DB",
                         )
                     except Exception:
                         pass
 
-        # CASE 2: Bot thinks it has position, but exchange doesn't → PHANTOM
+                    try:
+                        close_side = "sell" if side == "long" else "buy"
+                        await self.delta.create_order(
+                            pair, "market", close_side, int(contracts),
+                            params={"reduce_only": True},
+                        )
+                        logger.info(
+                            "ORPHAN CLOSED: %s %s %.0f contracts at market",
+                            pair, side, contracts,
+                        )
+
+                        # Also mark any stale DB trade as closed
+                        if self.db.is_connected:
+                            open_trade = await self.db.get_open_trade(
+                                pair=pair, exchange="delta",
+                            )
+                            if open_trade:
+                                try:
+                                    ticker = await self.delta.fetch_ticker(pair)
+                                    exit_price = float(ticker.get("last", 0) or 0) or entry_px
+                                except Exception:
+                                    exit_price = entry_px
+                                pnl_pct = 0.0
+                                pnl = 0.0
+                                if entry_px > 0 and exit_price > 0:
+                                    if side == "long":
+                                        pnl_pct = ((exit_price - entry_px) / entry_px) * 100
+                                    else:
+                                        pnl_pct = ((entry_px - exit_price) / entry_px) * 100
+                                    from alpha.trade_executor import DELTA_CONTRACT_SIZE
+                                    coin = contracts * DELTA_CONTRACT_SIZE.get(pair, 0.01)
+                                    pnl = entry_px * coin * (pnl_pct / 100)
+                                order_id = open_trade.get("order_id", "")
+                                if order_id:
+                                    await self.db.close_trade(order_id, exit_price, pnl, pnl_pct)
+                                    logger.info("Orphan DB trade %s closed: P&L=%.2f%%", pair, pnl_pct)
+
+                    except Exception:
+                        logger.exception(
+                            "Failed to close orphan %s — MANUAL INTERVENTION NEEDED", pair,
+                        )
+                        try:
+                            await self.alerts.send_orphan_alert(
+                                pair=pair, side=side, contracts=contracts,
+                                action="CLOSE FAILED — MANUAL CLOSE NEEDED",
+                                detail="Auto-close failed. Close manually on Delta Exchange!",
+                            )
+                        except Exception:
+                            pass
+
+        # ── Step 3: Check for PHANTOM positions (bot has, exchange doesn't) ──
+        now = time.monotonic()
         for pair, scalp in self._scalp_strategies.items():
             if not scalp.in_position or not scalp.is_futures:
                 continue
             epos = exchange_positions.get(pair)
             if not epos:
-                # PHANTOM — bot thinks it's in position, exchange says no
+                # ── TIME GUARDS: don't phantom-clear legitimate trades ──
+                # Guard 1: position opened < 5 min ago — give it time to settle
+                if scalp.entry_time > 0:
+                    hold_seconds = now - scalp.entry_time
+                    if hold_seconds < 300:
+                        logger.debug(
+                            "PHANTOM SKIP: %s — opened %.0fs ago (< 5min), not clearing",
+                            pair, hold_seconds,
+                        )
+                        continue
+
+                # Guard 2: strategy just closed a trade < 30s ago — normal exit, not phantom
+                if scalp._last_position_exit > 0:
+                    since_exit = now - scalp._last_position_exit
+                    if since_exit < 30:
+                        logger.debug(
+                            "PHANTOM SKIP: %s — trade closed %.0fs ago (< 30s), not phantom",
+                            pair, since_exit,
+                        )
+                        continue
+
                 logger.warning(
-                    "PHANTOM DETECTED: %s — bot thinks %s @ $%.2f but exchange has NO position! Clearing.",
+                    "PHANTOM DETECTED: %s — bot thinks %s @ $%.2f "
+                    "but exchange has NO position! Clearing.",
                     pair, scalp.position_side, scalp.entry_price,
                 )
                 try:
@@ -1572,7 +1663,7 @@ class AlphaBot:
                         pair=pair,
                         side=scalp.position_side or "unknown",
                         contracts=scalp.entry_amount,
-                        action="PHANTOM CLEARED (no exchange position)",
+                        action="PHANTOM CLEARED",
                         detail=f"Bot thought {scalp.position_side} @ ${scalp.entry_price:.2f} but exchange has nothing",
                     )
                 except Exception:
@@ -1583,7 +1674,9 @@ class AlphaBot:
                 scalp.position_side = None
                 scalp.entry_price = 0.0
                 scalp.entry_amount = 0.0
-                scalp._last_position_exit = time.monotonic()
+                scalp._last_position_exit = now
+                # Set phantom cooldown — no new entries on this pair for 60s
+                scalp._phantom_cooldown_until = now + 60
                 ScalpStrategy._live_pnl.pop(pair, None)
 
                 # Mark closed in DB
@@ -1627,6 +1720,13 @@ class AlphaBot:
             held_value = held * scalp.entry_price if scalp.entry_price > 0 else 0
 
             if held_value < 3.0:
+                # ── TIME GUARDS ──
+                bnow = time.monotonic()
+                if scalp.entry_time > 0 and (bnow - scalp.entry_time) < 300:
+                    continue  # opened < 5 min ago
+                if scalp._last_position_exit > 0 and (bnow - scalp._last_position_exit) < 30:
+                    continue  # just closed < 30s ago
+
                 # PHANTOM — bot thinks position exists but nothing on exchange
                 logger.warning(
                     "PHANTOM (Binance): %s — bot thinks long @ $%.2f but only $%.2f held. Clearing.",
@@ -1645,7 +1745,8 @@ class AlphaBot:
                 scalp.position_side = None
                 scalp.entry_price = 0.0
                 scalp.entry_amount = 0.0
-                scalp._last_position_exit = time.monotonic()
+                scalp._last_position_exit = bnow
+                scalp._phantom_cooldown_until = bnow + 60
 
                 if self.db.is_connected:
                     open_trade = await self.db.get_open_trade(
