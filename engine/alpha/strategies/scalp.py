@@ -1,18 +1,23 @@
-"""Alpha v5.9 — AGGRESSIVE PROFIT LOCK.
+"""Alpha v6.0 — ENTRY QUALITY GATE + AGGRESSIVE PROFIT LOCK.
 
 PHILOSOPHY: Two strong positions beat four weak ones. Focus capital on the
 best signals. After a loss, pause THAT PAIR. Use 15m trend as soft bias.
 SL/TP adapt per-pair. SOL DISABLED (0% win rate).
 
-CHANGES FROM v5.8:
+CHANGES FROM v5.9:
+  - Entry gate: 2/4 → 3/4 minimum for ALL pairs (XRP, ETH, BTC)
+  - Warmup gate: 2/4 → 3/4 (no more free passes on startup)
+  - 2/4 entries were coin flips — losers at 20x leverage = -7% capital per SL hit
+  - 3/4 filters out weak signals, fewer trades but higher quality
+
+CHANGES FROM v5.8 (in v5.9):
   - Trail activates at +0.15% (was 0.35%) — any green trade gets trailed
   - Initial trail distance: 0.15% (was 0.20%) — tighter scalp lock
   - Phase 1 skip at +0.5% peak (was 1.0%) — graduate faster
   - Move SL to entry at +0.20% (was 0.30%) — breakeven protection earlier
   - Pullback exit at 30% retracement (was 40%) — don't give back profits
-  - ALL trail tiers tightened: +2%=0.40, +3%=0.50, +5%=0.75 (were 0.50/0.75/1.00)
+  - ALL trail tiers tightened: +2%=0.40, +3%=0.50, +5%=0.75
   - New +0.15% tier for instant green protection
-  - Trade #146 analysis: +9% peak → breakeven exit unacceptable
 
 CHANGES FROM v5.7 (in v5.8):
   - Trail tier split: +3% tier tightened, new +5% tier
@@ -25,7 +30,7 @@ CHANGES FROM v5.6 (in v5.7):
   - Signal scan logging: every tick shows pass/fail per condition
   - Binance spot: custom SL/TP/trail (wider for no-leverage spot)
 
-ENTRY — 2-of-4 with 15m SOFT WEIGHT:
+ENTRY — 3-of-4 with 15m SOFT WEIGHT (was 2/4, tightened for quality):
   Signals (up to 6, counted against N/4 threshold):
   1. Momentum 60s: 0.08%+ move
   2. Volume: 0.8x average spike
@@ -34,6 +39,7 @@ ENTRY — 2-of-4 with 15m SOFT WEIGHT:
   5. Momentum 5m: 0.30%+ slow bleed
   6. Trend continuation: new 15-candle extreme + volume
   OVERRIDE: RSI < 30 or > 70 → enter immediately (strong extreme)
+  GATE: ALL pairs require 3/4+ signals (no 2/4 coin flips)
 
 EXIT — 3-PHASE SYSTEM (AGGRESSIVE PROFIT LOCK):
   PHASE 1 (0-30s): HANDS OFF
@@ -140,7 +146,7 @@ def _soul_check(context: str) -> str:
 
 
 class ScalpStrategy(BaseStrategy):
-    """Phase-based v5.9 — Aggressive profit lock, instant trailing, tighter tiers.
+    """Phase-based v6.0 — 3/4 entry gate, aggressive profit lock, tight trailing.
 
     3-phase exit system prevents instant exits after fill bounce.
     SOL disabled (0% win rate). Per-pair SL distances.
@@ -210,7 +216,7 @@ class ScalpStrategy(BaseStrategy):
     # ── DISABLED PAIRS — skip entirely ────────────────────────────────
     DISABLED_PAIRS: set[str] = {"SOL"}  # 0% win rate, remove from trading
 
-    # ── Entry thresholds — 2-of-4 with 15m trend soft weight ────────────
+    # ── Entry thresholds — 3-of-4 with 15m trend soft weight ────────────
     MOMENTUM_MIN_PCT = 0.08           # 0.08%+ move in 60s (was 0.15 — catches moves earlier)
     VOL_SPIKE_RATIO = 0.8             # volume > 0.8x average (was 1.2 — most vol is under 1x)
     RSI_EXTREME_LONG = 40             # RSI < 40 = oversold → long
@@ -243,7 +249,7 @@ class ScalpStrategy(BaseStrategy):
     # ── Fee awareness (Delta India incl 18% GST) ──────────────────────
     # NOTE: MIN_EXPECTED_MOVE_PCT fee filter REMOVED — it was blocking 385+
     # legitimate entries per hour (RSI+VOL signals with low momentum).
-    # The 2-of-4 signal system IS the quality filter. If signals fire, enter.
+    # The 3-of-4 signal system IS the quality filter. If signals fire, enter.
     FEE_MULTIPLIER_MIN = 13.0         # 1.5% TP / 0.083% RT mixed = 18x
 
     # ── Position sizing — PERFORMANCE-BASED per-pair allocation ─────────
@@ -263,11 +269,11 @@ class ScalpStrategy(BaseStrategy):
         "ETH": 2,
         "XRP": 50,
     }
-    # Minimum signal strength per pair (ALL at 2/4 — let the signal system decide)
+    # Minimum signal strength per pair (3/4 — filter out weak coin-flip entries)
     PAIR_MIN_STRENGTH: dict[str, int] = {
-        "XRP": 2,    # best performer: 2/4
-        "ETH": 2,    # mixed: 2/4
-        "BTC": 2,    # was 3/4, loosened to 2/4 (same gate for all pairs)
+        "XRP": 3,    # was 2/4, tightened: 2/4 entries were losers
+        "ETH": 3,    # was 2/4, tightened: multiple -8-9% losses on weak signals
+        "BTC": 3,    # was 2/4, tightened: consistent with all pairs
     }
     # Adaptive: track last N trades per pair for win-rate-based adjustment
     PERF_WINDOW = 5                     # look at last 5 trades per pair
@@ -277,8 +283,8 @@ class ScalpStrategy(BaseStrategy):
     MAX_SPREAD_PCT = 0.15
 
     # ── Warmup — accept weaker signals for first 5 min after startup ────
-    WARMUP_SECONDS = 5 * 60            # 5 min warmup: 2/4 for all pairs (incl BTC)
-    WARMUP_MIN_STRENGTH = 2            # during warmup, all pairs accept 2/4
+    WARMUP_SECONDS = 5 * 60            # 5 min warmup: still requires 3/4 (no free passes)
+    WARMUP_MIN_STRENGTH = 3            # during warmup, same 3/4 gate (was 2, let junk in)
 
     # ── Cooldown / loss protection (PER-PAIR: BTC streak doesn't affect XRP) ─
     SL_COOLDOWN_SECONDS = 2 * 60       # 2 min pause after SL hit (per pair)
@@ -415,7 +421,7 @@ class ScalpStrategy(BaseStrategy):
         disabled_tag = f" DISABLED={','.join(self.DISABLED_PAIRS)}" if self.DISABLED_PAIRS else ""
         max_pos = self.SPOT_MAX_POSITIONS if not self.is_futures else self.MAX_POSITIONS
         self.logger.info(
-            "[%s] PHASE-BASED v5.9 ACTIVE (%s) — tick=1s/5s(dynamic), "
+            "[%s] PHASE-BASED v6.0 ACTIVE (%s) — tick=1s/5s(dynamic), "
             "SL=%.2f%% TP=%.2f%% Phase1=%ds(skip@+%.1f%%) Phase2=%ds MaxHold=%ds "
             "Trail@+%.1f%%(%.2f%%) MoveToEntry@+%.1f%% Flat=%ds "
             "MaxPos=%d MaxContracts=%d SLcool=%ds LossStreak=%d→%ds "
