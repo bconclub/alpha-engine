@@ -247,41 +247,44 @@ class AlertManager:
         tp_price: float | None = None,
         sl_price: float | None = None,
     ) -> None:
-        """Rich trade-opened notification."""
-        if position_type == "short":
-            header = "\U0001f534 <b>SHORT OPENED</b>"
-        elif position_type == "long":
-            header = "\U0001f7e2 <b>LONG OPENED</b>"
-        elif side == "buy":
-            header = "\U0001f7e2 <b>BUY OPENED</b>"
-        else:
-            header = "\U0001f534 <b>SELL OPENED</b>"
+        """Clean 3-line trade entry notification.
 
-        if exchange.lower() != "binance":
-            header += " (Delta)"
+        Format:
+        🟢 LONG XRP/USD:USD
+        $1.48 → TP $1.51 (+2.0%) | SL $1.47 (-0.6%)
+        20x | Scalp | RSI:39 + BB:low
+        """
+        pair_short = _pair_short(pair)
+        side_label = position_type.upper() if position_type in ("long", "short") else side.upper()
+        emoji = "\U0001f7e2" if side_label in ("LONG", "BUY") else "\U0001f534"
 
-        cap_pct = f" ({value / capital * 100:.0f}% capital)" if capital > 0 else ""
-        lev_line = f"\n\u2696\ufe0f Leverage: <code>{leverage}x</code>" if leverage > 1 else ""
+        # Line 1: side + pair
+        line1 = f"{emoji} <b>{side_label} {pair_short}</b>"
 
-        # HTML-escape reason text — it contains < > from RSI/BB signals
-        safe_reason = html_escape(reason)
-        lines = [
-            header,
-            f"\U0001f4b1 Pair: <code>{pair}</code> | Exchange: <code>{exchange.capitalize()}</code>",
-            f"\U0001f4cd Entry: <code>${price:,.2f}</code>",
-            f"\U0001f4b5 Size: <code>{format_usd(value)}</code>{cap_pct}{lev_line}",
-            f"\U0001f3af Strategy: <code>{strategy}</code>",
-            f"\U0001f4ac Reason: <i>{safe_reason}</i>",
-        ]
-
+        # Line 2: entry → TP | SL
+        parts_2: list[str] = [f"<code>${price:,.2f}</code>"]
         if tp_price is not None:
             tp_pct = abs((tp_price - price) / price * 100)
-            lines.append(f"\u2705 TP: <code>${tp_price:,.2f}</code> (+{tp_pct:.1f}%)")
+            parts_2.append(f"TP <code>${tp_price:,.2f}</code> (+{tp_pct:.1f}%)")
         if sl_price is not None:
             sl_pct = abs((sl_price - price) / price * 100)
-            lines.append(f"\U0001f6d1 SL: <code>${sl_price:,.2f}</code> (-{sl_pct:.1f}%)")
+            parts_2.append(f"SL <code>${sl_price:,.2f}</code> (-{sl_pct:.1f}%)")
+        line2 = " \u2192 ".join(parts_2[:2])
+        if len(parts_2) > 2:
+            line2 += f" | {parts_2[2]}"
 
-        await self._send("\n".join(lines))
+        # Line 3: leverage | strategy | signal summary
+        # Parse signal info from reason (e.g. "Scalp long 2/4: RSI(<40)+BB(low)")
+        signal_summary = self._parse_signal_summary(reason)
+        parts_3: list[str] = []
+        if leverage > 1:
+            parts_3.append(f"{leverage}x")
+        parts_3.append(strategy.capitalize())
+        if signal_summary:
+            parts_3.append(signal_summary)
+        line3 = " | ".join(parts_3)
+
+        await self._send(f"{line1}\n{line2}\n{line3}")
 
     async def send_trade_closed(
         self,
@@ -294,30 +297,44 @@ class AlertManager:
         exchange: str = "binance",
         leverage: int = 1,
         position_type: str = "spot",
+        exit_reason: str = "",
     ) -> None:
-        """Rich trade-closed notification with profit/loss badge."""
-        if pnl >= 0:
-            header = "\u2705 <b>TRADE CLOSED \u2014 PROFIT</b>"
-            pnl_sign = "+"
-        else:
-            header = "\u274c <b>TRADE CLOSED \u2014 LOSS</b>"
-            pnl_sign = ""
+        """Clean 3-line trade exit notification.
 
-        lines = [
-            header,
-            f"\U0001f4b1 Pair: <code>{pair}</code>",
-            f"\U0001f4cd Entry \u2192 Exit: <code>${entry_price:,.2f}</code> \u2192 <code>${exit_price:,.2f}</code>",
-            f"\U0001f4b0 P&amp;L: <code>{pnl_sign}{format_usd(pnl)}</code> (<code>{pnl_sign}{pnl_pct:.1f}%</code>)",
-        ]
+        Format:
+        🔴 CLOSED XRP/USD:USD
+        $1.48 → $1.51 | +2.0% | +$0.12
+        Hold: 4m | Trail exit
+        """
+        pair_short = _pair_short(pair)
+        emoji = "\u2705" if pnl >= 0 else "\U0001f534"
+        pnl_sign = "+" if pnl >= 0 else ""
 
-        if leverage > 1:
-            lines.append(f"\u2696\ufe0f Leveraged: <code>{leverage}x</code> ({position_type.upper()})")
+        # Line 1: emoji + CLOSED + pair
+        line1 = f"{emoji} <b>CLOSED {pair_short}</b>"
 
+        # Line 2: entry → exit | pnl% | pnl$
+        line2 = (
+            f"<code>${entry_price:,.2f}</code> \u2192 <code>${exit_price:,.2f}</code> | "
+            f"<code>{pnl_sign}{pnl_pct:.1f}%</code> | "
+            f"<code>{pnl_sign}{format_usd(pnl)}</code>"
+        )
+
+        # Line 3: hold duration | exit reason
+        parts_3: list[str] = []
         if duration_min is not None:
-            dur_str = f"{duration_min / 60:.1f} hr" if duration_min >= 60 else f"{duration_min:.0f} min"
-            lines.append(f"\u23f1 Duration: <code>{dur_str}</code>")
+            if duration_min >= 60:
+                parts_3.append(f"Hold: {duration_min / 60:.1f}h")
+            else:
+                parts_3.append(f"Hold: {duration_min:.0f}m")
+        if exit_reason:
+            parts_3.append(self._humanize_exit_reason(exit_reason))
+        line3 = " | ".join(parts_3) if parts_3 else ""
 
-        await self._send("\n".join(lines))
+        msg = f"{line1}\n{line2}"
+        if line3:
+            msg += f"\n{line3}"
+        await self._send(msg)
 
     # backward compat -- old call signature routes to send_trade_opened
     async def send_trade_alert(
@@ -553,7 +570,12 @@ class AlertManager:
         await self._send(text)
 
     async def send_error_alert(self, message: str) -> None:
-        msg = f"\u274c <b>ERROR</b>\n<code>{html_escape(message)}</code>"
+        """Send error alert — clean, max 3 lines, no raw JSON."""
+        # Strip any JSON blobs from message
+        import re
+        clean = re.sub(r'\{[^}]{50,}\}', '', message)
+        clean = clean.strip()[:200]  # cap length
+        msg = f"\u26a0\ufe0f <b>ERROR</b>\n<code>{html_escape(clean)}</code>"
         await self._send(msg)
 
     # ── 8. COMMAND CONFIRMATIONS ──────────────────────────────────────────
@@ -612,6 +634,54 @@ class AlertManager:
         await self._send(msg)
 
     # ── INTERNAL ──────────────────────────────────────────────────────────
+
+    @staticmethod
+    def _parse_signal_summary(reason: str) -> str:
+        """Extract signal info from reason string for compact display.
+
+        Input:  'Scalp long 2/4: RSI(<40)+BB(low) [15m bias: bullish]'
+        Output: 'RSI:39 + BB:low'
+        """
+        import re
+        # Try to find the signal part after ":"
+        match = re.search(r':\s*(.+?)(?:\s*\[|$)', reason)
+        if match:
+            sig = match.group(1).strip()
+            # Clean up: RSI(<40) → RSI:<40, BB(low) → BB:low
+            sig = sig.replace("(", ":").replace(")", "").replace("+", " + ")
+            return sig
+        return ""
+
+    @staticmethod
+    def _humanize_exit_reason(reason: str) -> str:
+        """Convert exit type codes into human-readable labels.
+
+        Input:  'Scalp TRAIL +0.35% price (+7.0% capital at 20x)'
+        Output: 'Trail exit'
+        """
+        reason_upper = reason.upper()
+        if "TRAIL" in reason_upper:
+            return "Trail exit"
+        if "SL" in reason_upper and "BREAKEVEN" not in reason_upper:
+            return "Stop loss"
+        if "BREAKEVEN" in reason_upper:
+            return "Breakeven exit"
+        if "TIMEOUT" in reason_upper:
+            return "Timeout"
+        if "FLAT" in reason_upper:
+            return "Flatline exit"
+        if "PULLBACK" in reason_upper:
+            return "Pullback exit"
+        if "DECAY" in reason_upper:
+            return "Profit decay"
+        if "REVERSAL" in reason_upper:
+            return "Signal reversal"
+        if "SAFETY" in reason_upper:
+            return "Safety exit"
+        if "position_gone" in reason.lower():
+            return "Position closed on exchange"
+        # Fallback: clean up
+        return reason.split(" ")[1] if " " in reason else reason
 
     async def disconnect(self) -> None:
         """Close the Telegram bot session (prevents 'Unclosed client session' warnings)."""

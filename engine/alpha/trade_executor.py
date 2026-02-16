@@ -165,6 +165,74 @@ class TradeExecutor:
             logger.warning("[%s] Could not fetch asset balance for exit", signal.pair)
             return None
 
+    async def _get_delta_position_size(self, signal: Signal) -> float | None:
+        """Fetch actual position size from Delta Exchange for exit validation.
+
+        Returns the number of contracts open on the exchange, or None if
+        no position exists (already closed/liquidated).
+        """
+        if not self.delta_exchange:
+            return None
+        try:
+            positions = await self.delta_exchange.fetch_positions([signal.pair])
+            for pos in positions:
+                symbol = pos.get("symbol", "")
+                contracts = abs(float(pos.get("contracts", 0) or 0))
+                if symbol == signal.pair and contracts > 0:
+                    logger.info(
+                        "[%s] Delta position found: %.0f contracts (%s)",
+                        signal.pair, contracts, pos.get("side", "?"),
+                    )
+                    return contracts
+            # No matching position
+            return None
+        except Exception as e:
+            logger.warning(
+                "[%s] Could not fetch Delta position: %s — using stored amount",
+                signal.pair, e,
+            )
+            # On fetch failure, return the stored amount to avoid blocking exit
+            return signal.amount
+
+    async def _mark_position_gone(self, signal: Signal) -> None:
+        """Mark a trade as closed in DB when the position no longer exists on exchange.
+
+        Sends a clean info alert instead of an error.
+        """
+        if self.db is not None:
+            try:
+                open_trade = await self.db.get_open_trade(
+                    pair=signal.pair,
+                    exchange=signal.exchange_id,
+                    strategy=signal.strategy.value,
+                )
+                if open_trade:
+                    await self.db.update_trade(open_trade["id"], {
+                        "status": "closed",
+                        "exit_price": signal.price,
+                        "closed_at": iso_now(),
+                        "pnl": 0.0,
+                        "pnl_pct": 0.0,
+                        "reason": "position_gone",
+                    })
+                    logger.info(
+                        "[%s] Trade %s marked closed (position_gone)",
+                        signal.pair, open_trade["id"],
+                    )
+            except Exception:
+                logger.exception("[%s] Failed to mark trade as position_gone", signal.pair)
+
+        # Send clean info alert (not error)
+        if self.alerts is not None:
+            try:
+                pair_short = signal.pair.split("/")[0] if "/" in signal.pair else signal.pair
+                await self.alerts.send_text(
+                    f"\u2139\ufe0f {pair_short} — Position not found on exchange\n"
+                    f"Marked closed in DB. No action needed."
+                )
+            except Exception:
+                pass
+
     async def load_market_limits(
         self, pairs: list[str], delta_pairs: list[str] | None = None,
     ) -> None:
@@ -375,13 +443,47 @@ class TradeExecutor:
                     exchange_id=signal.exchange_id,
                 )
 
+        # ── DELTA FUTURES EXIT: verify actual position on exchange ────────
+        # Fetch real position size to avoid amount mismatch errors.
+        # If position is already gone on exchange, mark closed in DB.
+        if is_exit and signal.exchange_id == "delta" and signal.reduce_only:
+            actual_contracts = await self._get_delta_position_size(signal)
+            if actual_contracts is None:
+                # Position already gone on exchange — mark closed in DB
+                logger.warning(
+                    "[%s] No position found on Delta — marking closed in DB",
+                    signal.pair,
+                )
+                await self._mark_position_gone(signal)
+                return None
+            elif actual_contracts != signal.amount:
+                # Use actual size, not stored amount
+                logger.info(
+                    "[%s] Delta exit: stored=%.0f contracts, actual=%.0f — using actual",
+                    signal.pair, signal.amount, actual_contracts,
+                )
+                signal = Signal(
+                    side=signal.side, price=signal.price,
+                    amount=float(actual_contracts),
+                    order_type=signal.order_type, reason=signal.reason,
+                    strategy=signal.strategy, pair=signal.pair,
+                    stop_loss=signal.stop_loss, take_profit=signal.take_profit,
+                    metadata=signal.metadata,
+                    leverage=signal.leverage, position_type=signal.position_type,
+                    reduce_only=signal.reduce_only, exchange_id=signal.exchange_id,
+                )
+
         # Enforce Binance $6.01 minimum notional for ENTRY orders only
         if not is_exit:
             signal = self._enforce_binance_min(signal)
 
         # Convert Delta coin amounts to integer contracts BEFORE validation
         # Skip for option symbols — options use their own contract sizing (1 contract = 1 option)
-        if signal.exchange_id == "delta" and not self._is_option_symbol(signal.pair):
+        # Skip for exits that already have contract amounts from position fetch
+        is_delta_exit_with_contracts = (
+            is_exit and signal.exchange_id == "delta" and signal.reduce_only
+        )
+        if signal.exchange_id == "delta" and not self._is_option_symbol(signal.pair) and not is_delta_exit_with_contracts:
             contracts = self._to_delta_contracts(signal.pair, signal.amount, signal.price)
             logger.info("[%s] Delta: %.8f coins -> %d contracts", signal.pair, signal.amount, contracts)
             signal = Signal(
@@ -564,7 +666,18 @@ class TradeExecutor:
                         return None
                 except ccxt.InvalidOrder as e:
                     last_error = e
-                    if is_exit and signal.exchange_id == "binance" and "MIN_NOTIONAL" in str(e).upper():
+                    err_str = str(e).lower()
+                    # Delta: "no_position_for_reduce_only" → position already closed
+                    if is_exit and signal.exchange_id == "delta" and (
+                        "no_position" in err_str or "reduce_only" in err_str
+                    ):
+                        logger.warning(
+                            "[%s] Position already closed on exchange: %s",
+                            signal.pair, e,
+                        )
+                        await self._mark_position_gone(signal)
+                        return None
+                    elif is_exit and signal.exchange_id == "binance" and "MIN_NOTIONAL" in str(e).upper():
                         # Binance rejected exit for min notional — switch to quoteOrderQty
                         logger.warning(
                             "[%s] Exit rejected for MIN_NOTIONAL — switching to quoteOrderQty mode",
@@ -903,12 +1016,41 @@ class TradeExecutor:
                 exchange=signal.exchange_id,
                 leverage=signal.leverage,
                 position_type=signal.position_type,
+                exit_reason=signal.reason,
             )
         except Exception:
             logger.exception("Failed to send trade closed alert")
 
+    @staticmethod
+    def _humanize_error(error: Exception | str | None) -> str:
+        """Convert raw exchange errors into human-readable messages."""
+        if error is None:
+            return "Unknown error"
+        err_str = str(error).lower()
+        if "no_position" in err_str or "reduce_only" in err_str:
+            return "Position already closed on exchange"
+        if "insufficient" in err_str:
+            return "Insufficient balance for order"
+        if "min_notional" in err_str:
+            return "Order too small (below exchange minimum)"
+        if "rate_limit" in err_str or "too many" in err_str:
+            return "Rate limited by exchange — will retry"
+        if "timeout" in err_str or "timed out" in err_str:
+            return "Exchange connection timed out"
+        if "maintenance" in err_str:
+            return "Exchange under maintenance"
+        # Fallback: truncate to readable length, strip JSON
+        raw = str(error)
+        # Strip JSON blobs: anything between { and }
+        import re
+        raw = re.sub(r'\{[^}]{50,}\}', '(details omitted)', raw)
+        return raw[:120] if len(raw) > 120 else raw
+
     async def _notify_error(self, signal: Signal, error: str) -> None:
-        """Send error alert to Telegram, with 5-minute dedup per pair."""
+        """Send error alert to Telegram, with 5-minute dedup per pair.
+
+        Clean 3-line format, no raw JSON, human-readable messages.
+        """
         if self.alerts is None:
             return
         # Deduplicate: same pair + similar error within 5 minutes → log only
@@ -923,9 +1065,14 @@ class TradeExecutor:
             return
         self._last_error_alert[signal.pair] = (error_key, now)
         try:
-            await self.alerts.send_error_alert(
-                f"Order failed [{signal.exchange_id}]: {signal.side} {signal.pair} -- {error}"
+            pair_short = signal.pair.split("/")[0] if "/" in signal.pair else signal.pair
+            human_error = self._humanize_error(error)
+            msg = (
+                f"\u26a0\ufe0f {signal.side.upper()} {pair_short} failed\n"
+                f"{human_error}\n"
+                f"No action needed — bot handling it."
             )
+            await self.alerts.send_text(msg)
         except Exception:
             logger.exception("Failed to send error alert")
 
@@ -934,6 +1081,7 @@ class TradeExecutor:
 
         Only sends ONCE per pair — suppressed permanently after the first alert
         to avoid spamming on unsellable dust or stuck positions.
+        Clean 3-line message, no raw JSON, no "manual intervention needed".
         """
         pair_key = f"{signal.exchange_id}:{signal.pair}"
         if pair_key in self._exit_failure_alerted:
@@ -946,13 +1094,14 @@ class TradeExecutor:
         if self.alerts is None:
             return
         try:
+            # Parse error into human-readable message
+            error_msg = self._humanize_error(error)
+            pair_short = signal.pair.split("/")[0] if "/" in signal.pair else signal.pair
             msg = (
-                f"\u26a0\ufe0f EXIT FAILED — {signal.pair} stuck in position, "
-                f"manual intervention needed!\n"
-                f"Side: {signal.side} | Exchange: {signal.exchange_id} | "
-                f"Amount: {signal.amount:.8f} | Strategy: {signal.strategy.value}\n"
-                f"Error: {error}"
+                f"\u26a0\ufe0f Exit failed: {pair_short}\n"
+                f"{error_msg}\n"
+                f"Bot will retry on next tick."
             )
-            await self.alerts.send_error_alert(msg)
+            await self.alerts.send_text(msg)
         except Exception:
             logger.exception("Failed to send exit failure alert")
