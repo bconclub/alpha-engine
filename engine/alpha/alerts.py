@@ -97,17 +97,19 @@ class AlertManager:
         """Clean startup banner.
 
         Format:
+        ━━━━━━━━━━━━━━━━━━━━
         🟢 ALPHA v3.6.0
 
         💰 Capital: $28.41
         Binance: $10.11
         Delta: $18.30
 
-        Pairs: BTC | ETH | SOL | XRP
+        ⚡ Pairs: BTC | ETH | SOL | XRP
 
-        🤞 Exchange: Binance, Delta
+        📊 Exchange: Binance, Delta
         💪 Leverage: 20x | Shorting: Yes
         🕐 Started: 2026-02-16 18:41 IST
+        ━━━━━━━━━━━━━━━━━━━━
         """
         # Clean pair names: "ETH/USD:USD" → "ETH", "BTC/USDT" → "BTC"
         all_bases = sorted(
@@ -135,15 +137,17 @@ class AlertManager:
             cap_lines += f"\nDelta: <code>{_bal(delta_balance)}</code>"
 
         msg = (
+            f"{LINE}\n"
             f"\U0001f7e2 <b>ALPHA v{engine_ver}</b>\n"
             f"\n"
             f"{cap_lines}\n"
             f"\n"
-            f"Pairs: <code>{pairs_str}</code>\n"
+            f"\u26a1 Pairs: <code>{pairs_str}</code>\n"
             f"\n"
-            f"\U0001f91e Exchange: <code>{exchanges_str}</code>\n"
+            f"\U0001f4ca Exchange: <code>{exchanges_str}</code>\n"
             f"\U0001f4aa Leverage: <code>{leverage}x</code> | Shorting: <code>{shorting}</code>\n"
-            f"\U0001f552 Started: <code>{now}</code>"
+            f"\U0001f552 Started: <code>{now}</code>\n"
+            f"{LINE}"
         )
         await self._send(msg)
 
