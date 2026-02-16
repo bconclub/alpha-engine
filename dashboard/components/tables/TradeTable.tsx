@@ -124,6 +124,11 @@ function extractBaseAsset(pair: string): string {
   return pair.replace(/USD.*$/, '');
 }
 
+/** Clean pair name for display: "ETH/USD:USD" → "ETH/USD" */
+function displayPair(pair: string): string {
+  return pair.replace(/:USD$/, '');
+}
+
 /**
  * Calculate unrealized P&L for an open trade using the latest market price.
  * Returns { pnl, pnl_pct } or null if we can't calculate.
@@ -541,7 +546,7 @@ export default function TradeTable({ trades }: TradeTableProps) {
                     {/* Top row: Pair + Type + P&L */}
                     <div className="flex items-center justify-between mb-2">
                       <div className="flex items-center gap-2">
-                        <span className="text-sm font-semibold text-white">{trade.pair}</span>
+                        <span className="text-sm font-semibold text-white">{displayPair(trade.pair)}</span>
                         <span className={cn('text-[10px] font-medium', getPositionTypeColor(trade.position_type))}>
                           {getPositionTypeLabel(trade.position_type)}
                         </span>
@@ -705,7 +710,7 @@ export default function TradeTable({ trades }: TradeTableProps) {
 
                         {/* Pair */}
                         <td className="whitespace-nowrap px-4 py-3 font-medium text-zinc-100">
-                          {trade.pair}
+                          {displayPair(trade.pair)}
                         </td>
 
                         {/* Exchange */}

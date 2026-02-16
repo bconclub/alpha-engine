@@ -30,6 +30,47 @@ from alpha.utils import iso_now, setup_logger
 logger = setup_logger("main")
 
 
+def _calc_pnl(
+    entry_price: float,
+    exit_price: float,
+    amount: float,
+    position_type: str,
+    leverage: int | float,
+    exchange_id: str,
+    pair: str,
+) -> tuple[float, float]:
+    """Calculate correct P&L for any close path (reconciliation, orphan, dust, etc.).
+
+    Returns (pnl_dollars, pnl_pct_on_collateral).
+
+    For futures: pnl_pct is against COLLATERAL (notional / leverage).
+    For spot: pnl_pct is against notional (leverage = 1).
+    Amount is in contracts for Delta, coins for Binance.
+    """
+    if entry_price <= 0 or exit_price <= 0:
+        return 0.0, 0.0
+
+    # Convert contracts to coins for Delta
+    coin_amount = amount
+    if exchange_id == "delta":
+        contract_size = DELTA_CONTRACT_SIZE.get(pair, 0.01)
+        coin_amount = amount * contract_size
+
+    # Gross P&L in dollars
+    if position_type in ("long", "spot"):
+        pnl = (exit_price - entry_price) * coin_amount
+    else:  # short
+        pnl = (entry_price - exit_price) * coin_amount
+
+    # P&L % against collateral (not notional)
+    notional = entry_price * coin_amount
+    lev = max(leverage or 1, 1)
+    collateral = notional / lev if lev > 1 else notional
+    pnl_pct = (pnl / collateral * 100) if collateral > 0 else 0.0
+
+    return round(pnl, 8), round(pnl_pct, 4)
+
+
 class AlphaBot:
     """Top-level bot orchestrator — runs multiple pairs and exchanges concurrently."""
 
@@ -1009,12 +1050,12 @@ class AlphaBot:
                             current_price = float(ticker.get("last", 0) or 0)
                         except Exception:
                             current_price = entry_price  # fallback: 0 P&L
-                        if entry_price > 0 and current_price > 0:
-                            pnl = (current_price - entry_price) * held
-                            pnl_pct = ((current_price - entry_price) / entry_price) * 100
-                        else:
-                            pnl = 0.0
-                            pnl_pct = 0.0
+                        pnl, pnl_pct = _calc_pnl(
+                            entry_price, current_price, held,
+                            trade.get("position_type", "spot"),
+                            trade.get("leverage", 1) or 1,
+                            "binance", pair,
+                        )
                         if order_id:
                             await self.db.close_trade(order_id, current_price, pnl, pnl_pct)
                         else:
@@ -1022,8 +1063,8 @@ class AlphaBot:
                                 "status": "closed",
                                 "closed_at": iso_now(),
                                 "exit_price": current_price,
-                                "pnl": round(pnl, 6),
-                                "pnl_pct": round(pnl_pct, 4),
+                                "pnl": pnl,
+                                "pnl_pct": pnl_pct,
                                 "reason": "dust_unsellable",
                             })
                         dust_count += 1
@@ -1265,14 +1306,12 @@ class AlphaBot:
                     )
                     exit_price = entry_price  # worst case: 0 P&L
 
-                # Calculate P&L
-                if entry_price > 0 and exit_price > 0:
-                    if position_type in ("long", "spot"):
-                        pnl = (exit_price - entry_price) * amount
-                        pnl_pct = ((exit_price - entry_price) / entry_price) * 100
-                    else:  # short
-                        pnl = (entry_price - exit_price) * amount
-                        pnl_pct = ((entry_price - exit_price) / entry_price) * 100
+                # Calculate P&L (leveraged, contract-aware)
+                pnl, pnl_pct = _calc_pnl(
+                    entry_price, exit_price, amount,
+                    position_type, leverage,
+                    exchange_id, pair,
+                )
 
                 # Close in DB with real data
                 order_id = trade.get("order_id", "")
@@ -1283,8 +1322,8 @@ class AlphaBot:
                         "status": "closed",
                         "closed_at": iso_now(),
                         "exit_price": exit_price,
-                        "pnl": round(pnl, 6),
-                        "pnl_pct": round(pnl_pct, 4),
+                        "pnl": pnl,
+                        "pnl_pct": pnl_pct,
                         "reason": "position_not_found_on_restart",
                     })
 
@@ -1719,16 +1758,12 @@ class AlphaBot:
                                     exit_price = float(ticker.get("last", 0) or 0) or entry_px
                                 except Exception:
                                     exit_price = entry_px
-                                pnl_pct = 0.0
-                                pnl = 0.0
-                                if entry_px > 0 and exit_price > 0:
-                                    if side == "long":
-                                        pnl_pct = ((exit_price - entry_px) / entry_px) * 100
-                                    else:
-                                        pnl_pct = ((entry_px - exit_price) / entry_px) * 100
-                                    from alpha.trade_executor import DELTA_CONTRACT_SIZE
-                                    coin = contracts * DELTA_CONTRACT_SIZE.get(pair, 0.01)
-                                    pnl = entry_px * coin * (pnl_pct / 100)
+                                trade_lev = open_trade.get("leverage", config.delta.leverage) or 1
+                                pnl, pnl_pct = _calc_pnl(
+                                    entry_px, exit_price, contracts,
+                                    side, trade_lev,
+                                    "delta", pair,
+                                )
                                 order_id = open_trade.get("order_id", "")
                                 if order_id:
                                     await self.db.close_trade(order_id, exit_price, pnl, pnl_pct)
@@ -1954,17 +1989,13 @@ class AlphaBot:
                             pair, "market", close_side, amount,
                         )
 
-                # Calculate P&L
-                if entry_price > 0 and current_price > 0:
-                    if position_type == "long":
-                        pnl = (current_price - entry_price) * amount
-                        pnl_pct = ((current_price - entry_price) / entry_price) * 100
-                    else:
-                        pnl = (entry_price - current_price) * amount
-                        pnl_pct = ((entry_price - current_price) / entry_price) * 100
-                else:
-                    pnl = 0.0
-                    pnl_pct = 0.0
+                # Calculate P&L (leveraged, contract-aware)
+                trade_lev = trade.get("leverage", 1) or 1
+                pnl, pnl_pct = _calc_pnl(
+                    entry_price, current_price, amount,
+                    position_type, trade_lev,
+                    exchange_id, pair,
+                )
 
                 # Close in DB
                 if order_id:
@@ -1985,22 +2016,18 @@ class AlphaBot:
                     if order_id:
                         # Try to get current price for accurate P&L
                         fallback_exit = entry_price
-                        fallback_pnl = 0.0
-                        fallback_pnl_pct = 0.0
                         try:
                             exchange = self.delta if exchange_id == "delta" else self.binance
                             if exchange:
                                 ticker = await exchange.fetch_ticker(pair)
                                 fallback_exit = float(ticker.get("last", 0) or 0) or entry_price
-                                if entry_price > 0 and fallback_exit > 0:
-                                    if position_type == "long":
-                                        fallback_pnl = (fallback_exit - entry_price) * amount
-                                        fallback_pnl_pct = ((fallback_exit - entry_price) / entry_price) * 100
-                                    else:
-                                        fallback_pnl = (entry_price - fallback_exit) * amount
-                                        fallback_pnl_pct = ((entry_price - fallback_exit) / entry_price) * 100
                         except Exception:
                             pass  # keep fallback_exit = entry_price, pnl = 0
+                        fallback_pnl, fallback_pnl_pct = _calc_pnl(
+                            entry_price, fallback_exit, amount,
+                            position_type, trade_lev,
+                            exchange_id, pair,
+                        )
                         await self.db.close_trade(
                             order_id, fallback_exit, fallback_pnl, fallback_pnl_pct,
                         )
