@@ -465,7 +465,7 @@ export default function BrainPage() {
       {/* Header */}
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-3">
-          <h1 className="text-xl md:text-2xl font-bold tracking-tight text-white">Brain</h1>
+          <h1 className="text-xl md:text-2xl font-bold tracking-tight text-white">Sentinel</h1>
           <span className="text-xs text-zinc-600 font-mono">{trades.length} closed trades</span>
         </div>
         <button
@@ -502,8 +502,18 @@ export default function BrainPage() {
           color={overallWinRate >= 50 ? 'green' : overallWinRate >= 30 ? 'yellow' : 'red'}
         />
         <SummaryCard label="Total PnL" value={formatPnL(totalPnl)} color={totalPnl >= 0 ? 'green' : 'red'} />
-        <SummaryCard label="Best Pair" value={bestPair ? `${bestPair.shortPair} ${formatPnL(bestPair.totalPnl)}` : '--'} color="green" />
-        <SummaryCard label="Worst Pair" value={worstPair ? `${worstPair.shortPair} ${formatPnL(worstPair.totalPnl)}` : '--'} color="red" />
+        <SummaryCard
+          label="Top Performer"
+          value={bestPair ? bestPair.shortPair : '--'}
+          subtitle={bestPair ? `${bestPair.winRate.toFixed(0)}% WR · ${formatPnL(bestPair.totalPnl)}` : undefined}
+          color="green"
+        />
+        <SummaryCard
+          label="Needs Work"
+          value={worstPair ? worstPair.shortPair : '--'}
+          subtitle={worstPair ? `${worstPair.winRate.toFixed(0)}% WR · ${formatPnL(worstPair.totalPnl)}` : undefined}
+          color="red"
+        />
       </div>
 
       {/* ─── 2. PER-PAIR CARDS ───────────────────────────────────────────── */}
@@ -628,11 +638,11 @@ export default function BrainPage() {
         </div>
       </div>
 
-      {/* ─── 5. BRAIN LOG ────────────────────────────────────────────────── */}
+      {/* ─── 5. SENTINEL LOG ──────────────────────────────────────────────── */}
       <div className="bg-card border border-zinc-800 rounded-xl p-4 md:p-6">
-        <h2 className="text-sm font-medium text-zinc-400 uppercase tracking-wider mb-4">Brain Log</h2>
+        <h2 className="text-sm font-medium text-zinc-400 uppercase tracking-wider mb-4">Sentinel Log</h2>
         {brainLog.length === 0 ? (
-          <p className="text-sm text-zinc-600">No config changes applied from Brain yet.</p>
+          <p className="text-sm text-zinc-600">No config changes applied from Sentinel yet.</p>
         ) : (
           <div className="overflow-x-auto">
             <table className="w-full text-sm">
@@ -689,10 +699,12 @@ export default function BrainPage() {
 function SummaryCard({
   label,
   value,
+  subtitle,
   color,
 }: {
   label: string;
   value: string;
+  subtitle?: string;
   color?: 'green' | 'red' | 'yellow';
 }) {
   const colorClass =
@@ -708,6 +720,7 @@ function SummaryCard({
     <div className="bg-card border border-zinc-800 rounded-xl p-3 md:p-4">
       <p className="text-[10px] text-zinc-500 uppercase tracking-wider">{label}</p>
       <p className={cn('text-base md:text-lg font-mono font-bold mt-1', colorClass)}>{value}</p>
+      {subtitle && <p className="text-[10px] font-mono text-zinc-500 mt-0.5">{subtitle}</p>}
     </div>
   );
 }
@@ -828,7 +841,7 @@ function PairCard({
       {/* Recommendations */}
       {a.recommendations.length > 0 && (
         <div className="bg-amber-400/5 border border-amber-700/30 rounded-lg p-2.5 mb-4">
-          <p className="text-[10px] text-amber-500 uppercase tracking-wider mb-1.5 font-medium">Brain Recommendation</p>
+          <p className="text-[10px] text-amber-500 uppercase tracking-wider mb-1.5 font-medium">Sentinel Recommendation</p>
           {a.recommendations.map((rec, i) => (
             <p key={i} className="text-xs text-amber-300/90 font-mono leading-relaxed">
               {rec}
@@ -844,7 +857,7 @@ function PairCard({
           disabled={applying}
           className="w-full rounded-lg bg-amber-500/20 px-4 py-2.5 text-sm font-bold text-amber-400 border border-amber-500/40 transition-all hover:bg-amber-500/30 hover:text-amber-300 hover:border-amber-500/60 disabled:opacity-50 disabled:cursor-not-allowed"
         >
-          {applying ? 'Sending...' : `Apply Brain Config for ${a.shortPair}`}
+          {applying ? 'Sending...' : `Apply Sentinel Config for ${a.shortPair}`}
         </button>
       )}
     </div>

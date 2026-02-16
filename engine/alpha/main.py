@@ -1053,7 +1053,7 @@ class AlphaBot:
             changes.append(f"bias={bias}")
 
         summary = ", ".join(changes) if changes else "no changes"
-        result_msg = f"BRAIN UPDATE: {pair_str} — {summary}"
+        result_msg = f"SENTINEL UPDATE: {pair_str} — {summary}"
         logger.info(result_msg)
         return result_msg
 
