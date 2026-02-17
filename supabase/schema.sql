@@ -50,7 +50,16 @@ create table if not exists public.trades (
     order_id      text,                                -- ccxt order id
 
     -- Setup tracking (v6.2)
-    setup_type    text                                 -- entry setup classification (VWAP_RECLAIM, MOMENTUM_BURST, etc.)
+    setup_type    text,                                -- entry setup classification (VWAP_RECLAIM, MOMENTUM_BURST, etc.)
+
+    -- Live position state (written by bot every ~10s while position is open)
+    position_state  text,                              -- 'holding' or 'trailing'
+    trail_stop_price numeric(20,8),                    -- current trailing stop price
+    current_pnl     numeric(10,4),                     -- unrealized P&L % (price move)
+    current_price   numeric(20,8),                     -- latest price seen by bot
+    peak_pnl        numeric(10,4),                     -- highest P&L % reached
+    stop_loss       numeric(20,8),                     -- current stop loss price
+    take_profit     numeric(20,8)                      -- current take profit price
 );
 
 -- Indexes: timestamp range scans, filtering by status/strategy/pair
@@ -294,14 +303,20 @@ where  timestamp >= now() - interval '24 hours'
 group  by pair, strategy_selected, market_condition
 order  by occurrences desc;
 
--- All currently open positions (spot + futures)
+-- All currently open positions (spot + futures) with live state
 create or replace view public.v_open_positions as
 select
     id, opened_at, pair, side,
     entry_price, amount, cost,
     strategy, exchange, leverage, position_type,
     reason, order_id,
-    round((cost * leverage)::numeric, 8) as effective_exposure
+    round((cost * leverage)::numeric, 8) as effective_exposure,
+    stop_loss, take_profit,
+    position_state,
+    trail_stop_price,
+    current_pnl,
+    current_price,
+    peak_pnl
 from   public.trades
 where  status = 'open'
 order  by opened_at desc;

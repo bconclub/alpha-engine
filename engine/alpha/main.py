@@ -104,7 +104,7 @@ class AlphaBot:
                      ", ".join(self.pairs))
         logger.info("  DELTA (futures): %s, %dx leverage",
                      ", ".join(self.delta_pairs), config.delta.leverage)
-        logger.info("  Entry: 11-signal arsenal Gate=3/4 RSI=35/65 Override=30/70 +VWAP+BBSQZ+LIQSWEEP+FVG+OIDIV")
+        logger.info("  Entry: 11-signal arsenal Gate=3/4 RSI=35/65 Override=30/70 +VWAP+BBSQZ+LIQSWEEP+FVG+VOLDIV")
         logger.info("  Soul: Momentum is everything. Speed wins. Never idle.")
         logger.info("=" * 60)
 

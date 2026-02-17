@@ -102,7 +102,7 @@ const SETUP_COLORS: Record<string, { bg: string; text: string }> = {
   BB_SQUEEZE:     { bg: 'bg-red-500/10',     text: 'text-red-400' },
   LIQ_SWEEP:      { bg: 'bg-pink-500/10',    text: 'text-pink-400' },
   FVG_FILL:       { bg: 'bg-indigo-500/10',  text: 'text-indigo-400' },
-  OI_DIVERGENCE:  { bg: 'bg-teal-500/10',    text: 'text-teal-400' },
+  VOL_DIVERGENCE:  { bg: 'bg-teal-500/10',    text: 'text-teal-400' },
   MULTI_SIGNAL:   { bg: 'bg-yellow-500/10',  text: 'text-yellow-400' },
   MIXED:          { bg: 'bg-zinc-500/10',    text: 'text-zinc-400' },
 };
@@ -118,7 +118,7 @@ function getSetupLabel(setup?: string): string {
     BB_SQUEEZE: 'SQUEEZE',
     LIQ_SWEEP: 'SWEEP',
     FVG_FILL: 'FVG',
-    OI_DIVERGENCE: 'OI DIV',
+    VOL_DIVERGENCE: 'VOL DIV',
     MULTI_SIGNAL: 'MULTI',
     MIXED: 'MIXED',
   };

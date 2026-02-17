@@ -9,8 +9,8 @@ CHANGES FROM v6.2:
   - Signal #8: BB Squeeze Breakout (BB inside KC → squeeze, breakout + volume)
   - Signal #9: Liquidity Sweep (sweep swing H/L, reclaim + RSI divergence)
   - Signal #10: Fair Value Gap fill (3-candle imbalance gap + price retracing)
-  - Signal #11: OI Divergence (volume proxy: price vs volume trend divergence)
-  - 4 new setup types: BB_SQUEEZE, LIQ_SWEEP, FVG_FILL, OI_DIVERGENCE
+  - Signal #11: Volume Divergence (price vs volume trend divergence)
+  - 4 new setup types: BB_SQUEEZE, LIQ_SWEEP, FVG_FILL, VOL_DIVERGENCE
 
 CHANGES FROM v6.1 (in v6.2):
   - VWAP indicator: 30-candle session VWAP for price-value alignment
@@ -57,7 +57,7 @@ ENTRY — 3-of-4 STRICT GATE with 11-signal arsenal:
   8. BB Squeeze: BB inside Keltner Channel → breakout + volume
   9. Liquidity Sweep: sweep swing H/L, reclaim + RSI divergence
   10. FVG Fill: 3-candle imbalance gap + price retracing into gap
-  11. OI Divergence: price vs volume trend divergence (hollow moves)
+  11. Volume Divergence: price vs volume trend divergence (hollow moves)
   OVERRIDE: RSI < 30 or > 70 → enter immediately (strong extreme)
   GATE: ALL pairs require 3/4+ signals (no 2/4 coin flips)
   SETUP: Each entry classified by dominant signal pattern
@@ -173,8 +173,8 @@ class ScalpStrategy(BaseStrategy):
     SOL disabled (0% win rate). Per-pair SL distances.
     Binance spot uses wider SL/TP/trail (no leverage, needs room).
     RSI extreme override: <30 or >70 enters regardless of other signals.
-    11 entry signals: MOM, VOL, RSI, BB, MOM5m, TCONT, VWAP, BBSQZ, LIQSWEEP, FVG, OIDIV.
-    Setup type tracked per trade (BB_SQUEEZE, LIQ_SWEEP, FVG_FILL, OI_DIVERGENCE, etc.).
+    11 entry signals: MOM, VOL, RSI, BB, MOM5m, TCONT, VWAP, BBSQZ, LIQSWEEP, FVG, VOLDIV.
+    Setup type tracked per trade (BB_SQUEEZE, LIQ_SWEEP, FVG_FILL, VOL_DIVERGENCE, etc.).
     """
 
     name = StrategyName.SCALP
@@ -1007,7 +1007,7 @@ class ScalpStrategy(BaseStrategy):
         8. BB Squeeze Breakout: BB inside KC → squeeze, then price breaks out
         9. Liquidity Sweep: price sweeps swing H/L then reclaims + RSI divergence
         10. Fair Value Gap: price filling a 3-candle imbalance gap
-        11. OI Divergence (vol proxy): price vs volume trend divergence
+        11. Volume Divergence: price vs volume trend divergence
 
         Signals 5-11 are BONUS — they count toward the total but the
         threshold is still expressed as N-of-4 scale (3/4).
@@ -1181,9 +1181,8 @@ class ScalpStrategy(BaseStrategy):
                         bear_signals.append(f"FVG:fill-{gap_pct:.2f}%")
                         break
 
-        # 11. OI Divergence (Volume Proxy) — hollow moves detection
+        # 11. Volume Divergence — hollow moves detection
         #     Rising price + declining volume = no new money behind the move.
-        #     Uses volume as proxy since OI API may not be available.
         if df is not None and len(df) >= 10:
             recent_closes = df["close"].values[-5:]
             older_closes = df["close"].values[-10:-5]
@@ -1197,12 +1196,12 @@ class ScalpStrategy(BaseStrategy):
             # Bearish: price up but volume dying = hollow pump
             if price_rising and vol_declining and can_short:
                 vol_drop = (1 - recent_vol / older_vol) * 100 if older_vol > 0 else 0
-                bear_signals.append(f"OIDIV:price↑vol↓{vol_drop:.0f}%")
+                bear_signals.append(f"VOLDIV:price↑vol↓{vol_drop:.0f}%")
 
             # Bullish: price down but volume dying = exhausted sellers
             if price_falling and vol_declining:
                 vol_drop = (1 - recent_vol / older_vol) * 100 if older_vol > 0 else 0
-                bull_signals.append(f"OIDIV:price↓vol↓{vol_drop:.0f}%")
+                bull_signals.append(f"VOLDIV:price↓vol↓{vol_drop:.0f}%")
 
         # ── RSI EXTREME OVERRIDE: RSI <30 or >70 → enter immediately ─────
         # Strong oversold/overbought overrides all other conditions.
@@ -1892,8 +1891,8 @@ class ScalpStrategy(BaseStrategy):
             return "LIQ_SWEEP"
         if "FVG:" in r:
             return "FVG_FILL"
-        if "OIDIV:" in r:
-            return "OI_DIVERGENCE"
+        if "VOLDIV:" in r:
+            return "VOL_DIVERGENCE"
         if "VWAP:" in r:
             return "VWAP_RECLAIM"
         if "TCONT:" in r:
@@ -1914,7 +1913,7 @@ class ScalpStrategy(BaseStrategy):
         signal_count = sum([
             has_mom, has_vol, has_rsi, has_bb,
             "VWAP:" in r, "TCONT:" in r, "BBSQZ:" in r,
-            "LIQSWEEP:" in r, "FVG:" in r, "OIDIV:" in r,
+            "LIQSWEEP:" in r, "FVG:" in r, "VOLDIV:" in r,
             "MOM5M:" in r.replace("MOM:", ""),
         ])
         if signal_count >= 4:

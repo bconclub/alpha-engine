@@ -613,12 +613,7 @@ class TradeExecutor:
         # ── LIMIT EXIT OPTIMIZATION: Delta futures exits use limit-then-market ──
         # Saves ~60% on exit fees (maker 0.024% vs taker 0.059%)
         # Place limit at current price, wait 5s, cancel & market if unfilled
-        _use_limit_exit = (
-            is_exit
-            and is_futures
-            and signal.exchange_id == "delta"
-            and signal.order_type == "market"  # only override market exits
-        )
+        _use_limit_exit = False  # ALWAYS use market for exits — failed limits cost more than fees
         limit_order_id: str | None = None  # track limit order for recovery in market retry
 
         if _use_limit_exit:
