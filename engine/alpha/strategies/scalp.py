@@ -1,10 +1,25 @@
-"""Alpha v6.1 — ENTRY QUALITY GATE + AGGRESSIVE PROFIT LOCK.
+"""Alpha v6.3 — 11-SIGNAL ARSENAL + SETUP TRACKING.
 
 PHILOSOPHY: Two strong positions beat four weak ones. Focus capital on the
-best signals. After a loss, pause THAT PAIR. Use 15m trend as soft bias.
+best signals. After a loss, pause THAT PAIR. Track which setup made each trade.
 SL/TP adapt per-pair. SOL DISABLED (0% win rate).
 
-CHANGES FROM v5.9:
+CHANGES FROM v6.2:
+  - Keltner Channel indicator for BB Squeeze detection
+  - Signal #8: BB Squeeze Breakout (BB inside KC → squeeze, breakout + volume)
+  - Signal #9: Liquidity Sweep (sweep swing H/L, reclaim + RSI divergence)
+  - Signal #10: Fair Value Gap fill (3-candle imbalance gap + price retracing)
+  - Signal #11: OI Divergence (volume proxy: price vs volume trend divergence)
+  - 4 new setup types: BB_SQUEEZE, LIQ_SWEEP, FVG_FILL, OI_DIVERGENCE
+
+CHANGES FROM v6.1 (in v6.2):
+  - VWAP indicator: 30-candle session VWAP for price-value alignment
+  - 9/21 EMA momentum ribbon for trend confirmation
+  - 7th signal: VWAP Reclaim (price above VWAP + bullish EMA ribbon)
+  - Setup tracking: each trade classified (VWAP_RECLAIM, MOMENTUM_BURST, etc.)
+  - setup_type stored in DB for performance analysis by setup
+
+CHANGES FROM v5.9 (in v6.0/v6.1):
   - Entry gate: 2/4 → 3/4 minimum for ALL pairs (XRP, ETH, BTC)
   - Warmup gate: 2/4 → 3/4 (no more free passes on startup)
   - 2/4 entries were coin flips — losers at 20x leverage = -7% capital per SL hit
@@ -30,16 +45,22 @@ CHANGES FROM v5.6 (in v5.7):
   - Signal scan logging: every tick shows pass/fail per condition
   - Binance spot: custom SL/TP/trail (wider for no-leverage spot)
 
-ENTRY — 3-of-4 with 15m SOFT WEIGHT (was 2/4, tightened for quality):
-  Signals (up to 6, counted against N/4 threshold):
+ENTRY — 3-of-4 STRICT GATE with 11-signal arsenal:
+  Signals (up to 11, counted against N/4 threshold):
   1. Momentum 60s: 0.08%+ move
   2. Volume: 0.8x average spike
-  3. RSI: < 40 (long) or > 60 (short)
+  3. RSI: < 35 (long) or > 65 (short)
   4. BB mean-reversion: price near band edge
   5. Momentum 5m: 0.30%+ slow bleed
   6. Trend continuation: new 15-candle extreme + volume
+  7. VWAP Reclaim: price above VWAP + 9 EMA > 21 EMA
+  8. BB Squeeze: BB inside Keltner Channel → breakout + volume
+  9. Liquidity Sweep: sweep swing H/L, reclaim + RSI divergence
+  10. FVG Fill: 3-candle imbalance gap + price retracing into gap
+  11. OI Divergence: price vs volume trend divergence (hollow moves)
   OVERRIDE: RSI < 30 or > 70 → enter immediately (strong extreme)
   GATE: ALL pairs require 3/4+ signals (no 2/4 coin flips)
+  SETUP: Each entry classified by dominant signal pattern
 
 EXIT — 3-PHASE SYSTEM (AGGRESSIVE PROFIT LOCK):
   PHASE 1 (0-30s): HANDS OFF
@@ -146,12 +167,14 @@ def _soul_check(context: str) -> str:
 
 
 class ScalpStrategy(BaseStrategy):
-    """Phase-based v6.1 — 3/4 entry gate, aggressive profit lock, tight trailing.
+    """Phase-based v6.3 — 11-signal arsenal + setup tracking.
 
     3-phase exit system prevents instant exits after fill bounce.
     SOL disabled (0% win rate). Per-pair SL distances.
     Binance spot uses wider SL/TP/trail (no leverage, needs room).
     RSI extreme override: <30 or >70 enters regardless of other signals.
+    11 entry signals: MOM, VOL, RSI, BB, MOM5m, TCONT, VWAP, BBSQZ, LIQSWEEP, FVG, OIDIV.
+    Setup type tracked per trade (BB_SQUEEZE, LIQ_SWEEP, FVG_FILL, OI_DIVERGENCE, etc.).
     """
 
     name = StrategyName.SCALP
@@ -392,6 +415,9 @@ class ScalpStrategy(BaseStrategy):
         # Shared signal state (read by options_scalp strategy)
         self.last_signal_state: dict[str, Any] | None = None
 
+        # BB Squeeze tracking (signal #8)
+        self._squeeze_tick_count: int = 0
+
         # Load soul on init
         _load_soul()
 
@@ -571,6 +597,12 @@ class ScalpStrategy(BaseStrategy):
         momentum_60s = 0.0
         momentum_120s = 0.0
         momentum_300s = 0.0
+        vwap = 0.0
+        ema_9 = 0.0
+        ema_21 = 0.0
+        kc_upper = 0.0
+        kc_lower = 0.0
+        rsi_series: pd.Series | None = None
         df: pd.DataFrame | None = None
         _need_full_indicators = True
 
@@ -607,6 +639,15 @@ class ScalpStrategy(BaseStrategy):
             bb_upper = float(bb.bollinger_hband().iloc[-1])
             bb_lower = float(bb.bollinger_lband().iloc[-1])
 
+            # Keltner Channel (for BB Squeeze detection)
+            kc = ta.volatility.KeltnerChannel(
+                high=df["high"], low=df["low"], close=close,
+                window=20, window_atr=10, multiplier=1.5,
+                original_version=False,
+            )
+            kc_upper = float(kc.keltner_channel_hband().iloc[-1])
+            kc_lower = float(kc.keltner_channel_lband().iloc[-1])
+
             # Volume ratio (current vs 10-candle average)
             avg_vol = float(volume.iloc[-11:-1].mean()) if len(volume) >= 11 else float(volume.mean())
             current_vol = float(volume.iloc[-1])
@@ -623,6 +664,17 @@ class ScalpStrategy(BaseStrategy):
             # 5-candle momentum (300 seconds) for slow bleed detection
             price_5m_ago = float(close.iloc[-6]) if len(close) >= 6 else price_2m_ago
             momentum_300s = ((current_price - price_5m_ago) / price_5m_ago * 100) if price_5m_ago > 0 else 0
+
+            # VWAP (Volume Weighted Average Price) — session VWAP over 30 candles
+            typical_price = (df["high"] + df["low"] + df["close"]) / 3
+            cumulative_tp_vol = (typical_price * df["volume"]).cumsum()
+            cumulative_vol = df["volume"].cumsum()
+            vwap_series = cumulative_tp_vol / cumulative_vol.replace(0, float("nan"))
+            vwap = float(vwap_series.iloc[-1]) if not vwap_series.empty else current_price
+
+            # 9 EMA and 21 EMA — momentum ribbon
+            ema_9 = float(close.ewm(span=9, adjust=False).mean().iloc[-1])
+            ema_21 = float(close.ewm(span=21, adjust=False).mean().iloc[-1])
 
         # ── Heartbeat every 60 seconds ─────────────────────────────────
         if now - self._last_heartbeat >= 60:
@@ -748,7 +800,7 @@ class ScalpStrategy(BaseStrategy):
         idle_seconds = now - self._last_position_exit
         is_widened = idle_seconds >= self.IDLE_WIDEN_SECONDS
 
-        # ── Quality momentum detection (2-of-4 with trend soft weight) ──
+        # ── Quality momentum detection (3-of-4 with setup tracking) ──
         entry = self._detect_quality_entry(
             current_price, rsi_now, vol_ratio,
             momentum_60s, momentum_120s, momentum_300s,
@@ -756,6 +808,12 @@ class ScalpStrategy(BaseStrategy):
             trend_15m,
             widened=is_widened,
             df=df,
+            vwap=vwap,
+            ema_9=ema_9,
+            ema_21=ema_21,
+            kc_upper=kc_upper,
+            kc_lower=kc_lower,
+            rsi_series=rsi_series,
         )
 
         if entry is not None:
@@ -922,29 +980,37 @@ class ScalpStrategy(BaseStrategy):
         trend_15m: str = "neutral",
         widened: bool = False,
         df: pd.DataFrame | None = None,
+        vwap: float = 0.0,
+        ema_9: float = 0.0,
+        ema_21: float = 0.0,
+        kc_upper: float = 0.0,
+        kc_lower: float = 0.0,
+        rsi_series: "pd.Series | None" = None,
     ) -> tuple[str, str, bool, int] | None:
-        """Detect quality momentum using 2-of-4 signals with 15m trend soft weight.
+        """Detect quality momentum using 3-of-4 signals with setup tracking.
 
         Returns (side, reason, use_limit, signal_count) or None.
 
         RSI EXTREME OVERRIDE: RSI < 30 or > 70 enters immediately
         regardless of other signal counts.
 
-        SOFT TREND WEIGHT (15m):
-        - Trend-aligned: 2/4 signals required (standard)
-        - Counter-trend: 3/4 signals required (harder to go against trend)
-        - Neutral: 2/4 for both directions
+        GATE: All pairs require 3/4+ signals (v6.1).
 
-        Signals (up to 6, but counted as max 4 for threshold):
+        Signals (up to 11, but counted against N/4 threshold):
         1. Momentum 60s: 0.08%+ move in 60s
         2. Volume: 0.8x+ spike
-        3. RSI: < 40 oversold (long) or > 60 overbought (short)
+        3. RSI: < 35 oversold (long) or > 65 overbought (short)
         4. BB mean-reversion: price in bottom 15% of BB → long, top 15% → short
         5. Momentum 5m: 0.30%+ move over 5 candles (slow bleed detection)
         6. Trend continuation: new 15-candle low/high + volume > average
+        7. VWAP Reclaim: price above VWAP + EMA 9 > 21 (long) or below + 9 < 21
+        8. BB Squeeze Breakout: BB inside KC → squeeze, then price breaks out
+        9. Liquidity Sweep: price sweeps swing H/L then reclaims + RSI divergence
+        10. Fair Value Gap: price filling a 3-candle imbalance gap
+        11. OI Divergence (vol proxy): price vs volume trend divergence
 
-        Signals 5 and 6 are BONUS — they count toward the total but the
-        threshold is still expressed as N-of-4 scale (2/4 or 3/4).
+        Signals 5-11 are BONUS — they count toward the total but the
+        threshold is still expressed as N-of-4 scale (3/4).
         """
         can_short = self.is_futures and config.delta.enable_shorting
 
@@ -1029,6 +1095,114 @@ class ScalpStrategy(BaseStrategy):
             # New high in last 15 candles + volume above average → LONG signal
             if current_close > float(lookback.max()) and current_vol >= avg_vol * self.TREND_CONT_VOL_RATIO:
                 bull_signals.append(f"TCONT:newHigh+vol{current_vol/avg_vol:.1f}x")
+
+        # 7. VWAP Reclaim + EMA ribbon alignment
+        #    Price above VWAP with bullish EMA ribbon → momentum confirmation for LONG
+        #    Price below VWAP with bearish EMA ribbon → momentum confirmation for SHORT
+        if vwap > 0 and ema_9 > 0 and ema_21 > 0:
+            if price > vwap and ema_9 > ema_21:
+                vwap_dist = (price - vwap) / vwap * 100
+                bull_signals.append(f"VWAP:above+EMA↑({vwap_dist:.2f}%)")
+            if price < vwap and ema_9 < ema_21 and can_short:
+                vwap_dist = (vwap - price) / vwap * 100
+                bear_signals.append(f"VWAP:below+EMA↓({vwap_dist:.2f}%)")
+
+        # 8. Bollinger Squeeze Breakout
+        #    BB inside Keltner Channel = squeeze (low volatility, coiling).
+        #    Price closing outside BB with volume spike = explosive breakout.
+        if kc_upper > 0 and kc_lower > 0:
+            bb_inside_kc = bb_upper < kc_upper and bb_lower > kc_lower
+            if bb_inside_kc:
+                self._squeeze_tick_count = 2  # breakout valid for 2 ticks after squeeze
+            elif self._squeeze_tick_count > 0:
+                self._squeeze_tick_count -= 1
+
+            if bb_inside_kc or self._squeeze_tick_count > 0:
+                if price > bb_upper and vol_ratio >= eff_vol:
+                    bull_signals.append(f"BBSQZ:breakout+vol{vol_ratio:.1f}x")
+                if price < bb_lower and vol_ratio >= eff_vol and can_short:
+                    bear_signals.append(f"BBSQZ:breakout+vol{vol_ratio:.1f}x")
+
+        # 9. Liquidity Sweep — Swing Failure Pattern + RSI divergence
+        #    Price sweeps past a swing high/low (triggering stops) then reclaims
+        #    the level with RSI divergence = fakeout reversal.
+        if df is not None and len(df) >= 12 and rsi_series is not None and len(rsi_series) >= 12:
+            lows_arr = df["low"].values
+            highs_arr = df["high"].values
+            rsi_arr = rsi_series.values
+
+            # Swing low/high from candles [-12:-2] (exclude last 2 for reclaim)
+            lookback_lows = lows_arr[-12:-2]
+            lookback_highs = highs_arr[-12:-2]
+            swing_low = float(lookback_lows.min())
+            swing_high = float(lookback_highs.max())
+            swing_low_idx = int(lookback_lows.argmin())
+            swing_high_idx = int(lookback_highs.argmax())
+
+            # Bullish sweep: wicked below swing low then closed above it
+            recent_low = float(min(lows_arr[-2], lows_arr[-1]))
+            if recent_low < swing_low and price > swing_low:
+                rsi_at_swing = float(rsi_arr[-12 + swing_low_idx])
+                if rsi_now > rsi_at_swing:  # RSI higher low = bullish divergence
+                    bull_signals.append(f"LIQSWEEP:swept{swing_low:.0f}+RSIdiv")
+
+            # Bearish sweep: wicked above swing high then closed below it
+            recent_high = float(max(highs_arr[-2], highs_arr[-1]))
+            if recent_high > swing_high and price < swing_high and can_short:
+                rsi_at_swing = float(rsi_arr[-12 + swing_high_idx])
+                if rsi_now < rsi_at_swing:  # RSI lower high = bearish divergence
+                    bear_signals.append(f"LIQSWEEP:swept{swing_high:.0f}+RSIdiv")
+
+        # 10. Fair Value Gap (FVG) — price filling an imbalance gap
+        #     3-candle pattern: gap between candle A's high and candle C's low.
+        #     Price retracing into the gap = high-precision entry.
+        if df is not None and len(df) >= 5:
+            for i in range(-5, -2):
+                candle_a_high = float(df["high"].iloc[i])
+                candle_c_low = float(df["low"].iloc[i + 2])
+                candle_a_low = float(df["low"].iloc[i])
+                candle_c_high = float(df["high"].iloc[i + 2])
+
+                # Bullish FVG: candle C's low > candle A's high (gap up)
+                if candle_c_low > candle_a_high:
+                    gap_top = candle_c_low
+                    gap_bottom = candle_a_high
+                    gap_pct = (gap_top - gap_bottom) / gap_bottom * 100 if gap_bottom > 0 else 0
+                    if gap_bottom <= price <= gap_top and gap_pct >= 0.05:
+                        bull_signals.append(f"FVG:fill+{gap_pct:.2f}%")
+                        break
+
+                # Bearish FVG: candle C's high < candle A's low (gap down)
+                if candle_c_high < candle_a_low and can_short:
+                    gap_top = candle_a_low
+                    gap_bottom = candle_c_high
+                    gap_pct = (gap_top - gap_bottom) / gap_top * 100 if gap_top > 0 else 0
+                    if gap_bottom <= price <= gap_top and gap_pct >= 0.05:
+                        bear_signals.append(f"FVG:fill-{gap_pct:.2f}%")
+                        break
+
+        # 11. OI Divergence (Volume Proxy) — hollow moves detection
+        #     Rising price + declining volume = no new money behind the move.
+        #     Uses volume as proxy since OI API may not be available.
+        if df is not None and len(df) >= 10:
+            recent_closes = df["close"].values[-5:]
+            older_closes = df["close"].values[-10:-5]
+            recent_vol = float(df["volume"].values[-5:].mean())
+            older_vol = float(df["volume"].values[-10:-5].mean())
+
+            price_rising = float(recent_closes[-1]) > float(older_closes[-1])
+            price_falling = float(recent_closes[-1]) < float(older_closes[-1])
+            vol_declining = older_vol > 0 and recent_vol < older_vol * 0.8  # 20%+ drop
+
+            # Bearish: price up but volume dying = hollow pump
+            if price_rising and vol_declining and can_short:
+                vol_drop = (1 - recent_vol / older_vol) * 100 if older_vol > 0 else 0
+                bear_signals.append(f"OIDIV:price↑vol↓{vol_drop:.0f}%")
+
+            # Bullish: price down but volume dying = exhausted sellers
+            if price_falling and vol_declining:
+                vol_drop = (1 - recent_vol / older_vol) * 100 if older_vol > 0 else 0
+                bull_signals.append(f"OIDIV:price↓vol↓{vol_drop:.0f}%")
 
         # ── RSI EXTREME OVERRIDE: RSI <30 or >70 → enter immediately ─────
         # Strong oversold/overbought overrides all other conditions.
@@ -1695,6 +1869,60 @@ class ScalpStrategy(BaseStrategy):
         return amount
 
     # ======================================================================
+    # SETUP CLASSIFICATION
+    # ======================================================================
+
+    @staticmethod
+    def _classify_setup(reason: str) -> str:
+        """Classify entry into a setup type based on which signals fired.
+
+        Reads the signal tags from the reason string to determine the dominant
+        setup pattern. Returns a short uppercase setup name for DB storage.
+        """
+        r = reason.upper()
+
+        # RSI override is its own setup
+        if "RSI-OVERRIDE" in r:
+            return "RSI_OVERRIDE"
+
+        # Named setups — in priority order (most specific first)
+        if "BBSQZ:" in r:
+            return "BB_SQUEEZE"
+        if "LIQSWEEP:" in r:
+            return "LIQ_SWEEP"
+        if "FVG:" in r:
+            return "FVG_FILL"
+        if "OIDIV:" in r:
+            return "OI_DIVERGENCE"
+        if "VWAP:" in r:
+            return "VWAP_RECLAIM"
+        if "TCONT:" in r:
+            return "TREND_CONT"
+
+        # Combination setups
+        has_mom = "MOM:" in r or "MOM5M:" in r
+        has_vol = "VOL:" in r
+        has_rsi = "RSI:" in r
+        has_bb = "BB:" in r
+
+        if has_mom and has_vol:
+            return "MOMENTUM_BURST"
+        if has_bb and has_rsi:
+            return "MEAN_REVERT"
+
+        # Count total signal tags to determine if multi-signal
+        signal_count = sum([
+            has_mom, has_vol, has_rsi, has_bb,
+            "VWAP:" in r, "TCONT:" in r, "BBSQZ:" in r,
+            "LIQSWEEP:" in r, "FVG:" in r, "OIDIV:" in r,
+            "MOM5M:" in r.replace("MOM:", ""),
+        ])
+        if signal_count >= 4:
+            return "MULTI_SIGNAL"
+
+        return "MIXED"
+
+    # ======================================================================
     # SIGNAL BUILDERS
     # ======================================================================
 
@@ -1703,10 +1931,11 @@ class ScalpStrategy(BaseStrategy):
         order_type: str = "market",
     ) -> Signal:
         """Build an entry signal with ATR-dynamic SL. Trail handles the TP."""
+        setup_type = self._classify_setup(reason)
         self.logger.info(
-            "[%s] %s -> %s entry (%s) SL=%.2f%% TP=%.2f%% ATR=%.3f%%",
+            "[%s] %s -> %s entry (%s) SL=%.2f%% TP=%.2f%% ATR=%.3f%% setup=%s",
             self.pair, reason, side.upper(), order_type,
-            self._sl_pct, self._tp_pct, self._last_atr_pct,
+            self._sl_pct, self._tp_pct, self._last_atr_pct, setup_type,
         )
 
         if side == "long":
@@ -1728,7 +1957,8 @@ class ScalpStrategy(BaseStrategy):
                 metadata={"pending_side": "long", "pending_amount": amount,
                           "tp_price": tp, "sl_price": sl,
                           "sl_pct": self._sl_pct, "tp_pct": self._tp_pct,
-                          "atr_pct": self._last_atr_pct},
+                          "atr_pct": self._last_atr_pct,
+                          "setup_type": setup_type},
             )
         else:  # short
             sl = price * (1 + self._sl_pct / 100)
@@ -1749,7 +1979,8 @@ class ScalpStrategy(BaseStrategy):
                 metadata={"pending_side": "short", "pending_amount": amount,
                           "tp_price": tp, "sl_price": sl,
                           "sl_pct": self._sl_pct, "tp_pct": self._tp_pct,
-                          "atr_pct": self._last_atr_pct},
+                          "atr_pct": self._last_atr_pct,
+                          "setup_type": setup_type},
             )
 
     def _exit_signal(self, price: float, side: str, reason: str) -> Signal:

@@ -73,6 +73,7 @@ function normalizeTrade(raw: any): Trade {
     order_type: raw.order_type,
     reason: raw.reason,
     order_id: raw.order_id,
+    setup_type: raw.setup_type ?? undefined,
   };
 }
 

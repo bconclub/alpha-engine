@@ -26,6 +26,7 @@ export interface Trade {
   order_type?: string;
   reason?: string;
   order_id?: string;
+  setup_type?: string;  // Entry setup classification (VWAP_RECLAIM, MOMENTUM_BURST, etc.)
 }
 
 export interface StrategyLog {

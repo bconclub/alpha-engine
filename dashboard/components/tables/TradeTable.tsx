@@ -84,12 +84,46 @@ const COLUMNS: ColumnDef[] = [
   { key: 'exit_price', label: 'Exit', align: 'right' },
   { key: 'amount', label: 'Contracts', align: 'right' },
   { key: 'strategy', label: 'Strategy' },
+  { key: 'setup_type', label: 'Setup' },
   { key: 'pnl', label: 'P&L', align: 'right' },
   { key: 'pnl_pct', label: 'P&L %', align: 'right' },
   { key: 'hold_time', label: 'Hold Time', align: 'right' },
   { key: 'exit_reason', label: 'Exit' },
   { key: 'status', label: 'Status' },
 ];
+
+// Setup type badge colors
+const SETUP_COLORS: Record<string, { bg: string; text: string }> = {
+  VWAP_RECLAIM:   { bg: 'bg-blue-500/10',   text: 'text-blue-400' },
+  RSI_OVERRIDE:   { bg: 'bg-purple-500/10',  text: 'text-purple-400' },
+  MOMENTUM_BURST: { bg: 'bg-orange-500/10',  text: 'text-orange-400' },
+  MEAN_REVERT:    { bg: 'bg-cyan-500/10',    text: 'text-cyan-400' },
+  TREND_CONT:     { bg: 'bg-emerald-500/10', text: 'text-emerald-400' },
+  BB_SQUEEZE:     { bg: 'bg-red-500/10',     text: 'text-red-400' },
+  LIQ_SWEEP:      { bg: 'bg-pink-500/10',    text: 'text-pink-400' },
+  FVG_FILL:       { bg: 'bg-indigo-500/10',  text: 'text-indigo-400' },
+  OI_DIVERGENCE:  { bg: 'bg-teal-500/10',    text: 'text-teal-400' },
+  MULTI_SIGNAL:   { bg: 'bg-yellow-500/10',  text: 'text-yellow-400' },
+  MIXED:          { bg: 'bg-zinc-500/10',    text: 'text-zinc-400' },
+};
+
+function getSetupLabel(setup?: string): string {
+  if (!setup) return '—';
+  const labels: Record<string, string> = {
+    VWAP_RECLAIM: 'VWAP',
+    RSI_OVERRIDE: 'RSI OVR',
+    MOMENTUM_BURST: 'MOM',
+    MEAN_REVERT: 'REVERT',
+    TREND_CONT: 'TREND',
+    BB_SQUEEZE: 'SQUEEZE',
+    LIQ_SWEEP: 'SWEEP',
+    FVG_FILL: 'FVG',
+    OI_DIVERGENCE: 'OI DIV',
+    MULTI_SIGNAL: 'MULTI',
+    MIXED: 'MIXED',
+  };
+  return labels[setup] ?? setup;
+}
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -668,6 +702,15 @@ export default function TradeTable({ trades }: TradeTableProps) {
                       <Badge variant={getStrategyBadgeVariant(trade.strategy)}>
                         {getStrategyLabel(trade.strategy)}
                       </Badge>
+                      {trade.setup_type && (
+                        <span className={cn(
+                          'inline-block px-1.5 py-0.5 rounded text-[10px] font-semibold',
+                          SETUP_COLORS[trade.setup_type]?.bg ?? 'bg-zinc-500/10',
+                          SETUP_COLORS[trade.setup_type]?.text ?? 'text-zinc-400',
+                        )}>
+                          {getSetupLabel(trade.setup_type)}
+                        </span>
+                      )}
                       {trade.leverage > 1 && (
                         <span className="text-amber-400 font-mono">{formatLeverage(trade.leverage)}</span>
                       )}
@@ -875,6 +918,21 @@ export default function TradeTable({ trades }: TradeTableProps) {
                           <Badge variant={getStrategyBadgeVariant(trade.strategy)}>
                             {getStrategyLabel(trade.strategy)}
                           </Badge>
+                        </td>
+
+                        {/* Setup Type */}
+                        <td className="whitespace-nowrap px-4 py-3">
+                          {trade.setup_type ? (
+                            <span className={cn(
+                              'inline-block px-1.5 py-0.5 rounded text-[10px] font-semibold',
+                              SETUP_COLORS[trade.setup_type]?.bg ?? 'bg-zinc-500/10',
+                              SETUP_COLORS[trade.setup_type]?.text ?? 'text-zinc-400',
+                            )}>
+                              {getSetupLabel(trade.setup_type)}
+                            </span>
+                          ) : (
+                            <span className="text-zinc-600 text-xs">—</span>
+                          )}
                         </td>
 
                         {/* P&L */}

@@ -47,7 +47,10 @@ create table if not exists public.trades (
                   check (position_type in ('spot', 'long', 'short')),
 
     -- Exchange reference
-    order_id      text                                 -- ccxt order id
+    order_id      text,                                -- ccxt order id
+
+    -- Setup tracking (v6.2)
+    setup_type    text                                 -- entry setup classification (VWAP_RECLAIM, MOMENTUM_BURST, etc.)
 );
 
 -- Indexes: timestamp range scans, filtering by status/strategy/pair
@@ -63,6 +66,8 @@ create index if not exists idx_trades_order_id    on public.trades (order_id)
 create index if not exists idx_trades_position_type on public.trades (position_type);
 create index if not exists idx_trades_leverage      on public.trades (leverage)
     where leverage > 1;
+create index if not exists idx_trades_setup_type   on public.trades (setup_type)
+    where setup_type is not null;
 
 
 -- ============================================================================

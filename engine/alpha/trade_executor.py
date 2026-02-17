@@ -909,6 +909,7 @@ class TradeExecutor:
                 "order_id": order.get("id"),
                 "leverage": signal.leverage,
                 "position_type": signal.position_type,
+                "setup_type": signal.metadata.get("setup_type", "unknown"),
             })
             logger.info(
                 "Trade opened in DB: id=%s %s %s @ $%.2f [%s]",
