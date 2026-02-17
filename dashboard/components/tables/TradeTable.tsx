@@ -821,7 +821,7 @@ export default function TradeTable({ trades }: TradeTableProps) {
       {/* Desktop table                                                      */}
       {/* ----------------------------------------------------------------- */}
       <div className="hidden md:block bg-card overflow-hidden rounded-xl border border-zinc-800">
-        <div className="overflow-x-auto">
+        <div className="overflow-x-auto scrollbar-visible">
           <table className="w-full min-w-[1700px] text-sm">
             {/* Header */}
             <thead>

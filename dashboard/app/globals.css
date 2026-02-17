@@ -84,6 +84,30 @@ a,
   }
 }
 
+/* ── Visible scrollbar for wide tables ──────────────────────────────── */
+
+.scrollbar-visible::-webkit-scrollbar {
+  height: 10px;
+}
+
+.scrollbar-visible::-webkit-scrollbar-track {
+  background: #1a1a2e;
+  border-radius: 5px;
+}
+
+.scrollbar-visible::-webkit-scrollbar-thumb {
+  background: #3f3f5c;
+  border-radius: 5px;
+}
+
+.scrollbar-visible::-webkit-scrollbar-thumb:hover {
+  background: #5a5a7a;
+}
+
+.scrollbar-visible {
+  scrollbar-color: #3f3f5c #1a1a2e;
+}
+
 /* ── Mobile drawer animation ────────────────────────────────────────── */
 
 @keyframes slide-in {
