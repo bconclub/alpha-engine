@@ -8,42 +8,21 @@ import { useSidebar } from '@/components/providers/SidebarProvider';
 import { cn } from '@/lib/utils';
 
 const navItems = [
+  // ── Group 1: Core ──
   {
     name: 'Overview',
     href: '/',
     icon: (
       <svg width="18" height="18" viewBox="0 0 20 20" fill="none" xmlns="http://www.w3.org/2000/svg">
-        <path
-          d="M2 3C2 2.44772 2.44772 2 3 2H8C8.55228 2 9 2.44772 9 3V10C9 10.5523 8.55228 11 8 11H3C2.44772 11 2 10.5523 2 10V3Z"
-          fill="currentColor"
-        />
-        <path
-          d="M11 3C11 2.44772 11.4477 2 12 2H17C17.5523 2 18 2.44772 18 3V6C18 6.55228 17.5523 7 17 7H12C11.4477 7 11 6.55228 11 6V3Z"
-          fill="currentColor"
-        />
-        <path
-          d="M11 10C11 9.44772 11.4477 9 12 9H17C17.5523 9 18 9.44772 18 10V17C18 17.5523 17.5523 18 17 18H12C11.4477 18 11 17.5523 11 17V10Z"
-          fill="currentColor"
-        />
-        <path
-          d="M2 14C2 13.4477 2.44772 13 3 13H8C8.55228 13 9 13.4477 9 14V17C9 17.5523 8.55228 18 8 18H3C2.44772 18 2 17.5523 2 17V14Z"
-          fill="currentColor"
-        />
+        <path d="M2 3C2 2.44772 2.44772 2 3 2H8C8.55228 2 9 2.44772 9 3V10C9 10.5523 8.55228 11 8 11H3C2.44772 11 2 10.5523 2 10V3Z" fill="currentColor" />
+        <path d="M11 3C11 2.44772 11.4477 2 12 2H17C17.5523 2 18 2.44772 18 3V6C18 6.55228 17.5523 7 17 7H12C11.4477 7 11 6.55228 11 6V3Z" fill="currentColor" />
+        <path d="M11 10C11 9.44772 11.4477 9 12 9H17C17.5523 9 18 9.44772 18 10V17C18 17.5523 17.5523 18 17 18H12C11.4477 18 11 17.5523 11 17V10Z" fill="currentColor" />
+        <path d="M2 14C2 13.4477 2.44772 13 3 13H8C8.55228 13 9 13.4477 9 14V17C9 17.5523 8.55228 18 8 18H3C2.44772 18 2 17.5523 2 17V14Z" fill="currentColor" />
       </svg>
     ),
   },
   {
-    name: 'Pairs',
-    href: '/pairs',
-    icon: (
-      <svg width="18" height="18" viewBox="0 0 20 20" fill="none" xmlns="http://www.w3.org/2000/svg">
-        <circle cx="7" cy="7" r="4" stroke="currentColor" strokeWidth="2" fill="none" />
-        <circle cx="13" cy="13" r="4" stroke="currentColor" strokeWidth="2" fill="none" />
-      </svg>
-    ),
-  },
-  {
-    name: 'Trades',
+    name: 'Trade',
     href: '/trades',
     icon: (
       <svg width="18" height="18" viewBox="0 0 20 20" fill="none" xmlns="http://www.w3.org/2000/svg">
@@ -55,7 +34,7 @@ const navItems = [
     ),
   },
   {
-    name: 'Strategies',
+    name: 'Strategy',
     href: '/strategies',
     icon: (
       <svg width="18" height="18" viewBox="0 0 20 20" fill="none" xmlns="http://www.w3.org/2000/svg">
@@ -65,15 +44,6 @@ const navItems = [
         <path d="M12 13C12 12.4477 12.4477 12 13 12H17C17.5523 12 18 12.4477 18 13C18 13.5523 17.5523 14 17 14H13C12.4477 14 12 13.5523 12 13Z" fill="currentColor" />
         <path d="M12 15C12 14.4477 12.4477 14 13 14H15C15.5523 14 16 14.4477 16 15C16 15.5523 15.5523 16 15 16H13C12.4477 16 12 15.5523 12 15Z" fill="currentColor" />
         <path fillRule="evenodd" clipRule="evenodd" d="M2 13C2 11.3431 3.34315 10 5 10H7C8.65685 10 10 11.3431 10 13V15C10 16.6569 8.65685 18 7 18H5C3.34315 18 2 16.6569 2 15V13ZM5 12C4.44772 12 4 12.4477 4 13V15C4 15.5523 4.44772 16 5 16H7C7.55228 16 8 15.5523 8 15V13C8 12.4477 7.55228 12 7 12H5Z" fill="currentColor" />
-      </svg>
-    ),
-  },
-  {
-    name: 'Top Trades',
-    href: '/leaderboard',
-    icon: (
-      <svg width="18" height="18" viewBox="0 0 20 20" fill="none" xmlns="http://www.w3.org/2000/svg">
-        <path d="M10 2L12.09 7.26L18 8.27L14 12.14L14.81 18.02L10 15.77L5.19 18.02L6 12.14L2 8.27L7.91 7.26L10 2Z" fill="currentColor" />
       </svg>
     ),
   },
@@ -90,6 +60,26 @@ const navItems = [
       </svg>
     ),
   },
+  // ── Group 2: Tools ──
+  {
+    name: 'Top Trades',
+    href: '/leaderboard',
+    icon: (
+      <svg width="18" height="18" viewBox="0 0 20 20" fill="none" xmlns="http://www.w3.org/2000/svg">
+        <path d="M10 2L12.09 7.26L18 8.27L14 12.14L14.81 18.02L10 15.77L5.19 18.02L6 12.14L2 8.27L7.91 7.26L10 2Z" fill="currentColor" />
+      </svg>
+    ),
+  },
+  {
+    name: 'Pairs',
+    href: '/pairs',
+    icon: (
+      <svg width="18" height="18" viewBox="0 0 20 20" fill="none" xmlns="http://www.w3.org/2000/svg">
+        <circle cx="7" cy="7" r="4" stroke="currentColor" strokeWidth="2" fill="none" />
+        <circle cx="13" cy="13" r="4" stroke="currentColor" strokeWidth="2" fill="none" />
+      </svg>
+    ),
+  },
   {
     name: 'Sentinel',
     href: '/brain',
@@ -101,7 +91,7 @@ const navItems = [
     ),
   },
   {
-    name: 'Settings',
+    name: 'Setting',
     href: '/settings',
     icon: (
       <svg width="18" height="18" viewBox="0 0 20 20" fill="none" xmlns="http://www.w3.org/2000/svg">
@@ -118,10 +108,10 @@ const navItems = [
 
 // Bottom nav items — subset for mobile
 const bottomNavItems = [
-  { name: 'Dashboard', href: '/', icon: navItems[0].icon },
-  { name: 'Trades', href: '/trades', icon: navItems[1].icon },
-  { name: 'Top Trades', href: '/leaderboard', icon: navItems[3].icon },
-  { name: 'Settings', href: '/settings', icon: navItems[5].icon },
+  { name: 'Overview', href: '/', icon: navItems[0].icon },
+  { name: 'Trade', href: '/trades', icon: navItems[1].icon },
+  { name: 'Top Trades', href: '/leaderboard', icon: navItems[4].icon },
+  { name: 'Setting', href: '/settings', icon: navItems[7].icon },
 ];
 
 export function Sidebar() {
