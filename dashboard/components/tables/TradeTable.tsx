@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useMemo, useCallback, useEffect } from 'react';
+import { useState, useMemo, useCallback, useEffect, useRef } from 'react';
 import type { Trade, Strategy, Exchange, PositionType } from '@/lib/types';
 import {
   formatCurrency,
@@ -303,6 +303,10 @@ export default function TradeTable({ trades }: TradeTableProps) {
   const { strategyLog } = useSupabase();
   const hasOpenTrades = trades.some((t) => t.status === 'open');
   const livePrices = useLivePrices(hasOpenTrades);
+
+  // -- Scroll sync refs for top + bottom scrollbars ------------------------
+  const topScrollRef = useRef<HTMLDivElement>(null);
+  const tableScrollRef = useRef<HTMLDivElement>(null);
 
   // -- Live timer for open trade hold times --------------------------------
   const [now, setNow] = useState(Date.now());
@@ -821,7 +825,27 @@ export default function TradeTable({ trades }: TradeTableProps) {
       {/* Desktop table                                                      */}
       {/* ----------------------------------------------------------------- */}
       <div className="hidden md:block bg-card overflow-hidden rounded-xl border border-zinc-800">
-        <div className="overflow-x-auto scrollbar-visible">
+        {/* Top scrollbar — mirrors the table scroll */}
+        <div
+          ref={topScrollRef}
+          className="overflow-x-auto scrollbar-visible"
+          onScroll={() => {
+            if (tableScrollRef.current && topScrollRef.current) {
+              tableScrollRef.current.scrollLeft = topScrollRef.current.scrollLeft;
+            }
+          }}
+        >
+          <div style={{ width: '1700px', height: '1px' }} />
+        </div>
+        <div
+          ref={tableScrollRef}
+          className="overflow-x-auto scrollbar-visible"
+          onScroll={() => {
+            if (topScrollRef.current && tableScrollRef.current) {
+              topScrollRef.current.scrollLeft = tableScrollRef.current.scrollLeft;
+            }
+          }}
+        >
           <table className="w-full min-w-[1700px] text-sm">
             {/* Header */}
             <thead>
