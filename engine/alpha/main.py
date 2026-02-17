@@ -167,15 +167,15 @@ class AlphaBot:
                     market_analyzer=self.delta_analyzer,
                 )
 
-        # Register scalp strategies — Binance spot (same signals, no leverage, long-only)
-        if self.binance and self.pairs:
-            for pair in self.pairs:
-                self._scalp_strategies[pair] = ScalpStrategy(
-                    pair, self.executor, self.risk_manager,
-                    exchange=self.binance,
-                    is_futures=False,
-                    market_analyzer=self.analyzer,
-                )
+        # Register scalp strategies — Binance spot — DISABLED FOR NOW
+        # if self.binance and self.pairs:
+        #     for pair in self.pairs:
+        #         self._scalp_strategies[pair] = ScalpStrategy(
+        #             pair, self.executor, self.risk_manager,
+        #             exchange=self.binance,
+        #             is_futures=False,
+        #             market_analyzer=self.analyzer,
+        #         )
 
         # Options overlay DISABLED — not actively trading, was interfering with scalp
         # Re-enable when ready by uncommenting the block below.
@@ -215,20 +215,21 @@ class AlphaBot:
         # Start WebSocket price feed for real-time exit checks
         try:
             binance_ws_exchange = None
-            if config.binance.api_key:
-                import ccxt.pro as ccxtpro
-                binance_ws_exchange = ccxtpro.binance({
-                    "apiKey": config.binance.api_key,
-                    "secret": config.binance.secret,
-                    "enableRateLimit": True,
-                    "options": {"defaultType": "spot"},
-                })
+            # Binance WS — DISABLED (no spot strategies active)
+            # if config.binance.api_key:
+            #     import ccxt.pro as ccxtpro
+            #     binance_ws_exchange = ccxtpro.binance({
+            #         "apiKey": config.binance.api_key,
+            #         "secret": config.binance.secret,
+            #         "enableRateLimit": True,
+            #         "options": {"defaultType": "spot"},
+            #     })
 
             self._price_feed = PriceFeed(
                 strategies=self._scalp_strategies,
                 binance_exchange=binance_ws_exchange,
                 delta_pairs=self.delta_pairs,
-                binance_pairs=self.pairs,
+                binance_pairs=[],  # Binance disabled for now
                 delta_testnet=config.delta.testnet,
             )
             await self._price_feed.start()
