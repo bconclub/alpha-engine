@@ -60,6 +60,28 @@ After 30+ minutes with no entry, thresholds loosen by 20%:
 - Volume: 0.8x -> 0.64x
 - RSI range widens
 
+### Directional Signal Counting
+
+Each signal is counted separately for bull and bear directions. The 3/4 gate applies to the **directional** count, not a combined total.
+
+**Dashboard shows both sides:**
+- `Bull 3/4` (green bar) — 3 signals aligned bullish
+- `Bear 1/4` (red bar) — 1 signal aligned bearish
+- The active side (the one that would trigger entry) is **bold + colored**
+
+**Per-signal direction rules (Core 4):**
+
+| Signal | Bull Condition | Bear Condition |
+|--------|---------------|----------------|
+| MOM | momentum_60s >= +0.08% | momentum_60s <= -0.08% |
+| VOL | vol_ratio >= 0.8x AND momentum > 0 | vol_ratio >= 0.8x AND momentum < 0 |
+| RSI | RSI(14) < 35 | RSI(14) > 65 |
+| BB | price_position <= 0.15 (bottom 15%) | price_position >= 0.85 (top 15%) |
+
+The dashboard indicator dots (MOM, VOL, RSI, BB) show only the **active side's** signals. A SHORT display will never show RSI=42 as active because RSI at 42 does not meet the bear condition (>65).
+
+**Data flow:** `scalp.py` → `last_signal_state` (with `bull_count`, `bear_count`, directional booleans) → `main.py` → `strategy_log` DB → Dashboard `TriggerProximity.tsx`
+
 ---
 
 ## Setup Classification

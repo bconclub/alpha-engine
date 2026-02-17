@@ -72,10 +72,12 @@ export interface StrategyLog {
   // Signal state from bot's 1m scalp strategy (written by engine)
   signal_count?: number;   // 0-4: how many of 4 signals are active
   signal_side?: string;    // "long", "short", or null (scanning)
-  signal_mom?: boolean;    // momentum signal active
-  signal_vol?: boolean;    // volume spike signal active
-  signal_rsi?: boolean;    // RSI extreme signal active
-  signal_bb?: boolean;     // BB mean-reversion signal active
+  signal_mom?: boolean;    // momentum signal active (for active side)
+  signal_vol?: boolean;    // volume spike signal active (for active side)
+  signal_rsi?: boolean;    // RSI extreme signal active (for active side)
+  signal_bb?: boolean;     // BB mean-reversion signal active (for active side)
+  bull_count?: number;     // 0-11: how many signals fire bullish
+  bear_count?: number;     // 0-11: how many signals fire bearish
 }
 
 export interface BotStatus {

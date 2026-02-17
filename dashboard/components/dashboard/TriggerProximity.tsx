@@ -36,6 +36,8 @@ interface TriggerInfo {
   signalSide: 'long' | 'short' | null;
   indicators: IndicatorStatus[];   // 4 indicators for the active side
   signalCount: number;
+  bullCount: number;               // directional bull signal count
+  bearCount: number;               // directional bear signal count
   // Overall
   overallStatus: string;
   statusColor: string;
@@ -86,6 +88,8 @@ function computeTrigger(log: StrategyLog): TriggerInfo {
     const signalCount = log.signal_count ?? 0;
     const signalSide = (log.signal_side === 'long' || log.signal_side === 'short')
       ? log.signal_side : null;
+    const bullCount = log.bull_count ?? 0;
+    const bearCount = log.bear_count ?? 0;
 
     const indicators: IndicatorStatus[] = [
       { active: log.signal_mom === true, label: 'MOM' },
@@ -114,7 +118,7 @@ function computeTrigger(log: StrategyLog): TriggerInfo {
     return {
       pair, exchange, isFutures, hasData,
       rsi, volumeRatio, priceChangePct, currentPrice, bbUpper, bbLower,
-      trend, signalSide, indicators, signalCount,
+      trend, signalSide, indicators, signalCount, bullCount, bearCount,
       overallStatus, statusColor,
       activePosition: null,
     };
@@ -167,6 +171,8 @@ function computeTrigger(log: StrategyLog): TriggerInfo {
   const bestLong = longCount;
   const bestShort = isFutures ? shortCount : 0;
   const signalCount = Math.max(bestLong, bestShort);
+  const bullCount = bestLong;
+  const bearCount = bestShort;
   const signalSide = bestLong >= bestShort
     ? (bestLong > 0 ? 'long' as const : null)
     : (bestShort > 0 ? 'short' as const : null);
@@ -192,17 +198,18 @@ function computeTrigger(log: StrategyLog): TriggerInfo {
   return {
     pair, exchange, isFutures, hasData,
     rsi, volumeRatio, priceChangePct, currentPrice, bbUpper, bbLower,
-    trend, signalSide, indicators, signalCount,
+    trend, signalSide, indicators, signalCount, bullCount, bearCount,
     overallStatus, statusColor,
     activePosition: null,
   };
 }
 
 // ── Signal bar (fills based on signal count) ────────────────────────────
-function SignalBar({ count }: { count: number }) {
+function SignalBar({ count, variant = 'bull' }: { count: number; variant?: 'bull' | 'bear' }) {
   const filled = (count / 4) * 100;
+  const readyColor = variant === 'bear' ? '#ff1744' : '#00c853';
   const color =
-    count >= 3 ? '#00c853' :
+    count >= 3 ? readyColor :
     count >= 1 ? '#ffd600' :
     '#71717a';
 
@@ -253,44 +260,6 @@ function TrendBadge({ trend }: { trend: 'bullish' | 'bearish' | 'neutral' }) {
     )}>
       {cfg.icon} {cfg.label}
     </span>
-  );
-}
-
-// ── Signal row: side label + bar + dots ──────────────────────────────
-function SignalRow({
-  side,
-  indicators,
-  count,
-}: {
-  side: string;
-  indicators: IndicatorStatus[];
-  count: number;
-}) {
-  const countColor = count >= 3 ? 'text-[#00c853]'
-    : count >= 1 ? 'text-[#ffd600]'
-    : 'text-zinc-600';
-
-  const suffix = count >= 3 ? `${count}/4 \u2713` : `${count}/4`;
-
-  return (
-    <div className="space-y-1">
-      {/* Bar row */}
-      <div className="flex items-center gap-2">
-        <span className="text-[10px] text-zinc-500 w-8 shrink-0">{side}</span>
-        <SignalBar count={count} />
-        <span className={cn('text-[10px] font-mono w-16 text-right', countColor)}>
-          {suffix}
-        </span>
-      </div>
-      {/* Dots row */}
-      <div className="flex items-center gap-2 ml-10">
-        <div className="flex items-center gap-2">
-          {indicators.map((ind, i) => (
-            <Dot key={i} active={ind.active} label={ind.label} />
-          ))}
-        </div>
-      </div>
-    </div>
   );
 }
 
@@ -363,11 +332,6 @@ export function TriggerProximity() {
             const posPnl = t.activePosition?.current_pnl;
             const isTrailing = posState === 'trailing';
 
-            // Side label for the signal row
-            const sideLabel = t.signalSide === 'long' ? 'Long'
-              : t.signalSide === 'short' ? 'Short'
-              : 'Scan';
-
             return (
             <div
               key={`${t.pair}-${t.exchange}`}
@@ -421,12 +385,49 @@ export function TriggerProximity() {
 
               {t.hasData ? (
                 <div className={cn('space-y-2.5', hasActivePos && 'opacity-40')}>
-                  {/* Signal row: shows the active side's signals */}
-                  <SignalRow
-                    side={sideLabel}
-                    indicators={t.indicators}
-                    count={t.signalCount}
-                  />
+                  {/* Dual signal rows: bull + bear */}
+                  <div className="space-y-1.5">
+                    {/* Bull row */}
+                    <div className="flex items-center gap-2">
+                      <span className={cn(
+                        'text-[10px] font-mono w-10 shrink-0',
+                        t.signalSide === 'long' ? 'text-[#00c853] font-bold' : 'text-zinc-600',
+                      )}>
+                        Bull
+                      </span>
+                      <SignalBar count={t.bullCount} />
+                      <span className={cn(
+                        'text-[10px] font-mono w-8 text-right',
+                        t.bullCount >= 3 ? 'text-[#00c853]' : t.bullCount >= 1 ? 'text-[#ffd600]' : 'text-zinc-600',
+                      )}>
+                        {t.bullCount}/4
+                      </span>
+                    </div>
+                    {/* Bear row (futures only) */}
+                    {t.isFutures && (
+                      <div className="flex items-center gap-2">
+                        <span className={cn(
+                          'text-[10px] font-mono w-10 shrink-0',
+                          t.signalSide === 'short' ? 'text-[#ff1744] font-bold' : 'text-zinc-600',
+                        )}>
+                          Bear
+                        </span>
+                        <SignalBar count={t.bearCount} variant="bear" />
+                        <span className={cn(
+                          'text-[10px] font-mono w-8 text-right',
+                          t.bearCount >= 3 ? 'text-[#ff1744]' : t.bearCount >= 1 ? 'text-[#ffd600]' : 'text-zinc-600',
+                        )}>
+                          {t.bearCount}/4
+                        </span>
+                      </div>
+                    )}
+                    {/* Active side indicator dots */}
+                    <div className="flex items-center gap-2 ml-12">
+                      {t.indicators.map((ind, i) => (
+                        <Dot key={i} active={ind.active} label={ind.label} />
+                      ))}
+                    </div>
+                  </div>
                   {/* Compact values */}
                   <div className="flex gap-3 pt-1 border-t border-zinc-800/50">
                     {t.rsi != null && (

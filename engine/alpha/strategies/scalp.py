@@ -427,6 +427,8 @@ class ScalpStrategy(BaseStrategy):
 
         # Shared signal state (read by options_scalp strategy)
         self.last_signal_state: dict[str, Any] | None = None
+        # Directional signal breakdown (set by _evaluate_signals, spread into last_signal_state)
+        self._last_signal_breakdown: dict[str, Any] = {}
 
         # BB Squeeze tracking (signal #8)
         self._squeeze_tick_count: int = 0
@@ -851,6 +853,7 @@ class ScalpStrategy(BaseStrategy):
                     "strength": signal_strength, "trend_15m": trend_15m,
                     "rsi": rsi_now, "momentum_60s": momentum_60s,
                     "current_price": current_price, "timestamp": time.monotonic(),
+                    **self._last_signal_breakdown,
                 }
                 return signals
 
@@ -867,6 +870,7 @@ class ScalpStrategy(BaseStrategy):
                     "strength": signal_strength, "trend_15m": trend_15m,
                     "rsi": rsi_now, "momentum_60s": momentum_60s,
                     "current_price": current_price, "timestamp": time.monotonic(),
+                    **self._last_signal_breakdown,
                 }
                 return signals
 
@@ -887,6 +891,7 @@ class ScalpStrategy(BaseStrategy):
                 "momentum_60s": momentum_60s,
                 "current_price": current_price,
                 "timestamp": time.monotonic(),
+                **self._last_signal_breakdown,
             }
             # Clear post-streak gate on successful entry (first trade back done)
             if ScalpStrategy._pair_post_streak.get(self._base_asset, False):
@@ -914,6 +919,7 @@ class ScalpStrategy(BaseStrategy):
                 "momentum_60s": momentum_60s,
                 "current_price": current_price,
                 "timestamp": time.monotonic(),
+                **self._last_signal_breakdown,
             }
             # Log scanning status every 30 seconds with pass/fail per condition
             if self._tick_count % 6 == 0:
@@ -1216,6 +1222,25 @@ class ScalpStrategy(BaseStrategy):
                 vol_drop = (1 - recent_vol / older_vol) * 100 if older_vol > 0 else 0
                 bull_signals.append(f"VOLDIV:price↓vol↓{vol_drop:.0f}%")
 
+        # ── Build directional signal breakdown for dashboard ────────────────
+        # Stored on self so last_signal_state can spread it in evaluate().
+        def _build_breakdown() -> dict[str, Any]:
+            return {
+                "bull_count": len(bull_signals),
+                "bear_count": len(bear_signals),
+                "bull_signals": list(bull_signals),
+                "bear_signals": list(bear_signals),
+                # Core-4 directional booleans (dashboard dots)
+                "bull_mom": any(s.startswith(("MOM:", "MOM5m:")) for s in bull_signals),
+                "bull_vol": any(s.startswith("VOL:") for s in bull_signals),
+                "bull_rsi": any(s.startswith("RSI:") for s in bull_signals),
+                "bull_bb": any(s.startswith(("BB:", "BBSQZ:")) for s in bull_signals),
+                "bear_mom": any(s.startswith(("MOM:", "MOM5m:")) for s in bear_signals),
+                "bear_vol": any(s.startswith("VOL:") for s in bear_signals),
+                "bear_rsi": any(s.startswith("RSI:") for s in bear_signals),
+                "bear_bb": any(s.startswith(("BB:", "BBSQZ:")) for s in bear_signals),
+            }
+
         # ── RSI EXTREME OVERRIDE: RSI <30 or >70 → enter immediately ─────
         # Strong oversold/overbought overrides all other conditions.
         if rsi_now < self.RSI_OVERRIDE_LONG:
@@ -1224,6 +1249,7 @@ class ScalpStrategy(BaseStrategy):
             if bull_signals:
                 reason += f" +{'+'.join(bull_signals)}"
             strength = max(len(bull_signals), 2)  # at least 2/4 equivalent
+            self._last_signal_breakdown = _build_breakdown()
             return ("long", reason, True, strength)
 
         if rsi_now > self.RSI_OVERRIDE_SHORT and can_short:
@@ -1231,6 +1257,7 @@ class ScalpStrategy(BaseStrategy):
             if bear_signals:
                 reason += f" +{'+'.join(bear_signals)}"
             strength = max(len(bear_signals), 2)
+            self._last_signal_breakdown = _build_breakdown()
             return ("short", reason, True, strength)
 
         # ── Check required signals (LONG) — trend-weighted ────────────────
@@ -1240,6 +1267,7 @@ class ScalpStrategy(BaseStrategy):
             req_tag = f" req={required_long}/4" if required_long > 2 else ""
             reason = f"LONG {len(bull_signals)}/4: {' + '.join(bull_signals)} [15m={trend_15m}]{req_tag}{widen_tag}"
             use_limit = "MOM" not in bull_signals[0]
+            self._last_signal_breakdown = _build_breakdown()
             return ("long", reason, use_limit, len(bull_signals))
 
         # ── Check required signals (SHORT) — trend-weighted ───────────────
@@ -1247,8 +1275,10 @@ class ScalpStrategy(BaseStrategy):
             req_tag = f" req={required_short}/4" if required_short > 2 else ""
             reason = f"SHORT {len(bear_signals)}/4: {' + '.join(bear_signals)} [15m={trend_15m}]{req_tag}{widen_tag}"
             use_limit = "MOM" not in bear_signals[0]
+            self._last_signal_breakdown = _build_breakdown()
             return ("short", reason, use_limit, len(bear_signals))
 
+        self._last_signal_breakdown = _build_breakdown()
         return None
 
     # ======================================================================

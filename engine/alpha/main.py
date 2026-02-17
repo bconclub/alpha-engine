@@ -437,12 +437,32 @@ class AlphaBot:
                     sig = scalp.last_signal_state if scalp else None
                     sig_count = sig.get("strength", 0) if sig else 0
                     sig_side = sig.get("side") if sig else None  # "long", "short", or None
-                    sig_reason = sig.get("reason") or ""
-                    # Parse individual signals from reason string like "LONG 3/4: MOM:+0.18% + VOL:1.5x + RSI:35<40"
-                    sig_mom = "MOM:" in sig_reason
-                    sig_vol = "VOL:" in sig_reason
-                    sig_rsi = "RSI:" in sig_reason
-                    sig_bb = "BB:" in sig_reason
+                    bull_count = sig.get("bull_count", 0) if sig else 0
+                    bear_count = sig.get("bear_count", 0) if sig else 0
+
+                    # Directional core-4 booleans — only show signals matching the active side
+                    if sig_side == "long":
+                        sig_mom = sig.get("bull_mom", False) if sig else False
+                        sig_vol = sig.get("bull_vol", False) if sig else False
+                        sig_rsi = sig.get("bull_rsi", False) if sig else False
+                        sig_bb = sig.get("bull_bb", False) if sig else False
+                    elif sig_side == "short":
+                        sig_mom = sig.get("bear_mom", False) if sig else False
+                        sig_vol = sig.get("bear_vol", False) if sig else False
+                        sig_rsi = sig.get("bear_rsi", False) if sig else False
+                        sig_bb = sig.get("bear_bb", False) if sig else False
+                    else:
+                        # No signal — pick stronger side for display
+                        if bull_count >= bear_count:
+                            sig_mom = sig.get("bull_mom", False) if sig else False
+                            sig_vol = sig.get("bull_vol", False) if sig else False
+                            sig_rsi = sig.get("bull_rsi", False) if sig else False
+                            sig_bb = sig.get("bull_bb", False) if sig else False
+                        else:
+                            sig_mom = sig.get("bear_mom", False) if sig else False
+                            sig_vol = sig.get("bear_vol", False) if sig else False
+                            sig_rsi = sig.get("bear_rsi", False) if sig else False
+                            sig_bb = sig.get("bear_bb", False) if sig else False
 
                     await self.db.log_strategy_selection({
                         "timestamp": iso_now(),
@@ -477,6 +497,8 @@ class AlphaBot:
                         "signal_vol": sig_vol,
                         "signal_rsi": sig_rsi,
                         "signal_bb": sig_bb,
+                        "bull_count": bull_count,
+                        "bear_count": bear_count,
                     })
                 except Exception:
                     logger.debug("Failed to log strategy selection for %s", pair)
