@@ -181,12 +181,12 @@ class ScalpStrategy(BaseStrategy):
     check_interval_sec = 5  # 5 second ticks — patient, not frantic
 
     # ── Per-pair SL distances — FIXED on entry, locked for 3 min ─────
-    STOP_LOSS_PCT = 0.35              # default fallback
+    STOP_LOSS_PCT = 0.25              # default fallback (was 0.35)
     MIN_TP_PCT = 1.50                 # default TP
     PAIR_SL_FLOOR: dict[str, float] = {
-        "BTC": 0.40,   # BTC: was 0.30, widened to avoid noise SL
-        "ETH": 0.45,   # ETH: was 0.35, widened to avoid noise SL
-        "XRP": 0.50,   # XRP: was 0.40, widened to avoid noise SL
+        "BTC": 0.25,   # BTC: 0.25% price = 5% capital at 20x (was 0.40 = 8% capital)
+        "ETH": 0.25,   # ETH: 0.25% price = 5% capital at 20x (was 0.45 = 9% capital)
+        "XRP": 0.25,   # XRP: 0.25% price = 5% capital at 20x (was 0.50 = 10% capital)
     }
     PAIR_TP_FLOOR: dict[str, float] = {
         "BTC": 1.50,
@@ -533,7 +533,7 @@ class ScalpStrategy(BaseStrategy):
             self._tp_pct = max(tp_floor, atr_pct * self.ATR_TP_MULTIPLIER)
 
             # Safety cap: spot allows wider SL/TP (no leverage risk)
-            sl_cap = 3.00 if not self.is_futures else 1.50
+            sl_cap = 3.00 if not self.is_futures else 0.50
             tp_cap = 6.00 if not self.is_futures else 5.00
             self._sl_pct = min(self._sl_pct, sl_cap)
             self._tp_pct = min(self._tp_pct, tp_cap)
