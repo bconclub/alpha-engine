@@ -4,6 +4,7 @@ import { useState, useEffect } from 'react';
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
 import { useSupabase } from '@/components/providers/SupabaseProvider';
+import { useSidebar } from '@/components/providers/SidebarProvider';
 import { cn } from '@/lib/utils';
 
 const navItems = [
@@ -116,6 +117,7 @@ const bottomNavItems = [
 export function Sidebar() {
   const pathname = usePathname();
   const { isConnected } = useSupabase();
+  const { collapsed, toggle } = useSidebar();
   const [drawerOpen, setDrawerOpen] = useState(false);
 
   // Close drawer on route change
@@ -135,7 +137,7 @@ export function Sidebar() {
 
   return (
     <>
-      {/* ── Mobile top bar ──────────────────────────────────────────────── */}
+      {/* -- Mobile top bar -------------------------------------------------- */}
       <div className="fixed top-0 left-0 right-0 z-50 flex items-center justify-between border-b border-zinc-800 bg-[#0a0a0f] px-4 py-3 md:hidden">
         <button
           onClick={() => setDrawerOpen(true)}
@@ -157,7 +159,7 @@ export function Sidebar() {
         <div className="w-9" /> {/* spacer for centering */}
       </div>
 
-      {/* ── Mobile drawer overlay ───────────────────────────────────────── */}
+      {/* -- Mobile drawer overlay ------------------------------------------- */}
       {drawerOpen && (
         <div className="fixed inset-0 z-50 md:hidden">
           {/* Backdrop */}
@@ -230,20 +232,35 @@ export function Sidebar() {
         </div>
       )}
 
-      {/* ── Desktop sidebar ─────────────────────────────────────────────── */}
-      <aside className="fixed left-0 top-0 z-40 hidden h-full w-56 flex-col border-r border-zinc-800 bg-[#0a0a0f] md:flex">
+      {/* -- Desktop sidebar ------------------------------------------------- */}
+      <aside
+        className={cn(
+          'fixed left-0 top-0 z-40 hidden h-full flex-col border-r border-zinc-800 bg-[#0a0a0f] md:flex transition-all duration-200',
+          collapsed ? 'w-14' : 'w-56',
+        )}
+      >
         {/* Logo */}
-        <div className="flex items-center gap-2.5 px-5 py-5 border-b border-zinc-800/50">
+        <div className={cn(
+          'flex items-center border-b border-zinc-800/50 transition-all duration-200',
+          collapsed ? 'justify-center px-2 py-5' : 'gap-2.5 px-5 py-5',
+        )}>
           <span className={cn(
-            'inline-block h-2 w-2 rounded-full',
+            'inline-block h-2 w-2 rounded-full flex-shrink-0',
             isConnected ? 'bg-[#00c853] animate-pulse' : 'bg-red-500',
           )} />
-          <span className="text-lg font-bold tracking-widest text-white">ALPHA</span>
-          <span className="text-[10px] font-mono text-zinc-600 ml-auto">v{process.env.APP_VERSION ?? '?'}</span>
+          {!collapsed && (
+            <>
+              <span className="text-lg font-bold tracking-widest text-white">ALPHA</span>
+              <span className="text-[10px] font-mono text-zinc-600 ml-auto">v{process.env.APP_VERSION ?? '?'}</span>
+            </>
+          )}
         </div>
 
         {/* Navigation */}
-        <nav className="flex-1 px-3 py-4 space-y-0.5">
+        <nav className={cn(
+          'flex-1 py-4 space-y-0.5',
+          collapsed ? 'px-1.5' : 'px-3',
+        )}>
           {navItems.map((item) => {
             const isActive = pathname === item.href;
 
@@ -251,8 +268,13 @@ export function Sidebar() {
               <Link
                 key={item.href}
                 href={item.href}
+                title={collapsed ? item.name : undefined}
+                onClick={() => { if (!collapsed) toggle(); }}
                 className={cn(
-                  'flex items-center gap-3 rounded-lg px-3 py-2.5 text-sm font-medium transition-all duration-150',
+                  'flex items-center rounded-lg text-sm font-medium transition-all duration-150',
+                  collapsed
+                    ? 'justify-center px-0 py-2.5'
+                    : 'gap-3 px-3 py-2.5',
                   isActive
                     ? 'bg-[#2196f3]/10 text-[#2196f3]'
                     : 'text-zinc-500 hover:text-zinc-300 hover:bg-zinc-800/40',
@@ -264,33 +286,64 @@ export function Sidebar() {
                 )}>
                   {item.icon}
                 </span>
-                {item.name}
-                {isActive && (
-                  <span className="ml-auto w-1 h-4 rounded-full bg-[#2196f3]" />
+                {!collapsed && (
+                  <>
+                    {item.name}
+                    {isActive && (
+                      <span className="ml-auto w-1 h-4 rounded-full bg-[#2196f3]" />
+                    )}
+                  </>
                 )}
               </Link>
             );
           })}
         </nav>
 
+        {/* Toggle button */}
+        <button
+          onClick={toggle}
+          className={cn(
+            'flex items-center justify-center mx-auto mb-2 w-8 h-8 rounded-lg text-zinc-500 hover:text-zinc-300 hover:bg-zinc-800/60 transition-colors',
+          )}
+          title={collapsed ? 'Expand sidebar' : 'Collapse sidebar'}
+        >
+          <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
+            {collapsed ? (
+              <path d="M5 2l5 5-5 5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+            ) : (
+              <path d="M9 2L4 7l5 5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+            )}
+          </svg>
+        </button>
+
         {/* Footer */}
-        <div className="px-5 py-4 border-t border-zinc-800/50">
-          <div className="flex items-center gap-2">
+        <div className={cn(
+          'border-t border-zinc-800/50 transition-all duration-200',
+          collapsed ? 'px-2 py-3' : 'px-5 py-4',
+        )}>
+          <div className={cn(
+            'flex items-center',
+            collapsed ? 'justify-center' : 'gap-2',
+          )}>
             <span className={cn(
-              'w-1.5 h-1.5 rounded-full',
+              'w-1.5 h-1.5 rounded-full flex-shrink-0',
               isConnected ? 'bg-[#00c853]' : 'bg-red-500',
             )} />
-            <span className="text-[10px] text-zinc-600">
-              {isConnected ? 'Realtime active' : 'Disconnected'}
-            </span>
+            {!collapsed && (
+              <span className="text-[10px] text-zinc-600">
+                {isConnected ? 'Realtime active' : 'Disconnected'}
+              </span>
+            )}
           </div>
-          <p className="text-[10px] text-zinc-700 mt-1">
-            Dashboard v{process.env.APP_VERSION ?? '?'}
-          </p>
+          {!collapsed && (
+            <p className="text-[10px] text-zinc-700 mt-1">
+              Dashboard v{process.env.APP_VERSION ?? '?'}
+            </p>
+          )}
         </div>
       </aside>
 
-      {/* ── Mobile bottom nav bar ───────────────────────────────────────── */}
+      {/* -- Mobile bottom nav bar ------------------------------------------- */}
       <nav className="fixed bottom-0 left-0 right-0 z-50 flex items-stretch border-t border-zinc-800 bg-[#0a0a0f] md:hidden pb-safe">
         {bottomNavItems.map((item) => {
           const isActive = pathname === item.href;

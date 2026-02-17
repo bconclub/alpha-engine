@@ -1,7 +1,9 @@
 import type { Metadata } from 'next';
 import './globals.css';
 import { SupabaseProvider } from '@/components/providers/SupabaseProvider';
+import { SidebarProvider } from '@/components/providers/SidebarProvider';
 import { Sidebar } from '@/components/ui/Sidebar';
+import { MainContent } from '@/components/ui/MainContent';
 
 export const metadata: Metadata = {
   title: 'Alpha Dashboard — Trading Command Center',
@@ -20,17 +22,15 @@ export default function RootLayout({
     <html lang="en" className="dark">
       <body className="bg-[#0d1117] text-white antialiased">
         <SupabaseProvider>
-          <div className="min-h-screen">
-            {/* Left sidebar */}
-            <Sidebar />
+          <SidebarProvider>
+            <div className="min-h-screen">
+              {/* Left sidebar */}
+              <Sidebar />
 
-            {/* Main content — offset by sidebar width on desktop */}
-            <main className="ml-0 md:ml-56 min-h-screen pt-14 md:pt-0 pb-16 md:pb-0 w-auto">
-              <div className="max-w-[1920px] mx-auto px-3 py-3 md:px-5 md:py-4">
-                {children}
-              </div>
-            </main>
-          </div>
+              {/* Main content — offset by sidebar width on desktop */}
+              <MainContent>{children}</MainContent>
+            </div>
+          </SidebarProvider>
         </SupabaseProvider>
       </body>
     </html>
