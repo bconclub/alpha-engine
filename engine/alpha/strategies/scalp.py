@@ -29,7 +29,7 @@ CHANGES FROM v5.8 (in v5.9):
   - Trail activates at +0.15% (was 0.35%) — any green trade gets trailed
   - Initial trail distance: 0.15% (was 0.20%) — tighter scalp lock
   - Phase 1 skip at +0.5% peak (was 1.0%) — graduate faster
-  - Move SL to entry at +0.20% (was 0.30%) — breakeven protection earlier
+  - NET breakeven at +0.30% peak (covers fees) — only after trail has chance to catch
   - Pullback exit at 30% retracement (was 40%) — don't give back profits
   - ALL trail tiers tightened: +2%=0.40, +3%=0.50, +5%=0.75
   - New +0.15% tier for instant green protection
@@ -68,7 +68,7 @@ EXIT — 3-PHASE SYSTEM (AGGRESSIVE PROFIT LOCK):
     - EXCEPTION: if peak PnL >= +0.5%, skip to Phase 2 immediately
     - 30s is enough for fill bounce to settle, SL still protects us
   PHASE 2 (30s-10 min): WATCH + TRAIL
-    - If PnL > +0.20% → move SL to entry (breakeven protection)
+    - If PnL > +0.30% → breakeven at entry+fees (net breakeven protection)
     - If PnL > +0.15% → activate trailing (0.15% tight distance)
     - Trail tiers tightened: +2%=0.40%, +3%=0.50%, +5%=0.75%
     - Pullback exit at 30% retracement from peak
@@ -207,7 +207,7 @@ class ScalpStrategy(BaseStrategy):
     FLATLINE_MIN_MOVE_PCT = 0.05      # "flat" means < 0.05% total move
 
     # ── Phase 2: move SL to entry when profitable ─────────────────────
-    MOVE_SL_TO_ENTRY_PCT = 0.20       # move SL to entry at +0.20% profit (was 0.30)
+    MOVE_SL_TO_ENTRY_PCT = 0.30       # breakeven only after trail (0.25%) has chance to catch
 
     # ── Trailing (activates in phase 2+) ──────────────────────────────
     TRAILING_ACTIVATE_PCT = 0.25      # activate at +0.25% price = +5% capital at 20x (was 0.30)
@@ -1507,16 +1507,20 @@ class ScalpStrategy(BaseStrategy):
         # PHASE 2 (3-10 min): WATCH — move SL to entry, trail, reversals
         # ══════════════════════════════════════════════════════════════
         if hold_seconds < self.PHASE2_SECONDS:
-            # SL moved to entry at +0.3% (only exit here if price returns to entry)
+            # Breakeven: peaked above threshold, price returned to entry + fees
+            # Uses NET breakeven (covers round-trip fees) so "breakeven" isn't a loss
             if self._peak_unrealized_pnl >= self.MOVE_SL_TO_ENTRY_PCT and not self._trailing_active:
-                at_entry = (
-                    (side == "long" and current_price <= self.entry_price) or
-                    (side == "short" and current_price >= self.entry_price)
-                )
-                if at_entry:
+                fee_adj = config.delta.mixed_round_trip  # 0.00083 (0.083%)
+                if side == "long":
+                    be_price = self.entry_price * (1 + fee_adj)
+                    at_be = current_price <= be_price
+                else:
+                    be_price = self.entry_price * (1 - fee_adj)
+                    at_be = current_price >= be_price
+                if at_be:
                     self.logger.info(
-                        "[%s] BREAKEVEN — peaked +%.2f%%, back to entry | %ds in",
-                        self.pair, self._peak_unrealized_pnl, int(hold_seconds),
+                        "[%s] BREAKEVEN — peaked +%.2f%%, back to BE (entry%+.4f%%) | %ds in",
+                        self.pair, self._peak_unrealized_pnl, fee_adj * 100, int(hold_seconds),
                     )
                     return self._do_exit(current_price, pnl_pct, side, "BREAKEVEN", hold_seconds)
 
@@ -1722,14 +1726,17 @@ class ScalpStrategy(BaseStrategy):
             else:
                 return  # hands off — no WS exits except SL/ratchet/hard_tp
 
-        # ── PHASE 2+: breakeven (SL moved to entry after peak > +0.20%) ──
+        # ── PHASE 2+: breakeven (NET breakeven = entry + fees) ──
         if not exit_type and _in_phase2_plus:
             if self._peak_unrealized_pnl >= self.MOVE_SL_TO_ENTRY_PCT and not self._trailing_active:
-                at_entry = (
-                    (side == "long" and current_price <= self.entry_price) or
-                    (side == "short" and current_price >= self.entry_price)
-                )
-                if at_entry:
+                fee_adj = config.delta.mixed_round_trip  # 0.00083 (0.083%)
+                if side == "long":
+                    be_price = self.entry_price * (1 + fee_adj)
+                    at_be = current_price <= be_price
+                else:
+                    be_price = self.entry_price * (1 - fee_adj)
+                    at_be = current_price >= be_price
+                if at_be:
                     exit_type = "BREAKEVEN"
 
         # ── PHASE 2+: trailing (activate from PEAK, not current) ─────
