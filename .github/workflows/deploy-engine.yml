@@ -57,4 +57,9 @@ jobs:
             echo ">>> Checking service status..."
             systemctl status alpha-bot --no-pager
 
+            echo ">>> Verifying fixes deployed..."
+            echo "mom_direction occurrences: $(grep -c 'mom_direction' /root/alpha/engine/alpha/strategies/scalp.py)"
+            echo "_PROTECTED_EXIT_TYPES: $(grep -c '_PROTECTED_EXIT_TYPES' /root/alpha/engine/alpha/strategies/scalp.py)"
+            echo "DIRECTION BLOCK: $(grep -c 'DIRECTION BLOCK' /root/alpha/engine/alpha/strategies/scalp.py)"
+
             echo ">>> Deploy complete."
