@@ -330,7 +330,7 @@ class ScalpStrategy(BaseStrategy):
     PERF_WINDOW = 5                     # look at last 5 trades per pair
     PERF_LOW_WR_THRESHOLD = 0.20        # <20% WR in window → reduce to minimum
     PERF_HIGH_WR_THRESHOLD = 0.60       # >60% WR in window → boost allocation
-    MAX_POSITIONS = 2                   # max 2 simultaneous — focus capital
+    MAX_POSITIONS = 99                  # no hard cap — allocation % handles sizing naturally
     MAX_SPREAD_PCT = 0.15
 
     # ── Warmup — accept weaker signals for first 5 min after startup ────
@@ -891,23 +891,6 @@ class ScalpStrategy(BaseStrategy):
                         "[%s] STRENGTH GATE%s — %s needs %d/4+ but got %d/4, skipping",
                         self.pair, warmup_tag, self._base_asset, min_strength, signal_strength,
                     )
-                self.last_signal_state = {
-                    "side": side, "reason": reason,
-                    "strength": signal_strength, "trend_15m": trend_15m,
-                    "rsi": rsi_now, "momentum_60s": momentum_60s,
-                    "current_price": current_price, "timestamp": time.monotonic(),
-                    **self._last_signal_breakdown,
-                }
-                return signals
-
-            # ── 2ND POSITION: require 3/4+ signal strength ────────────
-            if total_scalp == 1 and signal_strength < self.MIN_STRENGTH_FOR_2ND:
-                if self._tick_count % 12 == 0:
-                    self.logger.info(
-                        "[%s] 2ND POS SKIPPED — strength %d/4 < %d required",
-                        self.pair, signal_strength, self.MIN_STRENGTH_FOR_2ND,
-                    )
-                # Still update signal state for options
                 self.last_signal_state = {
                     "side": side, "reason": reason,
                     "strength": signal_strength, "trend_15m": trend_15m,
@@ -2061,10 +2044,6 @@ class ScalpStrategy(BaseStrategy):
                 # High WR: boost by 20% (capped at 70%)
                 base_alloc = min(70.0, base_alloc * 1.20)
 
-        # 2nd position gets smaller share
-        if total_open >= 1:
-            base_alloc = base_alloc * 0.6  # 60% of normal for 2nd position
-
         return max(5.0, min(70.0, base_alloc))
 
     def _calculate_position_size_dynamic(
@@ -2077,7 +2056,6 @@ class ScalpStrategy(BaseStrategy):
         - XRP: 50% (best performer), ETH: 30%, BTC: 15%, SOL: 5%
         - Adaptive: if last 5 trades < 20% WR → reduce to minimum
         - Adaptive: if last 5 trades > 60% WR → boost 20%
-        - 2nd position: 60% of normal allocation
         """
         exchange_capital = self.risk_manager.get_exchange_capital(self._exchange_id)
         if exchange_capital <= 0:
