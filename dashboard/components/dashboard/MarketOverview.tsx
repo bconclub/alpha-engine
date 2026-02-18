@@ -3,37 +3,20 @@
 import { useMemo } from 'react';
 import { useSupabase } from '@/components/providers/SupabaseProvider';
 import { formatNumber, formatTimeAgo, cn } from '@/lib/utils';
-import type { StrategyLog, OpenPosition, SignalState } from '@/lib/types';
+import type { StrategyLog, OpenPosition } from '@/lib/types';
 
 // ── Types ───────────────────────────────────────────────────────────────
-
-/** Per-direction signal dot state (core 4: MOM, VOL, RSI, BB) */
-interface DirectionSignals {
-  mom: boolean;
-  vol: boolean;
-  rsi: boolean;
-  bb: boolean;
-  count: number;
-}
 
 interface AssetCard {
   asset: string;
   currentPrice: number | null;
   priceChange24h: number | null;
   priceChange1h: number | null;
-  priceChange15m: number | null;
-  direction: string | null;
   rsi: number | null;
   volumeRatio: number | null;
   bbPosition: string;
   activePosition: OpenPosition | null;
   lastTimestamp: string;
-  // Directional signal data (Fix 3)
-  bullSignals: DirectionSignals;
-  bearSignals: DirectionSignals;
-  // Entry signals for in-trade display (Fix 2)
-  entrySignals: DirectionSignals | null;
-  entryDirection: 'long' | 'short' | null;
 }
 
 // ── Helpers ─────────────────────────────────────────────────────────────
@@ -57,46 +40,6 @@ function determineBBPosition(
   return 'Mid';
 }
 
-/**
- * Build directional signals from signal_state rows for a given pair.
- * Each signal has a `direction` ('bull' | 'bear' | 'neutral') and `firing` boolean.
- */
-function buildDirectionSignals(
-  pairSignals: SignalState[],
-  dir: 'bull' | 'bear',
-): DirectionSignals {
-  const mom = pairSignals.some(
-    s => (s.signal_id === 'MOM_60S' || s.signal_id === 'MOM_5M') && s.firing && s.direction === dir,
-  );
-  const vol = pairSignals.some(
-    s => s.signal_id === 'VOL' && s.firing && s.direction === dir,
-  );
-  const rsi = pairSignals.some(
-    s => s.signal_id === 'RSI' && s.firing && s.direction === dir,
-  );
-  const bb = pairSignals.some(
-    s => (s.signal_id === 'BB' || s.signal_id === 'BBSQZ') && s.firing && s.direction === dir,
-  );
-  return { mom, vol, rsi, bb, count: +mom + +vol + +rsi + +bb };
-}
-
-/**
- * Parse entry signals from Trade.reason string.
- * Format: "LONG 3/4: MOM:+0.15% + VOL:1.5x + RSI:38<40 [15m=bullish]"
- * or      "SHORT 3/4: MOM:-0.20% + VOL:2.1x + BB:high@85% [15m=bearish]"
- */
-function parseEntrySignals(reason: string | undefined): DirectionSignals | null {
-  if (!reason) return null;
-  const upper = reason.toUpperCase();
-  const mom = upper.includes('MOM:') || upper.includes('MOM5M:');
-  const vol = upper.includes('VOL:');
-  const rsi = upper.includes('RSI:') || upper.includes('RSI-OVERRIDE');
-  const bb = upper.includes('BB:') || upper.includes('BBSQZ:');
-  const count = +mom + +vol + +rsi + +bb;
-  if (count === 0) return null;
-  return { mom, vol, rsi, bb, count };
-}
-
 // ── Sub-components ──────────────────────────────────────────────────────
 
 function PriceChange({ label, value }: { label: string; value: number | null }) {
@@ -109,96 +52,6 @@ function PriceChange({ label, value }: { label: string; value: number | null }) 
   );
 }
 
-/** Single signal dot with directional coloring */
-function SignalDot({
-  active,
-  label,
-  variant,
-  outlined,
-}: {
-  active: boolean;
-  label: string;
-  variant: 'bull' | 'bear';
-  outlined?: boolean;
-}) {
-  const activeColor = variant === 'bear' ? '#ff1744' : '#00c853';
-  return (
-    <div className="flex flex-col items-center gap-0.5">
-      <div
-        className={cn(
-          'w-2.5 h-2.5 rounded-full border transition-all duration-500',
-          active && !outlined
-            ? `shadow-[0_0_4px_rgba(${variant === 'bear' ? '255,23,68' : '0,200,83'},0.4)]`
-            : '',
-        )}
-        style={
-          active
-            ? outlined
-              ? { backgroundColor: 'transparent', borderColor: activeColor, borderWidth: 2 }
-              : { backgroundColor: activeColor, borderColor: activeColor }
-            : { backgroundColor: '#27272a', borderColor: '#3f3f46' }
-        }
-      />
-      <span
-        className={cn(
-          'text-[7px] font-mono leading-none',
-          active ? (outlined ? 'text-zinc-500' : `text-[${activeColor}]`) : 'text-zinc-600',
-        )}
-        style={active && !outlined ? { color: activeColor } : undefined}
-      >
-        {label}
-      </span>
-    </div>
-  );
-}
-
-/** A row of 4 signal dots for one direction */
-function SignalRow({
-  label,
-  signals,
-  variant,
-  outlined,
-  prefix,
-}: {
-  label: string;
-  signals: DirectionSignals;
-  variant: 'bull' | 'bear';
-  outlined?: boolean;
-  prefix?: string;
-}) {
-  const color = variant === 'bear' ? '#ff1744' : '#00c853';
-  const countColor = signals.count >= 3
-    ? `text-[${color}]`
-    : signals.count >= 1 ? 'text-[#ffd600]' : 'text-zinc-600';
-
-  return (
-    <div className="flex items-center gap-1.5">
-      <span
-        className="text-[8px] font-mono w-7 shrink-0"
-        style={signals.count > 0 ? { color } : { color: '#52525b' }}
-      >
-        {prefix ?? label}
-      </span>
-      <div className="flex items-center gap-1">
-        <SignalDot active={signals.mom} label="MOM" variant={variant} outlined={outlined} />
-        <SignalDot active={signals.vol} label="VOL" variant={variant} outlined={outlined} />
-        <SignalDot active={signals.rsi} label="RSI" variant={variant} outlined={outlined} />
-        <SignalDot active={signals.bb} label="BB" variant={variant} outlined={outlined} />
-      </div>
-      <span
-        className={cn('text-[8px] font-mono ml-auto', countColor)}
-        style={
-          signals.count >= 3 ? { color } :
-          signals.count >= 1 ? { color: '#ffd600' } :
-          undefined
-        }
-      >
-        {signals.count}/4
-      </span>
-    </div>
-  );
-}
-
 function AssetCardComponent({ card }: { card: AssetCard }) {
   const rsiColor = card.rsi != null
     ? card.rsi < 30 ? 'text-[#00c853]'
@@ -206,7 +59,6 @@ function AssetCardComponent({ card }: { card: AssetCard }) {
     : 'text-amber-400'
     : 'text-zinc-600';
 
-  // Arrow follows the 1h price change (not the 15m trend direction)
   const h1 = card.priceChange1h;
   const trendArrow = h1 != null && h1 > 0.05 ? '\u2191'
     : h1 != null && h1 < -0.05 ? '\u2193'
@@ -217,17 +69,7 @@ function AssetCardComponent({ card }: { card: AssetCard }) {
 
   const pos = card.activePosition;
   const inTrade = pos != null;
-  const positionSide = pos?.position_type; // 'long' | 'short'
-
-  // ── Fix 1: Determine row ordering ─────────────────────────────────
-  // In trade: show trade direction first. Not in trade: stronger direction first.
-  const bearFirst = inTrade
-    ? positionSide === 'short'
-    : card.bearSignals.count > card.bullSignals.count;
-
-  // ── Fix 2: Determine entry vs live signals ────────────────────────
-  const hasEntrySignals = inTrade && card.entrySignals != null;
-  const entryDir = card.entryDirection;
+  const positionSide = pos?.position_type;
 
   return (
     <div className={cn(
@@ -252,46 +94,9 @@ function AssetCardComponent({ card }: { card: AssetCard }) {
       </div>
 
       {/* Price changes */}
-      <div className="flex flex-wrap gap-2 mb-2">
+      <div className="flex flex-wrap gap-2 mb-3">
         <PriceChange label="24h" value={card.priceChange24h} />
         <PriceChange label="1h" value={card.priceChange1h} />
-      </div>
-
-      {/* ── Signal Display (Fixes 1, 2, 3) ─────────────────────────── */}
-      <div className="space-y-1 mb-2">
-        {inTrade && hasEntrySignals ? (
-          /* Fix 2: In trade — show entry signals + current live state */
-          <>
-            <SignalRow
-              label={entryDir === 'short' ? 'Bear' : 'Bull'}
-              signals={card.entrySignals!}
-              variant={entryDir === 'short' ? 'bear' : 'bull'}
-              prefix="Entry"
-            />
-            <SignalRow
-              label={entryDir === 'short' ? 'Bear' : 'Bull'}
-              signals={entryDir === 'short' ? card.bearSignals : card.bullSignals}
-              variant={entryDir === 'short' ? 'bear' : 'bull'}
-              outlined
-              prefix="Now"
-            />
-          </>
-        ) : (
-          /* Not in trade (or no entry data): show both directions, Fix 1 ordering */
-          <>
-            {bearFirst ? (
-              <>
-                <SignalRow label="Bear" signals={card.bearSignals} variant="bear" />
-                <SignalRow label="Bull" signals={card.bullSignals} variant="bull" />
-              </>
-            ) : (
-              <>
-                <SignalRow label="Bull" signals={card.bullSignals} variant="bull" />
-                <SignalRow label="Bear" signals={card.bearSignals} variant="bear" />
-              </>
-            )}
-          </>
-        )}
       </div>
 
       {/* Indicators */}
@@ -334,28 +139,10 @@ function AssetCardComponent({ card }: { card: AssetCard }) {
 // ── Main component ──────────────────────────────────────────────────────
 
 export function MarketOverview() {
-  const { strategyLog, openPositions, trades, signalStates } = useSupabase();
+  const { strategyLog, openPositions } = useSupabase();
 
   const assetCards = useMemo(() => {
     const ACTIVE_ASSETS = new Set(['BTC', 'ETH', 'SOL', 'XRP']);
-
-    // Index signal_state rows by pair for quick lookup
-    const signalsByPair = new Map<string, SignalState[]>();
-    for (const ss of signalStates) {
-      const arr = signalsByPair.get(ss.pair) ?? [];
-      arr.push(ss);
-      signalsByPair.set(ss.pair, arr);
-    }
-
-    // Find open trades for entry signal parsing (Fix 2)
-    const openTradeByAsset = new Map<string, { reason?: string; position_type: string }>();
-    for (const t of trades) {
-      if (t.status !== 'open') continue;
-      const asset = extractBaseAsset(t.pair);
-      if (!openTradeByAsset.has(asset)) {
-        openTradeByAsset.set(asset, { reason: t.reason, position_type: t.position_type });
-      }
-    }
 
     // Group latest strategy_log by base asset, prefer Delta exchange
     const latestByAsset = new Map<string, StrategyLog>();
@@ -378,71 +165,16 @@ export function MarketOverview() {
       const bbPos = determineBBPosition(price, log.bb_upper, log.bb_lower);
       const activePos = openPositions?.find(p => extractBaseAsset(p.pair) === asset) ?? null;
 
-      // Fix 3: Build directional signals from signal_state (real-time, per-direction)
-      const pairSignals = signalsByPair.get(log.pair) ?? [];
-      let bullSignals: DirectionSignals;
-      let bearSignals: DirectionSignals;
-
-      if (pairSignals.length > 0) {
-        // Primary: use signal_state table (updated every 5s by engine)
-        bullSignals = buildDirectionSignals(pairSignals, 'bull');
-        bearSignals = buildDirectionSignals(pairSignals, 'bear');
-      } else {
-        // Fallback: use strategy_log signal fields (already direction-filtered by engine)
-        // These are for the "active side" only — map them to the correct direction
-        const side = log.signal_side;
-        const logSignals: DirectionSignals = {
-          mom: log.signal_mom === true,
-          vol: log.signal_vol === true,
-          rsi: log.signal_rsi === true,
-          bb: log.signal_bb === true,
-          count: log.signal_count ?? 0,
-        };
-        const empty: DirectionSignals = { mom: false, vol: false, rsi: false, bb: false, count: 0 };
-
-        if (side === 'short') {
-          bullSignals = empty;
-          bearSignals = logSignals;
-        } else if (side === 'long') {
-          bullSignals = logSignals;
-          bearSignals = empty;
-        } else {
-          // No active side — use bull_count/bear_count to pick
-          const bc = log.bull_count ?? 0;
-          const brc = log.bear_count ?? 0;
-          if (bc >= brc) {
-            bullSignals = logSignals;
-            bearSignals = empty;
-          } else {
-            bullSignals = empty;
-            bearSignals = logSignals;
-          }
-        }
-      }
-
-      // Fix 2: Parse entry signals from open trade reason
-      const openTrade = openTradeByAsset.get(asset);
-      const entrySignals = openTrade ? parseEntrySignals(openTrade.reason) : null;
-      const entryDirection = openTrade
-        ? (openTrade.position_type === 'short' ? 'short' as const : 'long' as const)
-        : null;
-
       cards.push({
         asset,
         currentPrice: price,
         priceChange24h: log.price_change_24h ?? null,
         priceChange1h: log.price_change_1h ?? null,
-        priceChange15m: log.price_change_15m ?? null,
-        direction: log.direction ?? null,
         rsi: log.rsi ?? null,
         volumeRatio: log.volume_ratio ?? null,
         bbPosition: bbPos,
         activePosition: activePos,
         lastTimestamp: log.timestamp,
-        bullSignals,
-        bearSignals,
-        entrySignals,
-        entryDirection,
       });
     }
 
@@ -454,7 +186,7 @@ export function MarketOverview() {
       return (ai === -1 ? 99 : ai) - (bi === -1 ? 99 : bi);
     });
     return cards;
-  }, [strategyLog, openPositions, trades, signalStates]);
+  }, [strategyLog, openPositions]);
 
   return (
     <div className="bg-[#0d1117] border border-zinc-800 rounded-xl p-3 md:p-5">
