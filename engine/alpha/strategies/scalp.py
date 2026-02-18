@@ -187,11 +187,13 @@ class ScalpStrategy(BaseStrategy):
         "BTC": 0.25,   # BTC: 0.25% price = 5% capital at 20x (was 0.40 = 8% capital)
         "ETH": 0.25,   # ETH: 0.25% price = 5% capital at 20x (was 0.45 = 9% capital)
         "XRP": 0.25,   # XRP: 0.25% price = 5% capital at 20x (was 0.50 = 10% capital)
+        "SOL": 0.25,
     }
     PAIR_TP_FLOOR: dict[str, float] = {
         "BTC": 1.50,
         "ETH": 1.50,
         "XRP": 2.00,
+        "SOL": 2.00,
     }
     ATR_SL_MULTIPLIER = 1.5
     ATR_TP_MULTIPLIER = 4.0
@@ -248,7 +250,7 @@ class ScalpStrategy(BaseStrategy):
     MOMENTUM_REVERSAL_PCT = -0.10
 
     # ── DISABLED PAIRS — skip entirely ────────────────────────────────
-    DISABLED_PAIRS: set[str] = {"SOL"}  # 0% win rate, remove from trading
+    DISABLED_PAIRS: set[str] = set()
 
     # ── Entry thresholds — 3-of-4 with 15m trend soft weight ────────────
     MOMENTUM_MIN_PCT = 0.08           # 0.08%+ move in 60s (was 0.15 — catches moves earlier)
@@ -304,18 +306,21 @@ class ScalpStrategy(BaseStrategy):
         "XRP": 50.0,   # best performer — maximize
         "ETH": 30.0,   # mixed but catches big moves
         "BTC": 20.0,   # low win rate but diversification
+        "SOL": 15.0,
     }
     # Per-pair contract caps
     PAIR_MAX_CONTRACTS: dict[str, int] = {
         "BTC": 1,
         "ETH": 2,
         "XRP": 50,
+        "SOL": 1,
     }
     # Minimum signal strength per pair (3/4 — filter out weak coin-flip entries)
     PAIR_MIN_STRENGTH: dict[str, int] = {
         "XRP": 3,    # was 2/4, tightened: 2/4 entries were losers
         "ETH": 3,    # was 2/4, tightened: multiple -8-9% losses on weak signals
         "BTC": 3,    # was 2/4, tightened: consistent with all pairs
+        "SOL": 3,    # require 3/4 signals, no weak entries
     }
     # Adaptive: track last N trades per pair for win-rate-based adjustment
     PERF_WINDOW = 5                     # look at last 5 trades per pair
