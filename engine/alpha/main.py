@@ -246,7 +246,8 @@ class AlphaBot:
             seconds=config.trading.analysis_interval_sec,
         )
         self._scheduler.add_job(self._daily_reset, "cron", hour=18, minute=30)  # midnight IST = 18:30 UTC
-        self._scheduler.add_job(self._hourly_report, "cron", minute=0)  # every hour
+        # 3x daily updates: 8 AM, 12 PM, 8 PM IST (2:30, 6:30, 14:30 UTC)
+        self._scheduler.add_job(self._hourly_report, "cron", hour="2,6,14", minute=30)
         self._scheduler.add_job(self._save_status, "interval", minutes=2)
         self._scheduler.add_job(self._reconcile_exchange_positions, "interval", seconds=60)
         self._scheduler.add_job(self._telegram_health_check, "interval", minutes=5)
