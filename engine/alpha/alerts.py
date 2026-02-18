@@ -20,7 +20,7 @@ from telegram import Bot
 from telegram.constants import ParseMode
 
 from alpha.config import config
-from alpha.utils import format_usd, get_dashboard_version, get_version, ist_now, setup_logger
+from alpha.utils import format_usd, get_version, ist_now, setup_logger
 
 logger = setup_logger("alerts")
 

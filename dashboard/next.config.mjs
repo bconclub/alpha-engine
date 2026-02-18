@@ -1,28 +1,23 @@
 import { readFileSync } from 'fs';
 
-// Read dashboard version from VERSION file (auto-bumped by CI on every push)
-let appVersion = '?.?.?';
+// Single Alpha version — read from engine/VERSION (one level up from dashboard/)
+let alphaVersion = '?.?.?';
 try {
-  appVersion = readFileSync('./VERSION', 'utf-8').trim();
+  alphaVersion = readFileSync('../engine/VERSION', 'utf-8').trim();
 } catch {
-  // Fallback to package.json version
+  // Fallback: try local VERSION if it exists (legacy)
   try {
-    const pkg = JSON.parse(readFileSync('./package.json', 'utf-8'));
-    appVersion = pkg.version;
+    alphaVersion = readFileSync('./VERSION', 'utf-8').trim();
   } catch { /* keep default */ }
 }
-
-// Read engine version from engine/VERSION (one level up from dashboard/)
-let engineVersion = '?.?.?';
-try {
-  engineVersion = readFileSync('../engine/VERSION', 'utf-8').trim();
-} catch { /* keep default */ }
 
 /** @type {import('next').NextConfig} */
 const nextConfig = {
   env: {
-    APP_VERSION: appVersion,
-    ENGINE_VERSION: engineVersion,
+    ALPHA_VERSION: alphaVersion,
+    // Keep legacy env vars pointing to the same value for compat
+    APP_VERSION: alphaVersion,
+    ENGINE_VERSION: alphaVersion,
   },
 };
 

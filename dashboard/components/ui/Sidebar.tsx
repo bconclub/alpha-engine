@@ -154,7 +154,7 @@ export function Sidebar() {
             isConnected ? 'bg-[#00c853] animate-pulse' : 'bg-red-500',
           )} />
           <span className="text-base font-bold tracking-widest text-white">ALPHA</span>
-          <span className="text-[9px] font-mono text-zinc-600">v{process.env.APP_VERSION ?? '?'}</span>
+          <span className="text-[9px] font-mono text-zinc-600">v{process.env.ALPHA_VERSION ?? '?'}</span>
         </div>
         <div className="w-9" /> {/* spacer for centering */}
       </div>
@@ -251,7 +251,7 @@ export function Sidebar() {
           {!collapsed && (
             <>
               <span className="text-lg font-bold tracking-widest text-white">ALPHA</span>
-              <span className="text-[10px] font-mono text-zinc-600 ml-auto">v{process.env.APP_VERSION ?? '?'}</span>
+              <span className="text-[10px] font-mono text-zinc-600 ml-auto">v{process.env.ALPHA_VERSION ?? '?'}</span>
             </>
           )}
         </div>
@@ -337,7 +337,7 @@ export function Sidebar() {
           </div>
           {!collapsed && (
             <p className="text-[10px] text-zinc-700 mt-1">
-              Dashboard v{process.env.APP_VERSION ?? '?'}
+              Alpha v{process.env.ALPHA_VERSION ?? '?'}
             </p>
           )}
         </div>
