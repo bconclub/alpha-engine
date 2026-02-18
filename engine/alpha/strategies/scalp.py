@@ -82,6 +82,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+from collections import deque
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -393,6 +394,8 @@ class ScalpStrategy(BaseStrategy):
             self._sl_pct = self.PAIR_SL_FLOOR.get(base_asset, self.STOP_LOSS_PCT)
             self._tp_pct = self.PAIR_TP_FLOOR.get(base_asset, self.MIN_TP_PCT)
         self._last_atr_pct: float = 0.0  # last computed 1m ATR as % of price
+        self._atr_history: deque[float] = deque(maxlen=60)  # rolling ~1hr of ATR samples
+        self._high_vol: bool = False  # True when ATR > 1.5x normal
 
         # Position state
         self.in_position = False
@@ -552,6 +555,11 @@ class ScalpStrategy(BaseStrategy):
             atr_pct = (atr / current_price) * 100 if current_price > 0 else 0.0
             self._last_atr_pct = atr_pct
 
+            # Track rolling ATR for high-vol detection
+            self._atr_history.append(atr_pct)
+            normal_atr = sum(self._atr_history) / len(self._atr_history) if self._atr_history else atr_pct
+            self._high_vol = atr_pct > normal_atr * 1.5 and len(self._atr_history) >= 5
+
             # Per-pair floors — spot uses wider floors (no leverage)
             if not self.is_futures:
                 sl_floor = self.SPOT_SL_PCT
@@ -564,8 +572,17 @@ class ScalpStrategy(BaseStrategy):
             self._sl_pct = max(sl_floor, atr_pct * self.ATR_SL_MULTIPLIER)
             self._tp_pct = max(tp_floor, atr_pct * self.ATR_TP_MULTIPLIER)
 
-            # Safety cap: spot allows wider SL/TP (no leverage risk)
-            sl_cap = 3.00 if not self.is_futures else 0.50
+            # Safety cap — widen during high volatility
+            if not self.is_futures:
+                sl_cap = 3.00
+            elif self._high_vol:
+                sl_cap = min(0.75, atr_pct * 2.0)
+                self.logger.info(
+                    "[%s] HIGH VOL: ATR=%.3f%% (normal=%.3f%%), SL cap widened to %.2f%%",
+                    self.pair, atr_pct, normal_atr, sl_cap,
+                )
+            else:
+                sl_cap = 0.50
             tp_cap = 6.00 if not self.is_futures else 5.00
             self._sl_pct = min(self._sl_pct, sl_cap)
             self._tp_pct = min(self._tp_pct, tp_cap)
@@ -1114,6 +1131,11 @@ class ScalpStrategy(BaseStrategy):
 
         # Weak momentum (0.08-0.12%) = need more confirmation → 4/4
         if mom_strength == "WEAK":
+            required_long = max(required_long, 4)
+            required_short = max(required_short, 4)
+
+        # High volatility = need full confirmation → 4/4 (no weak entries in chaos)
+        if self._high_vol:
             required_long = max(required_long, 4)
             required_short = max(required_short, 4)
 
