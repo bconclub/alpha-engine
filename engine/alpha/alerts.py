@@ -60,10 +60,6 @@ def _strat_label(name: str | None) -> str:
     return _STRAT_DISPLAY.get(name, name or "Paused")
 
 
-def _bal(value: float | None) -> str:
-    return format_usd(value) if value is not None else "N/A"
-
-
 class AlertManager:
     """Sends Telegram messages for all bot events."""
 
@@ -98,17 +94,10 @@ class AlertManager:
 
         Format:
         ━━━━━━━━━━━━━━━━━━━━
-        🟢 ALPHA v3.6.0
-
-        💰 Capital: $28.41
-        Binance: $10.11
-        Delta: $18.30
-
-        ⚡ Pairs: BTC | ETH | SOL | XRP
-
-        📊 Exchange: Binance, Delta
-        💪 Leverage: 20x | Shorting: Yes
-        🕐 Started: 2026-02-16 18:41 IST
+        🟢 ALPHA v3.11.3
+        ⚡ BTC | ETH | SOL | XRP
+        💪 20x | Shorting: Yes
+        🕐 2026-02-16 18:41 IST
         ━━━━━━━━━━━━━━━━━━━━
         """
         # Clean pair names: "ETH/USD:USD" → "ETH", "BTC/USDT" → "BTC"
@@ -118,33 +107,18 @@ class AlertManager:
         )
         pairs_str = " | ".join(all_bases) if all_bases else "None"
 
-        exchanges: list[str] = []
-        if binance_pairs:
-            exchanges.append("Binance")
-        if delta_pairs:
-            exchanges.append("Delta")
-        exchanges_str = ", ".join(exchanges) if exchanges else "None"
-
         shorting = "Yes" if shorting_enabled else "No"
         now = ist_now().strftime("%Y-%m-%d %H:%M IST")
         leverage = config.delta.leverage
         engine_ver = get_version()
 
-        # Capital block
-        cap_lines = f"\U0001f4b0Capital: <code>{format_usd(capital)}</code>"
-        if binance_balance is not None or delta_balance is not None:
-            cap_lines += f"\n       Binance: <code>{_bal(binance_balance)}</code>"
-            cap_lines += f"\n       Delta: <code>{_bal(delta_balance)}</code>"
-
         msg = (
             f"{LINE}\n"
             f"\U0001f7e2 <b>ALPHA v{engine_ver}</b>\n"
-            f"{LINE}\n"
-            f"{cap_lines}\n"
-            f"\u26a1 Pairs: <code>{pairs_str}</code>\n"
-            f"\U0001f4ca Exchange: <code>{exchanges_str}</code>\n"
-            f"\U0001f4aa Leverage: <code>{leverage}x</code> | Shorting: <code>{shorting}</code>\n"
-            f"\U0001f552 Started: <code>{now}</code>"
+            f"\u26a1 <code>{pairs_str}</code>\n"
+            f"\U0001f4aa <code>{leverage}x</code> | Shorting: <code>{shorting}</code>\n"
+            f"\U0001f552 <code>{now}</code>\n"
+            f"{LINE}"
         )
         await self._send(msg)
 
@@ -450,9 +424,7 @@ class AlertManager:
         if unreal_line:
             lines.append(unreal_line)
         lines += [
-            f"\U0001f4b5 Capital: <code>{format_usd(capital)}</code> (USDT + assets)",
-            f"   \U0001f7e1 Binance: <code>{_bal(binance_balance)}</code>",
-            f"   \U0001f7e0 Delta: <code>{_bal(delta_balance)}</code>",
+            f"\U0001f4b5 Capital: <code>{format_usd(capital)}</code>",
             f"\U0001f3af Strategies: <code>{strat_line}</code>",
             f"\U0001f3c6 Win rate (24h): <code>{'N/A' if win_rate_24h < 0 else f'{win_rate_24h:.0f}%'}</code>",
         ]
@@ -508,8 +480,6 @@ class AlertManager:
                 lines.append(f"  {icon} <code>{short}</code>: <code>{p_sign}{format_usd(pnl)}</code>")
 
         lines.append(f"\n\U0001f4b5 Capital: <code>{format_usd(capital)}</code>")
-        lines.append(f"   \U0001f7e1 Binance: <code>{_bal(binance_balance)}</code>")
-        lines.append(f"   \U0001f7e0 Delta: <code>{_bal(delta_balance)}</code>")
 
         if best_trade:
             bp = _pair_short(best_trade.get("pair", "?"))
