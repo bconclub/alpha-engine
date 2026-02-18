@@ -220,10 +220,10 @@ class ScalpStrategy(BaseStrategy):
     # Once capital PnL reaches threshold, floor locks in. Cannot be lowered.
     # If current capital PnL drops below floor → EXIT IMMEDIATELY.
     PROFIT_RATCHETS: list[tuple[float, float]] = [
-        (5.0,  0.0),    # +5% cap → floor breakeven (was +3%)
-        (8.0,  3.0),    # +8% cap → floor +3% (was +5%)
-        (12.0, 7.0),    # +12% cap → floor +7%
-        (15.0, 10.0),   # +15% cap → floor +10%
+        (6.0,  0.0),    # +6% cap → floor breakeven
+        (10.0, 4.0),    # +10% cap → floor +4%
+        (15.0, 8.0),    # +15% cap → floor +8%
+        (20.0, 12.0),   # +20% cap → floor +12%
     ]
 
     # ── Profit decay emergency — never give back profits ─────────────
@@ -251,6 +251,9 @@ class ScalpStrategy(BaseStrategy):
 
     # ── DISABLED PAIRS — skip entirely ────────────────────────────────
     DISABLED_PAIRS: set[str] = set()
+
+    # ── DISABLED SETUPS — hardcoded safety net (also checked via dashboard setup_config)
+    DISABLED_SETUPS: set[str] = {"TREND_CONT", "BB_SQUEEZE"}
 
     # ── Entry thresholds — 3-of-4 with 15m trend soft weight ────────────
     MOMENTUM_MIN_PCT = 0.08           # 0.08%+ move in 60s (was 0.15 — catches moves earlier)
@@ -2280,6 +2283,13 @@ class ScalpStrategy(BaseStrategy):
     ) -> Signal | None:
         """Build an entry signal with ATR-dynamic SL. Trail handles the TP."""
         setup_type = self._classify_setup(reason)
+
+        # ── Hardcoded toxic setup gate (safety net) ──────
+        if setup_type in self.DISABLED_SETUPS:
+            self.logger.info(
+                "[%s] SETUP_BLOCKED: %s — hardcoded disable", self.pair, setup_type,
+            )
+            return None
 
         # ── Setup disable gate (from dashboard setup_config) ──────
         if not self._setup_config.get(setup_type, True):
