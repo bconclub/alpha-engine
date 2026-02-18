@@ -100,8 +100,11 @@ class AlphaBot:
 
         logger.info("=" * 60)
         logger.info("  ALPHA v%s — Multi-Exchange Scalping Agent", version)
-        logger.info("  BINANCE (spot): %s (1x, long-only, SL=2%%, TP=3%%, Trail@1.5%%/0.8%%)",
-                     ", ".join(self.pairs))
+        if config.binance.enabled:
+            logger.info("  BINANCE (spot): %s (1x, long-only, SL=2%%, TP=3%%, Trail@1.5%%/0.8%%)",
+                         ", ".join(self.pairs))
+        else:
+            logger.info("  BINANCE (spot): DISABLED")
         logger.info("  DELTA (futures): %s, %dx leverage",
                      ", ".join(self.delta_pairs), config.delta.leverage)
         logger.info("  Entry: 11-signal arsenal Gate=3/4 RSI=35/65 Override=30/70 +VWAP+BBSQZ+LIQSWEEP+FVG+VOLDIV")
@@ -2355,17 +2358,22 @@ class AlphaBot:
         connector = aiohttp.TCPConnector(resolver=resolver, ssl=True)
         session = aiohttp.ClientSession(connector=connector)
 
-        # Binance (required)
-        self.binance = ccxt.binance({
-            "apiKey": config.binance.api_key,
-            "secret": config.binance.secret,
-            "enableRateLimit": True,
-            "options": {"defaultType": "spot"},
-            "session": session,
-        })
-        if not config.binance.api_key:
-            logger.warning("Binance API key not set -- running in sandbox/read-only mode")
-            self.binance.set_sandbox_mode(True)
+        # Binance (optional — gated by BINANCE_ENABLED)
+        if config.binance.enabled:
+            self.binance = ccxt.binance({
+                "apiKey": config.binance.api_key,
+                "secret": config.binance.secret,
+                "enableRateLimit": True,
+                "options": {"defaultType": "spot"},
+                "session": session,
+            })
+            if not config.binance.api_key:
+                logger.warning("Binance API key not set -- running in sandbox/read-only mode")
+                self.binance.set_sandbox_mode(True)
+        else:
+            logger.info("Binance spot DISABLED by config")
+            self.binance = None
+            self.pairs = []
 
         # KuCoin (optional, for arbitrage)
         if config.kucoin.api_key:

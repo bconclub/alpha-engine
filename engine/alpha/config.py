@@ -42,6 +42,7 @@ def _env_list(key: str, default: str = "") -> list[str]:
 
 @dataclass(frozen=True)
 class BinanceConfig:
+    enabled: bool = field(default_factory=lambda: _env_bool("BINANCE_ENABLED", True))
     api_key: str = field(default_factory=lambda: _env("BINANCE_API_KEY"))
     secret: str = field(default_factory=lambda: _env("BINANCE_SECRET"))
 
