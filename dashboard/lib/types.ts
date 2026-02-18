@@ -110,6 +110,12 @@ export interface BotStatus {
   leverage?: number;
   active_strategies_count?: number;
   active_strategy_count?: number;
+  // Market regime detection
+  market_regime?: 'TRENDING_UP' | 'TRENDING_DOWN' | 'SIDEWAYS' | 'CHOPPY';
+  chop_score?: number;
+  atr_ratio?: number;
+  net_change_30m?: number;
+  regime_since?: string;
 }
 
 export interface BotCommand {

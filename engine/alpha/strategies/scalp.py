@@ -397,6 +397,14 @@ class ScalpStrategy(BaseStrategy):
         self._atr_history: deque[float] = deque(maxlen=60)  # rolling ~1hr of ATR samples
         self._high_vol: bool = False  # True when ATR > 1.5x normal
 
+        # ── Market regime detection ──────────────────────────────────────
+        self._market_regime: str = "SIDEWAYS"     # TRENDING_UP, TRENDING_DOWN, SIDEWAYS, CHOPPY
+        self._regime_since: float = time.monotonic()  # when current regime started
+        self._chop_score: float = 0.0             # 0.0=smooth, 1.0=choppy
+        self._atr_ratio: float = 1.0              # current ATR / rolling avg ATR
+        self._net_change_30m: float = 0.0         # net price change over 30 candles (%)
+        self._chop_clear_count: int = 0           # consecutive checks with chop_score < 0.45
+
         # Position state
         self.in_position = False
         self.position_side: str | None = None  # "long" or "short"
@@ -590,6 +598,103 @@ class ScalpStrategy(BaseStrategy):
             # Silently keep existing values if ATR calc fails
             pass
 
+    def _detect_market_regime(self, df: pd.DataFrame) -> str:
+        """Detect market regime from 30x 1m candles.
+
+        Returns one of: TRENDING_UP, TRENDING_DOWN, SIDEWAYS, CHOPPY.
+
+        Uses 4 metrics:
+        1. Net price change over 30 candles (direction)
+        2. Direction ratio — candles moving in same direction (trend strength)
+        3. Chop score — direction change frequency (0=smooth, 1=choppy)
+        4. ATR ratio — current ATR vs rolling average (volatility spike)
+
+        CHOPPY blocks ALL entries. Other regimes adjust signal requirements.
+        """
+        try:
+            closes = df["close"].tolist()
+            opens = df["open"].tolist()
+            if len(closes) < 10:
+                return self._market_regime  # not enough data, keep current
+
+            # 1. Net price change over 30 candles
+            net_change = ((closes[-1] - closes[0]) / closes[0]) * 100 if closes[0] > 0 else 0
+            self._net_change_30m = net_change
+
+            # 2. Direction ratio — count candles moving in same direction
+            up_candles = sum(1 for i in range(len(closes)) if closes[i] > opens[i])
+            n = len(closes)
+            direction_ratio = max(up_candles, n - up_candles) / n
+
+            # 3. Chop score — count direction changes (close > prev close)
+            direction_changes = 0
+            for i in range(2, len(closes)):
+                curr_up = closes[i] > closes[i - 1]
+                prev_up = closes[i - 1] > closes[i - 2]
+                if curr_up != prev_up:
+                    direction_changes += 1
+            chop_score = direction_changes / (len(closes) - 2) if len(closes) > 2 else 0
+            self._chop_score = chop_score
+
+            # 4. ATR ratio — current ATR vs rolling average
+            normal_atr = (
+                sum(self._atr_history) / len(self._atr_history)
+                if self._atr_history else self._last_atr_pct
+            )
+            atr_ratio = self._last_atr_pct / normal_atr if normal_atr > 0 else 1.0
+            self._atr_ratio = atr_ratio
+
+            # ── Classify regime ──────────────────────────────────────────
+            old_regime = self._market_regime
+
+            if chop_score > 0.60 and atr_ratio > 1.3:
+                # High reversals + high vol = death zone
+                new_regime = "CHOPPY"
+            elif abs(net_change) > 0.30 and direction_ratio > 0.60:
+                new_regime = "TRENDING_UP" if net_change > 0 else "TRENDING_DOWN"
+            elif abs(net_change) < 0.10 and chop_score < 0.40:
+                new_regime = "SIDEWAYS"
+            else:
+                new_regime = "SIDEWAYS"  # default safe
+
+            # ── CHOPPY exit hysteresis: need 3 consecutive clean checks ──
+            if old_regime == "CHOPPY" and new_regime != "CHOPPY":
+                self._chop_clear_count += 1
+                if self._chop_clear_count < 3:
+                    # Stay choppy until 3 consecutive clean readings
+                    new_regime = "CHOPPY"
+                    self.logger.info(
+                        "[%s] REGIME: still CHOPPY (clear %d/3, chop=%.2f, atr=%.1fx)",
+                        self.pair, self._chop_clear_count, chop_score, atr_ratio,
+                    )
+                else:
+                    self._chop_clear_count = 0  # reset on exit
+            else:
+                if new_regime == "CHOPPY":
+                    self._chop_clear_count = 0  # reset when entering/staying choppy
+
+            # ── Log regime changes ───────────────────────────────────────
+            if new_regime != old_regime:
+                self._regime_since = time.monotonic()
+                labels = {
+                    "TRENDING_UP": "TRENDING UP — favoring longs",
+                    "TRENDING_DOWN": "TRENDING DOWN — favoring shorts",
+                    "SIDEWAYS": "SIDEWAYS — normal scanning",
+                    "CHOPPY": "CHOPPY — no trades, waiting for clarity",
+                }
+                self.logger.info(
+                    "[%s] REGIME: %s (net=%.2f%%, dir=%.2f, chop=%.2f, atr=%.1fx)",
+                    self.pair, labels.get(new_regime, new_regime),
+                    net_change, direction_ratio, chop_score, atr_ratio,
+                )
+
+            self._market_regime = new_regime
+            return new_regime
+
+        except Exception:
+            self.logger.debug("[%s] Regime detection error, keeping %s", self.pair, self._market_regime)
+            return self._market_regime
+
     async def check(self) -> list[Signal]:
         """One scalping tick — fetch candles, detect QUALITY momentum, manage exits."""
         signals: list[Signal] = []
@@ -689,6 +794,9 @@ class ScalpStrategy(BaseStrategy):
             # Update dynamic ATR-based SL/TP
             self._update_dynamic_sl_tp(df, current_price)
 
+            # Detect market regime (TRENDING_UP/DOWN, SIDEWAYS, CHOPPY)
+            self._detect_market_regime(df)
+
             # Compute indicators
             rsi_series = ta.momentum.RSIIndicator(close, window=14).rsi()
             rsi_now = float(rsi_series.iloc[-1]) if not rsi_series.empty else 50.0
@@ -751,9 +859,9 @@ class ScalpStrategy(BaseStrategy):
                 idle_sec = int(now - self._last_position_exit)
                 self.logger.info(
                     "[%s] (%s) SCANNING %ds | $%.2f | RSI=%.1f | Vol=%.1fx | "
-                    "mom60=%+.3f%% | W/L=%d/%d skip=%d",
+                    "mom60=%+.3f%% | %s | W/L=%d/%d skip=%d",
                     self.pair, tag, idle_sec, current_price, rsi_now, vol_ratio,
-                    momentum_60s,
+                    momentum_60s, self._market_regime,
                     self.hourly_wins, self.hourly_losses, self.hourly_skipped,
                 )
 
@@ -848,6 +956,16 @@ class ScalpStrategy(BaseStrategy):
                 self.logger.info(
                     "[%s] Insufficient %s balance: $%.2f",
                     self.pair, self._exchange_id, available,
+                )
+            return signals
+
+        # ── REGIME GATE: CHOPPY = no new entries ─────────────────────
+        if self._market_regime == "CHOPPY":
+            if self._tick_count % 12 == 0:
+                regime_sec = int(time.monotonic() - self._regime_since)
+                self.logger.info(
+                    "[%s] REGIME BLOCK: CHOPPY for %ds — no entries (chop=%.2f, atr=%.1fx)",
+                    self.pair, regime_sec, self._chop_score, self._atr_ratio,
                 )
             return signals
 
@@ -1122,14 +1240,22 @@ class ScalpStrategy(BaseStrategy):
             required_long = max(required_long, 4)
             required_short = max(required_short, 4)
 
+        # ── REGIME-BASED SIGNAL ADJUSTMENT ─────────────────────────────
+        # Counter-trend trades need extra confirmation (4/4)
+        if self._market_regime == "TRENDING_UP":
+            required_short = max(required_short, 4)  # shorting against trend = 4/4
+        elif self._market_regime == "TRENDING_DOWN":
+            required_long = max(required_long, 4)  # longing against trend = 4/4
+
         # ── Post-streak gate: first trade after streak pause needs 3/4 ─────
         if ScalpStrategy._pair_post_streak.get(self._base_asset, False):
             required_long = max(required_long, self.POST_STREAK_STRENGTH)
             required_short = max(required_short, self.POST_STREAK_STRENGTH)
 
         self.logger.debug(
-            "[%s] MOM %s: %+.3f%% dir=%s req=%d/4",
-            self.pair, mom_strength, momentum_60s, mom_direction, required_long,
+            "[%s] MOM %s: %+.3f%% dir=%s req=L%d/S%d regime=%s",
+            self.pair, mom_strength, momentum_60s, mom_direction,
+            required_long, required_short, self._market_regime,
         )
 
         # ── Count bullish and bearish signals ──────────────────────────────

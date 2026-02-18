@@ -86,6 +86,29 @@ export function LiveStatusBar() {
   const deltaConnected = botStatus?.delta_connected || (Number(botStatus?.delta_balance ?? 0) > 0) || isConnected;
   const botState = botStatus?.bot_state ?? (isConnected ? 'running' : 'paused');
 
+  // ── Market Regime ──────────────────────────────────────────────
+  const regime = botStatus?.market_regime ?? 'SIDEWAYS';
+  const chopScore = botStatus?.chop_score ?? 0;
+  const atrRatio = botStatus?.atr_ratio ?? 1;
+  const netChange = botStatus?.net_change_30m ?? 0;
+  const regimeSince = botStatus?.regime_since;
+
+  const regimeConfig: Record<string, { label: string; icon: string; bg: string; text: string; pulse?: boolean }> = {
+    TRENDING_UP:   { label: 'TRENDING UP',   icon: '↗', bg: 'bg-emerald-500/15 border-emerald-500/30', text: 'text-emerald-400' },
+    TRENDING_DOWN: { label: 'TRENDING DOWN', icon: '↘', bg: 'bg-red-500/15 border-red-500/30',     text: 'text-red-400' },
+    SIDEWAYS:      { label: 'SIDEWAYS',      icon: '↔', bg: 'bg-amber-500/15 border-amber-500/30',  text: 'text-amber-400' },
+    CHOPPY:        { label: 'CHOPPY',        icon: '⚡', bg: 'bg-red-500/20 border-red-500/40',      text: 'text-red-400', pulse: true },
+  };
+  const rc = regimeConfig[regime] ?? regimeConfig.SIDEWAYS;
+
+  const regimeDuration = useMemo(() => {
+    if (!regimeSince) return '';
+    const elapsed = Math.max(0, Math.floor((Date.now() - new Date(regimeSince).getTime()) / 1000));
+    if (elapsed < 60) return `${elapsed}s`;
+    if (elapsed < 3600) return `${Math.floor(elapsed / 60)}m`;
+    return `${Math.floor(elapsed / 3600)}h ${Math.floor((elapsed % 3600) / 60)}m`;
+  }, [regimeSince]);
+
   const deltaPnl = pnlByExchange.find((e) => e.exchange === 'delta');
 
   const deltaBalance = Number(botStatus?.delta_balance ?? 0);
@@ -167,6 +190,27 @@ export function LiveStatusBar() {
 
   return (
     <div className="bg-[#0d1117] border border-zinc-800 rounded-xl p-3 md:p-4">
+
+      {/* ═══ REGIME BANNER (both layouts) ═══ */}
+      <div className={cn(
+        'flex items-center justify-between rounded-lg border px-3 py-2 mb-2',
+        rc.bg,
+        rc.pulse && 'animate-pulse',
+      )}>
+        <div className="flex items-center gap-2">
+          <span className={cn('text-base', rc.text)}>{rc.icon}</span>
+          <span className={cn('text-xs font-bold tracking-wide', rc.text)}>{rc.label}</span>
+          {regime === 'CHOPPY' && (
+            <span className="text-[10px] font-semibold text-red-300 ml-1">NO TRADES</span>
+          )}
+        </div>
+        <div className="flex items-center gap-3 text-[10px] font-mono text-zinc-400">
+          <span>Chop: {chopScore.toFixed(2)}</span>
+          <span>ATR: {atrRatio.toFixed(1)}x</span>
+          <span>Net: {netChange >= 0 ? '+' : ''}{netChange.toFixed(2)}%</span>
+          {regimeDuration && <span>Since {regimeDuration}</span>}
+        </div>
+      </div>
 
       {/* ═══ MOBILE LAYOUT ═══ */}
       <div className="flex flex-col gap-2 md:hidden">

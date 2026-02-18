@@ -6,6 +6,7 @@ Supports Binance (spot) and Delta Exchange India (futures) in parallel.
 from __future__ import annotations
 
 import asyncio
+import datetime as _dt
 import signal
 import sys
 import time
@@ -940,6 +941,37 @@ class AlphaBot:
             "active_strategy_count": active_count,
             "uptime_seconds": int(time.monotonic() - self._start_time) if self._start_time else 0,
         }
+
+        # ── Aggregate market regime from all scalp strategies ──────────
+        # Priority: CHOPPY > TRENDING_DOWN > TRENDING_UP > SIDEWAYS
+        regime_priority = {"CHOPPY": 4, "TRENDING_DOWN": 3, "TRENDING_UP": 2, "SIDEWAYS": 1}
+        worst_regime = "SIDEWAYS"
+        worst_score = 0
+        best_chop = 0.0
+        best_atr_ratio = 1.0
+        best_net_change = 0.0
+        regime_since_ts = None
+        for s in self._scalp_strategies.values():
+            r = getattr(s, "_market_regime", "SIDEWAYS")
+            p = regime_priority.get(r, 1)
+            if p > worst_score:
+                worst_score = p
+                worst_regime = r
+                best_chop = getattr(s, "_chop_score", 0.0)
+                best_atr_ratio = getattr(s, "_atr_ratio", 1.0)
+                best_net_change = getattr(s, "_net_change_30m", 0.0)
+                since_mono = getattr(s, "_regime_since", 0.0)
+                if since_mono > 0 and self._start_time:
+                    elapsed = time.monotonic() - since_mono
+                    regime_since_ts = (_dt.datetime.now(_dt.timezone.utc) - _dt.timedelta(seconds=elapsed)).isoformat()
+
+        status["market_regime"] = worst_regime
+        status["chop_score"] = round(best_chop, 3)
+        status["atr_ratio"] = round(best_atr_ratio, 2)
+        status["net_change_30m"] = round(best_net_change, 3)
+        if regime_since_ts:
+            status["regime_since"] = regime_since_ts
+
         await self.db.save_bot_status(status)
 
     async def _poll_commands(self) -> None:
