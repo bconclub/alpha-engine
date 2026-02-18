@@ -1149,7 +1149,15 @@ export default function TradeTable({ trades }: TradeTableProps) {
                               </div>
                             ) : trade.position_state === 'holding' || trade.status === 'open' ? (() => {
                               const TRAIL_ACT = 0.30;
-                              const peak = Math.max(trade.peak_pnl ?? 0, trade.current_pnl ?? 0, 0);
+                              // Compute live price P&L from livePrices (3s updates)
+                              let livePricePnl = trade.current_pnl ?? 0;
+                              const livePrice = livePrices.prices[trade.pair] ?? null;
+                              if (livePrice && trade.price > 0) {
+                                livePricePnl = trade.position_type === 'short'
+                                  ? ((trade.price - livePrice) / trade.price) * 100
+                                  : ((livePrice - trade.price) / trade.price) * 100;
+                              }
+                              const peak = Math.max(trade.peak_pnl ?? 0, livePricePnl, 0);
                               const progress = Math.min((peak / TRAIL_ACT) * 100, 100);
                               const barColor = progress >= 66 ? 'bg-emerald-400' : progress >= 33 ? 'bg-amber-400' : 'bg-red-400';
                               const txtColor = progress >= 66 ? 'text-emerald-400' : progress >= 33 ? 'text-amber-400' : 'text-red-400';
