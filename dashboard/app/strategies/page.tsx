@@ -7,18 +7,12 @@ import { PnLChart } from '@/components/charts/PnLChart';
 import { Badge } from '@/components/ui/Badge';
 import {
   formatPnL,
-  formatPercentage,
   formatCurrency,
-  formatTimeAgo,
-  getStrategyColor,
   getStrategyLabel,
-  getStrategyBadgeVariant,
-  getExchangeLabel,
-  getExchangeColor,
   cn,
   getPnLColor,
 } from '@/lib/utils';
-import type { Strategy, Trade, SetupConfig, SignalState, PairConfig } from '@/lib/types';
+import type { Strategy, Trade, SetupConfig, SignalState } from '@/lib/types';
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -55,39 +49,6 @@ function extractBaseAsset(pair: string): string {
   return pair.replace(/USD.*$/, '');
 }
 
-function computeStats(trades: Trade[], strategy: Strategy) {
-  const normalizedStrategy = strategy.toLowerCase();
-  const filtered = trades.filter((t) => t.strategy.toLowerCase() === normalizedStrategy);
-  const wins = filtered.filter((t) => t.pnl > 0).length;
-  const losses = filtered.filter((t) => t.pnl < 0).length;
-  const totalPnL = filtered.reduce((sum, t) => sum + t.pnl, 0);
-  const avgPnL = filtered.length > 0 ? totalPnL / filtered.length : 0;
-
-  const spotTrades = filtered.filter((t) => t.position_type === 'spot');
-  const futuresTrades = filtered.filter((t) => t.position_type !== 'spot');
-  const spotPnL = spotTrades.reduce((sum, t) => sum + t.pnl, 0);
-  const futuresPnL = futuresTrades.reduce((sum, t) => sum + t.pnl, 0);
-
-  const sorted = [...filtered].sort(
-    (a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime(),
-  );
-  const lastActive = sorted.length > 0 ? sorted[0].timestamp : null;
-
-  return {
-    totalTrades: filtered.length,
-    wins,
-    losses,
-    winRate: filtered.length > 0 ? (wins / filtered.length) * 100 : 0,
-    totalPnL,
-    avgPnL,
-    spotTrades: spotTrades.length,
-    futuresTrades: futuresTrades.length,
-    spotPnL,
-    futuresPnL,
-    lastActive,
-  };
-}
-
 function computeSetupStats(trades: Trade[], setupType: string) {
   const filtered = trades.filter(
     (t) => t.status === 'closed' && t.setup_type?.toUpperCase() === setupType.toUpperCase(),
@@ -113,16 +74,8 @@ function computeSetupStats(trades: Trade[], setupType: string) {
 // ---------------------------------------------------------------------------
 
 export default function StrategiesPage() {
-  const { trades, strategyLog, strategyPerformance, setupConfigs, signalStates, pairConfigs } = useSupabase();
+  const { trades, setupConfigs, signalStates, pairConfigs } = useSupabase();
   const [activeTab, setActiveTab] = useState<Strategy>('scalp');
-
-  const statsMap = useMemo(() => {
-    const map = {} as Record<Strategy, ReturnType<typeof computeStats>>;
-    for (const s of STRATEGIES) {
-      map[s] = computeStats(trades, s);
-    }
-    return map;
-  }, [trades]);
 
   const filteredTrades = useMemo(
     () => trades.filter((t) => t.strategy === activeTab),
@@ -226,161 +179,6 @@ export default function StrategiesPage() {
       <h1 className="text-xl md:text-2xl font-bold tracking-tight text-white">
         Strategy Performance
       </h1>
-
-      {/* ------------------------------------------------------------------- */}
-      {/* Strategy cards                                                       */}
-      {/* ------------------------------------------------------------------- */}
-      <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4 md:gap-6">
-        {STRATEGIES.map((strategy) => {
-          const stats = statsMap[strategy];
-          const color = getStrategyColor(strategy);
-
-          return (
-            <div
-              key={strategy}
-              className="bg-card border border-zinc-800 rounded-xl p-4 md:p-6"
-              style={{ borderLeftColor: color, borderLeftWidth: 4 }}
-            >
-              <h3 className="text-lg font-semibold text-white mb-4">
-                {getStrategyLabel(strategy)}
-              </h3>
-
-              <dl className="grid grid-cols-2 gap-x-4 gap-y-3 text-sm">
-                <div>
-                  <dt className="text-zinc-500">Total Trades</dt>
-                  <dd className="font-medium text-zinc-200">{stats.totalTrades}</dd>
-                </div>
-                <div>
-                  <dt className="text-zinc-500">Win Rate</dt>
-                  <dd className="font-medium text-zinc-200">{formatPercentage(stats.winRate)}</dd>
-                </div>
-                <div>
-                  <dt className="text-zinc-500">Wins</dt>
-                  <dd className="font-medium text-emerald-400">{stats.wins}</dd>
-                </div>
-                <div>
-                  <dt className="text-zinc-500">Losses</dt>
-                  <dd className="font-medium text-red-400">{stats.losses}</dd>
-                </div>
-                <div>
-                  <dt className="text-zinc-500">Total P&L</dt>
-                  <dd className={cn('font-medium font-mono', stats.totalPnL >= 0 ? 'text-emerald-400' : 'text-red-400')}>
-                    {formatPnL(stats.totalPnL)}
-                  </dd>
-                </div>
-                <div>
-                  <dt className="text-zinc-500">Avg P&L</dt>
-                  <dd className={cn('font-medium font-mono', stats.avgPnL >= 0 ? 'text-emerald-400' : 'text-red-400')}>
-                    {formatCurrency(stats.avgPnL)}
-                  </dd>
-                </div>
-                <div>
-                  <dt className="text-zinc-500">Spot P&L</dt>
-                  <dd className={cn('font-medium font-mono text-xs', stats.spotPnL >= 0 ? 'text-blue-400' : 'text-red-400')}>
-                    {formatPnL(stats.spotPnL)}
-                    <span className="text-zinc-600 ml-1">({stats.spotTrades})</span>
-                  </dd>
-                </div>
-                <div>
-                  <dt className="text-zinc-500">Futures P&L</dt>
-                  <dd className={cn('font-medium font-mono text-xs', stats.futuresPnL >= 0 ? 'text-orange-400' : 'text-red-400')}>
-                    {formatPnL(stats.futuresPnL)}
-                    <span className="text-zinc-600 ml-1">({stats.futuresTrades})</span>
-                  </dd>
-                </div>
-              </dl>
-
-              {stats.lastActive && (
-                <p className="mt-4 text-xs text-zinc-500">
-                  Last active {formatTimeAgo(stats.lastActive)}
-                </p>
-              )}
-            </div>
-          );
-        })}
-      </div>
-
-      {/* ------------------------------------------------------------------- */}
-      {/* Strategy Performance by Exchange (from Supabase view)                */}
-      {/* ------------------------------------------------------------------- */}
-      {strategyPerformance.length > 0 && (
-        <div className="bg-card border border-zinc-800 rounded-xl p-4 md:p-6">
-          <h3 className="text-sm font-medium text-zinc-400 uppercase tracking-wider mb-4">
-            Strategy Performance by Exchange
-          </h3>
-          <div className="overflow-x-auto">
-            <table className="w-full text-sm">
-              <thead>
-                <tr className="text-left text-xs text-zinc-500 border-b border-zinc-800">
-                  <th className="pb-2 pr-3 font-medium">Strategy</th>
-                  <th className="pb-2 pr-3 font-medium hidden sm:table-cell">Exchange</th>
-                  <th className="pb-2 pr-3 font-medium text-right">Trades</th>
-                  <th className="pb-2 pr-3 font-medium text-right hidden sm:table-cell">Win Rate</th>
-                  <th className="pb-2 pr-3 font-medium text-right">P&L</th>
-                  <th className="pb-2 pr-3 font-medium text-right hidden md:table-cell">Best</th>
-                  <th className="pb-2 font-medium text-right hidden md:table-cell">Worst</th>
-                </tr>
-              </thead>
-              <tbody>
-                {strategyPerformance.map((sp, idx) => (
-                  <tr
-                    key={`${sp.strategy}-${sp.exchange}`}
-                    className={cn(
-                      'border-b border-zinc-800/50 last:border-0',
-                      idx % 2 === 0 ? 'bg-transparent' : 'bg-zinc-900/30',
-                    )}
-                  >
-                    <td className="py-2.5 pr-3">
-                      <Badge variant={getStrategyBadgeVariant(sp.strategy)}>
-                        {getStrategyLabel(sp.strategy)}
-                      </Badge>
-                    </td>
-                    <td className="py-2.5 pr-3 hidden sm:table-cell">
-                      <span className="inline-flex items-center gap-1.5">
-                        <span
-                          className="w-2 h-2 rounded-full inline-block"
-                          style={{ backgroundColor: getExchangeColor(sp.exchange) }}
-                        />
-                        <span className="text-zinc-300">{getExchangeLabel(sp.exchange)}</span>
-                      </span>
-                    </td>
-                    <td className="py-2.5 pr-3 text-right font-mono text-zinc-300">{sp.total_trades}</td>
-                    <td className="py-2.5 pr-3 text-right font-mono text-zinc-300 hidden sm:table-cell">{formatPercentage(sp.win_rate_pct)}</td>
-                    <td className={cn('py-2.5 pr-3 text-right font-mono', sp.total_pnl >= 0 ? 'text-emerald-400' : 'text-red-400')}>
-                      {formatPnL(sp.total_pnl)}
-                    </td>
-                    <td className="py-2.5 pr-3 text-right font-mono text-emerald-400 hidden md:table-cell">{formatPnL(sp.best_trade)}</td>
-                    <td className="py-2.5 text-right font-mono text-red-400 hidden md:table-cell">{formatPnL(sp.worst_trade)}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        </div>
-      )}
-
-      {/* ------------------------------------------------------------------- */}
-      {/* Tabbed P&L chart per strategy                                        */}
-      {/* ------------------------------------------------------------------- */}
-      <div>
-        <div className="flex gap-1 mb-4 overflow-x-auto">
-          {STRATEGIES.map((strategy) => (
-            <button
-              key={strategy}
-              onClick={() => setActiveTab(strategy)}
-              className={cn(
-                'px-4 py-2 text-sm font-medium rounded-lg transition-colors whitespace-nowrap',
-                activeTab === strategy
-                  ? 'bg-zinc-700 text-white'
-                  : 'text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800',
-              )}
-            >
-              {getStrategyLabel(strategy)}
-            </button>
-          ))}
-        </div>
-        <PnLChart trades={filteredTrades} strategy={activeTab} />
-      </div>
 
       {/* ------------------------------------------------------------------- */}
       {/* Setup Control                                                        */}
@@ -502,6 +300,29 @@ export default function StrategiesPage() {
             );
           })}
         </div>
+      </div>
+
+      {/* ------------------------------------------------------------------- */}
+      {/* Tabbed P&L chart per strategy                                        */}
+      {/* ------------------------------------------------------------------- */}
+      <div>
+        <div className="flex gap-1 mb-4 overflow-x-auto">
+          {STRATEGIES.map((strategy) => (
+            <button
+              key={strategy}
+              onClick={() => setActiveTab(strategy)}
+              className={cn(
+                'px-4 py-2 text-sm font-medium rounded-lg transition-colors whitespace-nowrap',
+                activeTab === strategy
+                  ? 'bg-zinc-700 text-white'
+                  : 'text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800',
+              )}
+            >
+              {getStrategyLabel(strategy)}
+            </button>
+          ))}
+        </div>
+        <PnLChart trades={filteredTrades} strategy={activeTab} />
       </div>
 
       {/* ------------------------------------------------------------------- */}
