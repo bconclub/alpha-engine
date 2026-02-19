@@ -1036,6 +1036,7 @@ class ScalpStrategy(BaseStrategy):
             # ── Dynamic capital allocation based on signal strength ────
             amount = self._calculate_position_size_dynamic(
                 current_price, available, signal_strength, total_scalp,
+                momentum_60s=momentum_60s,
             )
             if amount is None:
                 # _skip_reason already set inside sizing method (INSUFFICIENT_CAPITAL)
@@ -1394,35 +1395,11 @@ class ScalpStrategy(BaseStrategy):
                 if price < bb_lower and vol_ratio >= eff_vol and can_short:
                     bear_signals.append(f"BBSQZ:breakout+vol{vol_ratio:.1f}x")
 
-        # 9. Liquidity Sweep — Swing Failure Pattern + RSI divergence
-        #    Price sweeps past a swing high/low (triggering stops) then reclaims
-        #    the level with RSI divergence = fakeout reversal.
-        if df is not None and len(df) >= 12 and rsi_series is not None and len(rsi_series) >= 12:
-            lows_arr = df["low"].values
-            highs_arr = df["high"].values
-            rsi_arr = rsi_series.values
-
-            # Swing low/high from candles [-12:-2] (exclude last 2 for reclaim)
-            lookback_lows = lows_arr[-12:-2]
-            lookback_highs = highs_arr[-12:-2]
-            swing_low = float(lookback_lows.min())
-            swing_high = float(lookback_highs.max())
-            swing_low_idx = int(lookback_lows.argmin())
-            swing_high_idx = int(lookback_highs.argmax())
-
-            # Bullish sweep: wicked below swing low then closed above it
-            recent_low = float(min(lows_arr[-2], lows_arr[-1]))
-            if recent_low < swing_low and price > swing_low:
-                rsi_at_swing = float(rsi_arr[-12 + swing_low_idx])
-                if rsi_now > rsi_at_swing:  # RSI higher low = bullish divergence
-                    bull_signals.append(f"LIQSWEEP:swept{swing_low:.0f}+RSIdiv")
-
-            # Bearish sweep: wicked above swing high then closed below it
-            recent_high = float(max(highs_arr[-2], highs_arr[-1]))
-            if recent_high > swing_high and price < swing_high and can_short:
-                rsi_at_swing = float(rsi_arr[-12 + swing_high_idx])
-                if rsi_now < rsi_at_swing:  # RSI lower high = bearish divergence
-                    bear_signals.append(f"LIQSWEEP:swept{swing_high:.0f}+RSIdiv")
+        # 9. Liquidity Sweep — DISABLED (poor performance: 134-contract SWEEP lost $0.82)
+        #    Was: Swing Failure Pattern + RSI divergence
+        #    if df is not None and len(df) >= 12 ...
+        if False:  # LIQSWEEP DISABLED — poor performance
+            pass
 
         # 10. Fair Value Gap (FVG) — price filling an imbalance gap
         #     3-candle pattern: gap between candle A's high and candle C's low.
@@ -2193,9 +2170,19 @@ class ScalpStrategy(BaseStrategy):
 
         return max(5.0, min(70.0, base_alloc))
 
+    # Large position momentum thresholds (bigger positions = stricter entry)
+    LARGE_POS_MOM_PCT = 0.12         # require 0.12% momentum for large positions
+    LARGE_POS_CONTRACTS: dict[str, int] = {
+        "XRP": 50,
+        "ETH": 3,
+        "BTC": 2,
+        "SOL": 3,
+    }
+
     def _calculate_position_size_dynamic(
         self, current_price: float, available: float,
         signal_strength: int, total_open: int,
+        momentum_60s: float = 0.0,
     ) -> float | None:
         """Dynamic position sizing based on balance and allocation — NO hardcoded contract caps.
 
@@ -2207,6 +2194,7 @@ class ScalpStrategy(BaseStrategy):
         5. Calculate notional at leverage
         6. Convert to contracts (round down to whole contracts)
         7. Minimum 1 contract — if can't afford, skip (INSUFFICIENT_CAPITAL)
+        8. Large position gate: >50 XRP or >3 ETH requires 0.12% momentum
         """
         exchange_capital = self.risk_manager.get_exchange_capital(self._exchange_id)
         if exchange_capital <= 0:
@@ -2250,6 +2238,16 @@ class ScalpStrategy(BaseStrategy):
                         self.pair, collateral, contracts,
                         contract_value / self.leverage, current_price,
                     )
+                return None
+
+            # 7. Large position gate: bigger positions need stronger momentum
+            large_threshold = self.LARGE_POS_CONTRACTS.get(self._base_asset, 999)
+            if contracts >= large_threshold and abs(momentum_60s) < self.LARGE_POS_MOM_PCT:
+                self._skip_reason = f"LARGE_POS_GATE ({contracts} contracts, mom={momentum_60s:.3f}%)"
+                self.logger.info(
+                    "LARGE_POS_GATE: %s requiring %.2f%% mom for %d contracts (got %.3f%%) — skipping",
+                    self.pair, self.LARGE_POS_MOM_PCT, contracts, abs(momentum_60s),
+                )
                 return None
 
             total_collateral = contracts * contract_value / self.leverage
