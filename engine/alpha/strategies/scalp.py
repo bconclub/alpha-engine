@@ -245,7 +245,7 @@ class ScalpStrategy(BaseStrategy):
     DISABLED_SETUPS: set[str] = {"TREND_CONT", "BB_SQUEEZE"}
 
     # ── Entry thresholds — 3-of-4 with 15m trend soft weight ────────────
-    MOMENTUM_MIN_PCT = 0.08           # 0.08%+ move in 60s (was 0.15 — catches moves earlier)
+    MOMENTUM_MIN_PCT = 0.15           # 0.15%+ move in 60s (raised from 0.08 — too many weak entries)
     VOL_SPIKE_RATIO = 0.8             # volume > 0.8x average (was 1.2 — most vol is under 1x)
     RSI_EXTREME_LONG = 35             # RSI < 35 = oversold → long (was 40, too loose)
     RSI_EXTREME_SHORT = 65            # RSI > 65 = overbought → short (was 60, too loose)
@@ -295,7 +295,7 @@ class ScalpStrategy(BaseStrategy):
 
     # Per-pair base allocation (% of exchange capital) — tuned by performance
     PAIR_ALLOC_PCT: dict[str, float] = {
-        "XRP": 50.0,   # best performer — maximize
+        "XRP": 30.0,   # CAPPED from 50 — SLs too costly at 100+ contracts
         "ETH": 30.0,   # mixed but catches big moves
         "BTC": 20.0,   # low win rate but diversification
         "SOL": 15.0,
@@ -2141,6 +2141,16 @@ class ScalpStrategy(BaseStrategy):
                 self.logger.info(
                     "LARGE_POS_GATE: %s requiring %.2f%% mom for %d contracts (got %.3f%%) — skipping",
                     self.pair, self.LARGE_POS_MOM_PCT, contracts, abs(momentum_60s),
+                )
+                return None
+
+            # 8. Big size signal gate: >50 contracts requires 4/4 signals
+            BIG_SIZE_CONTRACTS = 50
+            if contracts > BIG_SIZE_CONTRACTS and signal_strength < 4:
+                self._skip_reason = f"BIG_SIZE_GATE ({contracts} contracts needs 4/4, got {signal_strength}/4)"
+                self.logger.info(
+                    "BIG_SIZE_GATE: %s %d contracts > %d — needs 4/4 signals but got %d/4, skipping",
+                    self.pair, contracts, BIG_SIZE_CONTRACTS, signal_strength,
                 )
                 return None
 
