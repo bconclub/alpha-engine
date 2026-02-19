@@ -312,13 +312,10 @@ class ScalpStrategy(BaseStrategy):
         "BTC": 20.0,   # low win rate but diversification
         "SOL": 15.0,
     }
-    # Per-pair contract caps
-    PAIR_MAX_CONTRACTS: dict[str, int] = {
-        "BTC": 1,
-        "ETH": 2,
-        "XRP": 50,
-        "SOL": 1,
-    }
+    # Safety limits for dynamic position sizing
+    MAX_COLLATERAL_PCT = 80.0         # never use more than 80% of balance on 1 position
+    MAX_TOTAL_EXPOSURE_PCT = 90.0     # max 90% total collateral across all positions
+    SECOND_POS_ALLOC_FACTOR = 0.60    # 2nd position gets 60% of normal allocation
     # Minimum signal strength per pair (3/4 — filter out weak coin-flip entries)
     PAIR_MIN_STRENGTH: dict[str, int] = {
         "XRP": 3,    # was 2/4, tightened: 2/4 entries were losers
@@ -380,9 +377,7 @@ class ScalpStrategy(BaseStrategy):
         self._exchange_id: str = "delta" if is_futures else "binance"
         self._market_analyzer = market_analyzer  # for 15m trend direction
 
-        # Per-pair contract limits (data-driven from PAIR_MAX_CONTRACTS dict)
         base_asset = pair.split("/")[0] if "/" in pair else pair.replace("USD", "").replace(":USD", "")
-        self._max_contracts = self.PAIR_MAX_CONTRACTS.get(base_asset, 1)
         self._base_asset = base_asset  # cached for SL/TP lookup
 
         # Dynamic ATR-based SL/TP — updated every tick from 1m candles
@@ -423,6 +418,9 @@ class ScalpStrategy(BaseStrategy):
         self._peak_unrealized_pnl: float = 0.0  # track peak P&L for decay exit
         self._profit_floor_pct: float = -999.0  # ratcheting capital floor (not yet locked)
         self._in_position_tick: int = 0  # counts 1s ticks while in position (for OHLCV refresh)
+
+        # ── Real-time balance refresh (for entry sizing) ──────
+        self._last_balance_refresh: float = 0.0  # monotonic time of last balance API call
 
         # ── Dashboard-driven config (loaded from DB by main.py) ──────
         self._pair_enabled: bool = True       # can be disabled via pair_config
@@ -498,7 +496,7 @@ class ScalpStrategy(BaseStrategy):
             "[%s] PHASE-BASED v6.1 ACTIVE (%s) — tick=1s/5s(dynamic), "
             "SL=%.2f%% TP=%.2f%% Phase1=%ds(skip@+%.1f%%) Phase2=%ds MaxHold=%ds "
             "Trail@+%.1f%%(%.2f%%) MoveToEntry@+%.1f%% Flat=%ds "
-            "MaxPos=%d MaxContracts=%d SLcool=%ds LossStreak=%d→%ds "
+            "MaxPos=%d Alloc=%.0f%% SLcool=%ds LossStreak=%d→%ds "
             "Mom=%.2f%% Vol=%.1fx RSI-Override=%d/%d "
             "DailyLoss=%.0f%%%s%s",
             self.pair, tag,
@@ -507,7 +505,7 @@ class ScalpStrategy(BaseStrategy):
             self.PHASE2_SECONDS, self.MAX_HOLD_SECONDS,
             self.TRAILING_ACTIVATE_PCT, self.TRAILING_DISTANCE_PCT,
             self.MOVE_SL_TO_ENTRY_PCT, self.FLATLINE_SECONDS,
-            max_pos, self._max_contracts,
+            max_pos, self._allocation_pct,
             self.SL_COOLDOWN_SECONDS, self.CONSECUTIVE_LOSS_LIMIT,
             self.STREAK_PAUSE_SECONDS,
             self.MOMENTUM_MIN_PCT, self.VOL_SPIKE_RATIO,
@@ -1031,12 +1029,18 @@ class ScalpStrategy(BaseStrategy):
                 }
                 return signals
 
+            # ── Refresh balance from exchange API (picks up new deposits) ─
+            await self._refresh_balance_if_stale()
+            available = self.risk_manager.get_available_capital(self._exchange_id)
+
             # ── Dynamic capital allocation based on signal strength ────
             amount = self._calculate_position_size_dynamic(
                 current_price, available, signal_strength, total_scalp,
             )
             if amount is None:
-                self._skip_reason = "POSITION_SIZE_ZERO"
+                # _skip_reason already set inside sizing method (INSUFFICIENT_CAPITAL)
+                if not self._skip_reason:
+                    self._skip_reason = "POSITION_SIZE_ZERO"
                 return signals
 
             # Share signal state with options strategy
@@ -2112,71 +2116,44 @@ class ScalpStrategy(BaseStrategy):
     # POSITION SIZING
     # ======================================================================
 
-    def _calculate_position_size(self, current_price: float, available: float) -> float | None:
-        """Calculate position amount in coin terms. Returns None if can't size.
+    async def _refresh_balance_if_stale(self) -> None:
+        """Refresh exchange balance from API if stale (>60s old).
 
-        Smart sizing: fit contracts into the LOWER of available capital and
-        risk manager's max_position_pct limit. This prevents sizing above
-        what the risk manager will approve.
+        Called right before position sizing to ensure we use real-time balance,
+        not a cached value from minutes ago. New deposits are picked up immediately.
         """
-        if self.is_futures:
-            from alpha.trade_executor import DELTA_CONTRACT_SIZE
-            contract_size = DELTA_CONTRACT_SIZE.get(self.pair, 0)
-            if contract_size <= 0:
-                self.logger.warning("[%s] Unknown Delta contract size — skipping", self.pair)
-                return None
+        REFRESH_INTERVAL = 60  # seconds
+        now = time.monotonic()
+        if now - self._last_balance_refresh < REFRESH_INTERVAL:
+            return  # recent enough
 
-            one_contract_collateral = (contract_size * current_price) / self.leverage
-            if one_contract_collateral > available:
-                if self._tick_count % 60 == 0:
-                    self.logger.info(
-                        "[%s] 1 contract needs $%.2f collateral > $%.2f avail — skipping",
-                        self.pair, one_contract_collateral, available,
-                    )
-                return None
+        if not self.trade_exchange:
+            return
 
-            # Cap at risk manager's max_position_pct to avoid rejection
-            exchange_capital = self.risk_manager.get_exchange_capital(self._exchange_id)
-            max_position_value = exchange_capital * (self.risk_manager.max_position_pct / 100)
-            budget = min(available, max_position_value)
+        try:
+            balance = await self.trade_exchange.fetch_balance()
+            total_map = balance.get("total", {})
+            usd_total = 0.0
+            for key in ("USDT", "USD", "USDC"):
+                val = total_map.get(key)
+                if val is not None and float(val) > 0:
+                    usd_total += float(val)
 
-            # Fit as many contracts as budget allows (capped per pair)
-            max_affordable = int(budget / one_contract_collateral)
-            contracts = max(1, min(max_affordable, self._max_contracts))
-            total_collateral = contracts * one_contract_collateral
-            amount = contracts * contract_size
+            if usd_total > 0:
+                if self._exchange_id == "delta":
+                    self.risk_manager.delta_capital = usd_total
+                else:
+                    self.risk_manager.binance_capital = usd_total
+                self.risk_manager.capital = self.risk_manager.binance_capital + self.risk_manager.delta_capital
+                self._last_balance_refresh = now
+                self.logger.debug(
+                    "[%s] Balance refreshed: %s=$%.2f",
+                    self.pair, self._exchange_id, usd_total,
+                )
+        except Exception:
+            pass  # non-critical — fall back to cached balance
 
-            self.logger.info(
-                "[%s] Sizing: %d contracts x %.4f = %.6f coin, "
-                "collateral=$%.2f (%dx), budget=$%.2f (avail=$%.2f, max=%.0f%%)",
-                self.pair, contracts, contract_size, amount,
-                total_collateral, self.leverage, budget, available,
-                self.risk_manager.max_position_pct,
-            )
-        else:
-            # Spot sizing: use CAPITAL_PCT_SPOT of available balance
-            exchange_capital = self.risk_manager.get_exchange_capital(self._exchange_id)
-            capital = exchange_capital * (self.capital_pct / 100)
-            capital = min(capital, available)
-
-            # Enforce minimum notional — skip if below $6 (avoids dust on exit)
-            if capital < self.MIN_NOTIONAL_SPOT:
-                if self._tick_count % 60 == 0:
-                    self.logger.info(
-                        "[%s] Spot order $%.2f < $%.2f min notional — skipping",
-                        self.pair, capital, self.MIN_NOTIONAL_SPOT,
-                    )
-                return None
-
-            amount = capital / current_price
-            self.logger.info(
-                "[%s] Sizing (spot): $%.2f → %.8f %s (%.0f%% of $%.2f avail)",
-                self.pair, capital, amount,
-                self.pair.split("/")[0] if "/" in self.pair else self.pair,
-                self.capital_pct, available,
-            )
-
-        return amount
+    # (Legacy _calculate_position_size removed — replaced by _calculate_position_size_dynamic)
 
     def _get_pair_win_rate(self) -> tuple[float, int]:
         """Get win rate for this pair from recent trade history.
@@ -2195,6 +2172,7 @@ class ScalpStrategy(BaseStrategy):
         Base allocation from PAIR_ALLOC_PCT (tuned by historical performance).
         Adaptive adjustment: if last 5 trades WR < 20%, reduce to minimum.
         If WR > 60%, boost by 20%.
+        2nd simultaneous position gets 60% of normal allocation.
         """
         # Use dashboard-driven allocation if set, else fall back to class constant
         base_alloc = self._allocation_pct
@@ -2209,18 +2187,26 @@ class ScalpStrategy(BaseStrategy):
                 # High WR: boost by 20% (capped at 70%)
                 base_alloc = min(70.0, base_alloc * 1.20)
 
+        # Reduce for 2nd simultaneous position
+        if total_open >= 1:
+            base_alloc *= self.SECOND_POS_ALLOC_FACTOR
+
         return max(5.0, min(70.0, base_alloc))
 
     def _calculate_position_size_dynamic(
         self, current_price: float, available: float,
         signal_strength: int, total_open: int,
     ) -> float | None:
-        """Performance-based capital allocation per pair.
+        """Dynamic position sizing based on balance and allocation — NO hardcoded contract caps.
 
-        Each pair gets a base allocation % tuned by historical performance:
-        - XRP: 50% (best performer), ETH: 30%, BTC: 15%, SOL: 5%
-        - Adaptive: if last 5 trades < 20% WR → reduce to minimum
-        - Adaptive: if last 5 trades > 60% WR → boost 20%
+        Sizing flow:
+        1. Get allocation % for this pair (performance-based, adaptive)
+        2. Reduce for 2nd simultaneous position (60% factor)
+        3. Calculate collateral from allocation
+        4. Safety cap: never use more than 80% of balance on one position
+        5. Calculate notional at leverage
+        6. Convert to contracts (round down to whole contracts)
+        7. Minimum 1 contract — if can't afford, skip (INSUFFICIENT_CAPITAL)
         """
         exchange_capital = self.risk_manager.get_exchange_capital(self._exchange_id)
         if exchange_capital <= 0:
@@ -2230,45 +2216,64 @@ class ScalpStrategy(BaseStrategy):
         win_rate, n_trades = self._get_pair_win_rate()
 
         if self.is_futures:
-            budget = exchange_capital * (alloc_pct / 100)
-            budget = min(budget, available)
-
             from alpha.trade_executor import DELTA_CONTRACT_SIZE
             contract_size = DELTA_CONTRACT_SIZE.get(self.pair, 0)
             if contract_size <= 0:
                 return None
 
-            one_contract_collateral = (contract_size * current_price) / self.leverage
-            if one_contract_collateral > budget:
+            # 1. Collateral from allocation
+            collateral = exchange_capital * (alloc_pct / 100)
+
+            # 2. Cap: never exceed available balance
+            collateral = min(collateral, available)
+
+            # 3. Safety cap: never use more than 80% of balance on one position
+            max_collateral = exchange_capital * (self.MAX_COLLATERAL_PCT / 100)
+            collateral = min(collateral, max_collateral)
+
+            # 4. Also cap at risk manager's max_position_pct (configurable)
+            max_position_value = exchange_capital * (self.risk_manager.max_position_pct / 100)
+            collateral = min(collateral, max_position_value)
+
+            # 5. Calculate notional at leverage and convert to contracts
+            notional = collateral * self.leverage
+            contract_value = contract_size * current_price
+            contracts = int(notional / contract_value)
+
+            # 6. Minimum 1 contract — if can't afford, skip
+            if contracts < 1:
+                self._skip_reason = "INSUFFICIENT_CAPITAL"
                 if self._tick_count % 60 == 0:
                     self.logger.info(
-                        "[%s] 1 contract needs $%.2f > $%.2f budget (%.0f%% alloc) — skipping",
-                        self.pair, one_contract_collateral, budget, alloc_pct,
+                        "[%s] INSUFFICIENT_CAPITAL: $%.2f collateral → %d contracts "
+                        "(need $%.2f for 1 contract at $%.0f)",
+                        self.pair, collateral, contracts,
+                        contract_value / self.leverage, current_price,
                     )
                 return None
 
-            # Cap at risk manager's max_position_pct
-            max_position_value = exchange_capital * (self.risk_manager.max_position_pct / 100)
-            budget = min(budget, max_position_value)
-
-            max_affordable = int(budget / one_contract_collateral)
-            contracts = max(1, min(max_affordable, self._max_contracts))
-            total_collateral = contracts * one_contract_collateral
+            total_collateral = contracts * contract_value / self.leverage
             amount = contracts * contract_size
 
             self.logger.info(
-                "[%s] Allocation: %s %.0f%% ($%.2f) based on WR=%.0f%% (%d trades) | "
-                "%d contracts, collateral=$%.2f (%dx), strength=%d/4",
-                self.pair, self._base_asset, alloc_pct,
-                total_collateral, win_rate * 100, n_trades,
-                contracts, total_collateral, self.leverage, signal_strength,
+                "SIZING: %s balance=$%.2f alloc=%.0f%% collateral=$%.2f "
+                "notional=$%.2f contracts=%d (%.4f %s) WR=%.0f%%/%d str=%d/4",
+                self.pair, exchange_capital, alloc_pct, total_collateral,
+                contracts * contract_value, contracts,
+                amount, self._base_asset,
+                win_rate * 100, n_trades, signal_strength,
             )
         else:
             # Spot: same performance-based allocation
             capital = exchange_capital * (alloc_pct / 100)
             capital = min(capital, available)
 
+            # Safety cap: 80% of balance
+            max_capital = exchange_capital * (self.MAX_COLLATERAL_PCT / 100)
+            capital = min(capital, max_capital)
+
             if capital < self.MIN_NOTIONAL_SPOT:
+                self._skip_reason = "INSUFFICIENT_CAPITAL"
                 if self._tick_count % 60 == 0:
                     self.logger.info(
                         "[%s] Spot $%.2f < $%.2f min (%.0f%% alloc) — skipping",
@@ -2278,15 +2283,11 @@ class ScalpStrategy(BaseStrategy):
 
             amount = capital / current_price
             self.logger.info(
-                "[%s] Allocation: %s %.0f%% ($%.2f) based on WR=%.0f%% (%d trades) | spot",
-                self.pair, self._base_asset, alloc_pct, capital,
-                win_rate * 100, n_trades,
-            )
-            self.logger.info(
-                "[%s] DynSize (spot): $%.2f → %.8f %s (%.0f%% of $%.2f, strength=%d/4)",
-                self.pair, capital, amount,
-                self.pair.split("/")[0] if "/" in self.pair else self.pair,
-                alloc_pct, exchange_capital, signal_strength,
+                "SIZING: %s balance=$%.2f alloc=%.0f%% collateral=$%.2f "
+                "notional=$%.2f contracts=spot (%.8f %s) WR=%.0f%%/%d str=%d/4",
+                self.pair, exchange_capital, alloc_pct, capital,
+                capital, amount, self._base_asset,
+                win_rate * 100, n_trades, signal_strength,
             )
 
         return amount

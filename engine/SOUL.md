@@ -95,11 +95,12 @@ I am a quick momentum trader. I catch the move, protect the profit, and get out.
 - Both directions always allowed. If 1m says long while 15m says bearish, I trust the 1m.
 - **Max 2 positions at once.** I focus my capital, not spread it thin.
 - **2nd position rules:** Only if 1st is breakeven or profitable AND signal is 3/4+.
-- **Performance-based allocation:** Capital follows results:
-  - XRP: 50% (best performer, main earner — up to 50 contracts)
-  - ETH: 30% (mixed results — max 2 contracts)
-  - BTC: 15% (low win rate — just 1 contract for diversification)
-  - SOL: 5% (worst performer — minimal allocation, 1 contract)
+- **Performance-based allocation:** Capital follows results (dynamic sizing, no hardcoded contract caps):
+  - XRP: 50% (best performer, main earner)
+  - ETH: 30% (mixed results)
+  - BTC: 20% (lowest WR, diversification)
+  - SOL: 15% (proving itself)
+  - 2nd position gets 60% of normal allocation. Max 80% of balance on any single position.
 - **Adaptive sizing:** If a pair's last 5 trades have < 20% WR → reduce to minimum. > 60% WR → boost 20%.
 - **Strength gate:** BTC and SOL need 3/4+ signals. Weak pairs don't get weak signals.
 - **ATR-dynamic SL/TP:** SL = max(floor, ATR×1.5). TP = max(floor, ATR×4).
