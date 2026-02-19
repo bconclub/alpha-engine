@@ -1149,16 +1149,17 @@ export default function TradeTable({ trades }: TradeTableProps) {
                               </div>
                             ) : trade.position_state === 'holding' || trade.status === 'open' ? (() => {
                               const TRAIL_ACT = 0.30;
-                              // Compute live price P&L from livePrices (3s updates)
-                              let livePricePnl = trade.current_pnl ?? 0;
+                              // Compute CURRENT live price P&L (moves up AND down with price)
+                              let currentPnl = trade.current_pnl ?? 0;
                               const livePrice = livePrices.prices[trade.pair] ?? null;
                               if (livePrice && trade.price > 0) {
-                                livePricePnl = trade.position_type === 'short'
+                                currentPnl = trade.position_type === 'short'
                                   ? ((trade.price - livePrice) / trade.price) * 100
                                   : ((livePrice - trade.price) / trade.price) * 100;
                               }
-                              const peak = Math.max(trade.peak_pnl ?? 0, livePricePnl, 0);
-                              const progress = Math.min((peak / TRAIL_ACT) * 100, 100);
+                              // Bar shows CURRENT position relative to 0.30% — goes up and down
+                              const displayPnl = Math.max(currentPnl, 0);
+                              const progress = Math.min((displayPnl / TRAIL_ACT) * 100, 100);
                               const barColor = progress >= 66 ? 'bg-emerald-400' : progress >= 33 ? 'bg-amber-400' : 'bg-red-400';
                               const txtColor = progress >= 66 ? 'text-emerald-400' : progress >= 33 ? 'text-amber-400' : 'text-red-400';
                               return (
@@ -1172,7 +1173,7 @@ export default function TradeTable({ trades }: TradeTableProps) {
                                     </div>
                                   </div>
                                   <span className={cn('text-[10px] font-mono whitespace-nowrap', txtColor)}>
-                                    {peak.toFixed(2)}/{TRAIL_ACT.toFixed(2)}%
+                                    {displayPnl.toFixed(2)}/{TRAIL_ACT.toFixed(2)}%
                                   </span>
                                 </div>
                               );

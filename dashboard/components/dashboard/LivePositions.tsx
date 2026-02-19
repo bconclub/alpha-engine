@@ -80,8 +80,9 @@ function TrailProgressBar({
     );
   }
 
-  // Progress toward trail activation
-  const progress = Math.min(Math.max((peakPct / TRAIL_ACTIVATION_PCT) * 100, 0), 100);
+  // Bar shows CURRENT P&L position — moves up AND down with price
+  const livePct = Math.max(currentPct, 0);
+  const progress = Math.min(Math.max((livePct / TRAIL_ACTIVATION_PCT) * 100, 0), 100);
 
   // Color gradient based on progress
   let barColor: string;
@@ -97,8 +98,7 @@ function TrailProgressBar({
     textColor = 'text-[#ff1744]';
   }
 
-  // Show peak or current, whichever is higher (peak should always be >= current when positive)
-  const displayPct = Math.max(peakPct, currentPct, 0);
+  const displayPct = livePct;
 
   return (
     <div className="flex items-center gap-2 w-full">
