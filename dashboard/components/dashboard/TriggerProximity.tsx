@@ -5,18 +5,19 @@ import { useSupabase } from '@/components/providers/SupabaseProvider';
 import { cn } from '@/lib/utils';
 import type { StrategyLog, Exchange, OpenPosition } from '@/lib/types';
 
-// ── Engine thresholds (Focused Signal v5.4) ─────────────────────────
+// ── Engine thresholds (Focused Signal v6.1) ─────────────────────────
 // Used ONLY as fallback when DB doesn't have signal_count/signal_* fields
-const RSI_LONG_THRESHOLD = 40;
-const RSI_SHORT_THRESHOLD = 60;
-const MOMENTUM_MIN_PCT = 0.15;
-const VOL_SPIKE_RATIO = 1.2;
+const RSI_LONG_THRESHOLD = 35;     // was 40 — matches scalp.py RSI_THRESHOLD_LONG
+const RSI_SHORT_THRESHOLD = 65;    // was 60 — matches scalp.py RSI_THRESHOLD_SHORT
+const MOMENTUM_MIN_PCT = 0.08;     // was 0.15 — matches scalp.py MOMENTUM_MIN_PCT
+const VOL_SPIKE_RATIO = 0.8;       // was 1.2 — matches scalp.py VOLUME_SPIKE_RATIO
 const BB_TREND_UPPER = 0.85;
 const BB_TREND_LOWER = 0.15;
 
 interface IndicatorStatus {
   active: boolean;
   label: string;
+  direction?: 'bull' | 'bear' | null;
 }
 
 interface TriggerInfo {
@@ -91,11 +92,16 @@ function computeTrigger(log: StrategyLog): TriggerInfo {
     const bullCount = log.bull_count ?? 0;
     const bearCount = log.bear_count ?? 0;
 
+    // Determine signal direction for dot coloring
+    const dotDir = signalSide === 'short' ? 'bear' as const
+      : signalSide === 'long' ? 'bull' as const
+      : (bearCount > bullCount ? 'bear' as const : 'bull' as const);
+
     const indicators: IndicatorStatus[] = [
-      { active: log.signal_mom === true, label: 'MOM' },
-      { active: log.signal_vol === true, label: 'VOL' },
-      { active: log.signal_rsi === true, label: 'RSI' },
-      { active: log.signal_bb === true,  label: 'BB' },
+      { active: log.signal_mom === true, label: 'MOM', direction: dotDir },
+      { active: log.signal_vol === true, label: 'VOL', direction: dotDir },
+      { active: log.signal_rsi === true, label: 'RSI', direction: dotDir },
+      { active: log.signal_bb === true,  label: 'BB',  direction: dotDir },
     ];
 
     let overallStatus: string;
@@ -129,42 +135,42 @@ function computeTrigger(log: StrategyLog): TriggerInfo {
   let longCount = 0;
 
   const momBull = priceChangePct != null && priceChangePct >= MOMENTUM_MIN_PCT;
-  longIndicators.push({ active: momBull, label: 'MOM' });
+  longIndicators.push({ active: momBull, label: 'MOM', direction: 'bull' });
   if (momBull) longCount++;
 
   const volHigh = volumeRatio != null && volumeRatio >= VOL_SPIKE_RATIO;
   const volBull = volHigh && (priceChangePct == null || priceChangePct >= 0);
-  longIndicators.push({ active: volBull, label: 'VOL' });
+  longIndicators.push({ active: volBull, label: 'VOL', direction: 'bull' });
   if (volBull) longCount++;
 
   const rsiLong = rsi != null && rsi < RSI_LONG_THRESHOLD;
-  longIndicators.push({ active: rsiLong, label: 'RSI' });
+  longIndicators.push({ active: rsiLong, label: 'RSI', direction: 'bull' });
   if (rsiLong) longCount++;
 
   const bbRange = (bbUpper ?? 0) - (bbLower ?? 0);
   const bbPos = bbRange > 0 && currentPrice != null && bbLower != null
     ? (currentPrice - bbLower) / bbRange : 0.5;
   const bbLongActive = bbPos <= BB_TREND_LOWER;
-  longIndicators.push({ active: bbLongActive, label: 'BB' });
+  longIndicators.push({ active: bbLongActive, label: 'BB', direction: 'bull' });
   if (bbLongActive) longCount++;
 
   const shortIndicators: IndicatorStatus[] = [];
   let shortCount = 0;
 
   const momBear = priceChangePct != null && priceChangePct <= -MOMENTUM_MIN_PCT;
-  shortIndicators.push({ active: momBear, label: 'MOM' });
+  shortIndicators.push({ active: momBear, label: 'MOM', direction: 'bear' });
   if (momBear) shortCount++;
 
   const volBear = volHigh && (priceChangePct == null || priceChangePct <= 0);
-  shortIndicators.push({ active: volBear, label: 'VOL' });
+  shortIndicators.push({ active: volBear, label: 'VOL', direction: 'bear' });
   if (volBear) shortCount++;
 
   const rsiShort = rsi != null && rsi > RSI_SHORT_THRESHOLD;
-  shortIndicators.push({ active: rsiShort, label: 'RSI' });
+  shortIndicators.push({ active: rsiShort, label: 'RSI', direction: 'bear' });
   if (rsiShort) shortCount++;
 
   const bbShortActive = isFutures && bbPos >= BB_TREND_UPPER;
-  shortIndicators.push({ active: bbShortActive, label: 'BB' });
+  shortIndicators.push({ active: bbShortActive, label: 'BB', direction: 'bear' });
   if (bbShortActive) shortCount++;
 
   // Pick the stronger side
@@ -184,11 +190,11 @@ function computeTrigger(log: StrategyLog): TriggerInfo {
   if (!hasData) {
     overallStatus = 'Awaiting data...';
     statusColor = 'text-zinc-600';
-  } else if (signalCount >= 2) {
+  } else if (signalCount >= 3) {
     overallStatus = `${signalCount}/4 — TRADE READY`;
     statusColor = 'text-[#00c853]';
-  } else if (signalCount === 1) {
-    overallStatus = '1/4 — Needs 1 more';
+  } else if (signalCount >= 1) {
+    overallStatus = `${signalCount}/4 — Needs ${3 - signalCount} more`;
     statusColor = 'text-[#ffd600]';
   } else {
     overallStatus = '0/4 — Scanning';
@@ -224,20 +230,23 @@ function SignalBar({ count, variant = 'bull' }: { count: number; variant?: 'bull
 }
 
 // ── Single indicator dot ─────────────────────────────────────────────
-function Dot({ active, label }: { active: boolean; label: string }) {
+function Dot({ active, label, direction }: { active: boolean; label: string; direction?: 'bull' | 'bear' | null }) {
+  const isBear = direction === 'bear';
+  const activeColor = isBear ? 'bg-[#ff1744] border-[#ff1744] shadow-[0_0_6px_rgba(255,23,68,0.5)]'
+    : 'bg-[#00c853] border-[#00c853] shadow-[0_0_6px_rgba(0,200,83,0.5)]';
+  const activeText = isBear ? 'text-[#ff1744]' : 'text-[#00c853]';
+
   return (
     <div className="flex flex-col items-center gap-0.5">
       <div
         className={cn(
           'w-3 h-3 md:w-2.5 md:h-2.5 rounded-full border transition-all duration-500',
-          active
-            ? 'bg-[#00c853] border-[#00c853] shadow-[0_0_6px_rgba(0,200,83,0.5)]'
-            : 'bg-zinc-800 border-zinc-700',
+          active ? activeColor : 'bg-zinc-800 border-zinc-700',
         )}
       />
       <span className={cn(
         'text-[8px] font-mono leading-none',
-        active ? 'text-[#00c853]' : 'text-zinc-600',
+        active ? activeText : 'text-zinc-600',
       )}>
         {label}
       </span>
@@ -414,7 +423,7 @@ export function TriggerProximity() {
                     {/* Active side indicator dots */}
                     <div className="flex items-center gap-2 ml-12">
                       {t.indicators.map((ind, i) => (
-                        <Dot key={i} active={ind.active} label={ind.label} />
+                        <Dot key={i} active={ind.active} label={ind.label} direction={ind.direction} />
                       ))}
                     </div>
                   </div>
