@@ -191,27 +191,6 @@ export function LiveStatusBar() {
   return (
     <div className="bg-[#0d1117] border border-zinc-800 rounded-xl p-3 md:p-4">
 
-      {/* ═══ REGIME BANNER (both layouts) ═══ */}
-      <div className={cn(
-        'flex items-center justify-between rounded-lg border px-3 py-2 mb-2',
-        rc.bg,
-        rc.pulse && 'animate-pulse',
-      )}>
-        <div className="flex items-center gap-2">
-          <span className={cn('text-base', rc.text)}>{rc.icon}</span>
-          <span className={cn('text-xs font-bold tracking-wide', rc.text)}>{rc.label}</span>
-          {regime === 'CHOPPY' && (
-            <span className="text-[10px] font-semibold text-red-300 ml-1">NO TRADES</span>
-          )}
-        </div>
-        <div className="flex items-center gap-3 text-[10px] font-mono text-zinc-400">
-          <span>Chop: {chopScore.toFixed(2)}</span>
-          <span>ATR: {atrRatio.toFixed(1)}x</span>
-          <span>Net: {netChange >= 0 ? '+' : ''}{netChange.toFixed(2)}%</span>
-          {regimeDuration && <span>Since {regimeDuration}</span>}
-        </div>
-      </div>
-
       {/* ═══ MOBILE LAYOUT ═══ */}
       <div className="flex flex-col gap-2 md:hidden">
 
@@ -286,7 +265,28 @@ export function LiveStatusBar() {
           </div>
         </div>
 
-        {/* Row 3 — Bot state + uptime + open positions + clock */}
+        {/* Row 3 — Market Regime */}
+        <div className={cn(
+          'flex items-center justify-between rounded-lg border px-3 py-2',
+          rc.bg,
+          rc.pulse && 'animate-pulse',
+        )}>
+          <div className="flex items-center gap-2">
+            <span className={cn('text-base', rc.text)}>{rc.icon}</span>
+            <span className={cn('text-xs font-bold tracking-wide', rc.text)}>{rc.label}</span>
+            {regime === 'CHOPPY' && (
+              <span className="text-[10px] font-semibold text-red-300 ml-1">NO TRADES</span>
+            )}
+          </div>
+          <div className="flex items-center gap-3 text-[10px] font-mono text-zinc-400">
+            <span>Chop: {chopScore.toFixed(2)}</span>
+            <span>ATR: {atrRatio.toFixed(1)}x</span>
+            <span>Net: {netChange >= 0 ? '+' : ''}{netChange.toFixed(2)}%</span>
+            {regimeDuration && <span>Since {regimeDuration}</span>}
+          </div>
+        </div>
+
+        {/* Row 4 — Bot state + uptime + open positions + clock */}
         <div className="flex items-center justify-between px-1">
           <div className="flex items-center gap-2">
             <span
@@ -384,6 +384,31 @@ export function LiveStatusBar() {
             ) : (
               <span className="text-xs text-zinc-500">No trades</span>
             )}
+          </div>
+
+          {/* Market Regime Card */}
+          <div className={cn(
+            'flex-1 border rounded-lg px-4 py-3',
+            rc.bg,
+            rc.pulse && 'animate-pulse',
+          )}>
+            <div className="flex items-center gap-2 mb-1">
+              <span className={cn('text-base', rc.text)}>{rc.icon}</span>
+              <span className={cn('text-sm font-bold tracking-wide', rc.text)}>{rc.label}</span>
+              {regime === 'CHOPPY' && (
+                <span className="text-[10px] font-semibold text-red-300 ml-1">NO TRADES</span>
+              )}
+            </div>
+            <div className="flex flex-col gap-0.5 text-[10px] font-mono text-zinc-400">
+              <div className="flex items-center gap-3">
+                <span>Chop: {chopScore.toFixed(2)}</span>
+                <span>ATR: {atrRatio.toFixed(1)}x</span>
+              </div>
+              <div className="flex items-center gap-3">
+                <span>Net: {netChange >= 0 ? '+' : ''}{netChange.toFixed(2)}%</span>
+                {regimeDuration && <span>Since {regimeDuration}</span>}
+              </div>
+            </div>
           </div>
         </div>
 

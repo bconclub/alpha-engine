@@ -42,6 +42,8 @@ interface TriggerInfo {
   // Overall
   overallStatus: string;
   statusColor: string;
+  // Skip reason from bot (why it's not entering)
+  skipReason: string | null;
   // Active position on this pair (if any)
   activePosition: OpenPosition | null;
 }
@@ -121,11 +123,15 @@ function computeTrigger(log: StrategyLog): TriggerInfo {
       statusColor = 'text-zinc-500';
     }
 
+    // Skip reason from bot
+    const skipReason = log.skip_reason || null;
+
     return {
       pair, exchange, isFutures, hasData,
       rsi, volumeRatio, priceChangePct, currentPrice, bbUpper, bbLower,
       trend, signalSide, indicators, signalCount, bullCount, bearCount,
       overallStatus, statusColor,
+      skipReason,
       activePosition: null,
     };
   }
@@ -206,6 +212,7 @@ function computeTrigger(log: StrategyLog): TriggerInfo {
     rsi, volumeRatio, priceChangePct, currentPrice, bbUpper, bbLower,
     trend, signalSide, indicators, signalCount, bullCount, bearCount,
     overallStatus, statusColor,
+    skipReason: null,
     activePosition: null,
   };
 }
@@ -289,7 +296,10 @@ export function TriggerProximity() {
       if (log.pair) {
         const asset = extractBaseAsset(log.pair);
         if (!ACTIVE_ASSETS.has(asset)) continue;
-        const key = `${log.pair}-${log.exchange ?? 'delta'}`;
+        // Only show Delta futures pairs (user requested: remove Binance)
+        const exchange = log.exchange ?? 'delta';
+        if (exchange !== 'delta') continue;
+        const key = `${log.pair}-${exchange}`;
         if (!latestByPair.has(key)) {
           latestByPair.set(key, log);
         }
@@ -375,9 +385,16 @@ export function TriggerProximity() {
                       {posPnl != null && ` ${posPnl >= 0 ? '+' : ''}${posPnl.toFixed(2)}%`}
                     </span>
                   ) : (
-                    <span className={cn('text-[11px] font-medium', t.statusColor)}>
-                      {t.overallStatus}
-                    </span>
+                    <div className="flex flex-col items-end gap-0.5">
+                      <span className={cn('text-[11px] font-medium', t.statusColor)}>
+                        {t.overallStatus}
+                      </span>
+                      {t.skipReason && (
+                        <span className="text-[9px] font-mono text-amber-400/70 truncate max-w-[180px]">
+                          ⚠ {t.skipReason.replace(/_/g, ' ')}
+                        </span>
+                      )}
+                    </div>
                   )}
                 </div>
               </div>

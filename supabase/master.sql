@@ -123,7 +123,10 @@ create table if not exists public.strategy_log (
     -- Directional indicators
     plus_di             numeric(10,4),
     minus_di            numeric(10,4),
-    direction           text default 'neutral'   -- 'bullish', 'bearish', 'neutral'
+    direction           text default 'neutral',  -- 'bullish', 'bearish', 'neutral'
+
+    -- Skip reason (why bot didn't enter)
+    skip_reason         text
 );
 
 -- Indexes

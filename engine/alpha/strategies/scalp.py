@@ -460,6 +460,8 @@ class ScalpStrategy(BaseStrategy):
         self.last_signal_state: dict[str, Any] | None = None
         # Directional signal breakdown (set by _evaluate_signals, spread into last_signal_state)
         self._last_signal_breakdown: dict[str, Any] = {}
+        # Skip reason — why the bot isn't entering (dashboard reads this)
+        self._skip_reason: str = ""
 
         # BB Squeeze tracking (signal #8)
         self._squeeze_tick_count: int = 0
@@ -890,9 +892,11 @@ class ScalpStrategy(BaseStrategy):
 
         # ── No position: look for PURE 2-of-4 signal entry ────────────
         self._prev_rsi = rsi_now
+        self._skip_reason = ""  # reset each tick — set if we skip
 
         # Check position limits
         if self.risk_manager.has_position(self.pair):
+            self._skip_reason = "ALREADY_IN_POSITION"
             return signals
 
         total_scalp = sum(
@@ -901,12 +905,14 @@ class ScalpStrategy(BaseStrategy):
         )
         max_pos = self.SPOT_MAX_POSITIONS if not self.is_futures else self.MAX_POSITIONS
         if total_scalp >= max_pos:
+            self._skip_reason = f"MAX_POSITIONS ({total_scalp}/{max_pos})"
             return signals
 
         # ── COOLDOWN: pause after SL hit (PER PAIR) ────────────────
         pair_sl_time = ScalpStrategy._pair_last_sl_time.get(self._base_asset, 0.0)
         sl_cooldown_remaining = pair_sl_time + self.SL_COOLDOWN_SECONDS - now
         if sl_cooldown_remaining > 0:
+            self._skip_reason = f"SL_COOLDOWN ({int(sl_cooldown_remaining)}s)"
             if self._tick_count % 12 == 0:
                 self.logger.info(
                     "[%s] SL COOLDOWN — %.0fs remaining before new entries",
@@ -919,6 +925,7 @@ class ScalpStrategy(BaseStrategy):
         if now < pair_pause_until:
             remaining = pair_pause_until - now
             pair_losses = ScalpStrategy._pair_consecutive_losses.get(self._base_asset, 0)
+            self._skip_reason = f"STREAK_PAUSE ({pair_losses}L, {int(remaining)}s)"
             if self._tick_count % 12 == 0:
                 self.logger.info(
                     "[%s] STREAK PAUSE — %d consecutive losses on %s, %.0fs remaining",
@@ -929,6 +936,7 @@ class ScalpStrategy(BaseStrategy):
         # ── PHANTOM COOLDOWN: no entries for 60s after phantom clear ──
         if now < self._phantom_cooldown_until:
             remaining = self._phantom_cooldown_until - now
+            self._skip_reason = f"PHANTOM_COOLDOWN ({int(remaining)}s)"
             if self._tick_count % 12 == 0:
                 self.logger.info(
                     "[%s] PHANTOM COOLDOWN — %.0fs remaining before new entries",
@@ -944,6 +952,7 @@ class ScalpStrategy(BaseStrategy):
             if bid > 0 and ask > 0:
                 spread_pct = ((ask - bid) / bid) * 100
                 if spread_pct > self.MAX_SPREAD_PCT:
+                    self._skip_reason = f"SPREAD_TOO_WIDE ({spread_pct:.2f}%)"
                     return signals
         except Exception:
             pass
@@ -952,6 +961,7 @@ class ScalpStrategy(BaseStrategy):
         available = self.risk_manager.get_available_capital(self._exchange_id)
         min_balance = self.MIN_NOTIONAL_SPOT if self._exchange_id == "binance" else 1.00
         if available < min_balance:
+            self._skip_reason = f"LOW_BALANCE (${available:.2f})"
             if self._tick_count % 60 == 0:
                 self.logger.info(
                     "[%s] Insufficient %s balance: $%.2f",
@@ -961,6 +971,7 @@ class ScalpStrategy(BaseStrategy):
 
         # ── REGIME GATE: CHOPPY = no new entries ─────────────────────
         if self._market_regime == "CHOPPY":
+            self._skip_reason = "REGIME_CHOPPY"
             if self._tick_count % 12 == 0:
                 regime_sec = int(time.monotonic() - self._regime_since)
                 self.logger.info(
@@ -1003,6 +1014,7 @@ class ScalpStrategy(BaseStrategy):
             else:
                 min_strength = self.PAIR_MIN_STRENGTH.get(self._base_asset, 2)
             if signal_strength < min_strength:
+                self._skip_reason = f"STRENGTH_GATE ({signal_strength}/4 < {min_strength}/4)"
                 if self._tick_count % 12 == 0:
                     warmup_tag = " (WARMUP)" if in_warmup else ""
                     self.logger.info(
@@ -1014,6 +1026,7 @@ class ScalpStrategy(BaseStrategy):
                     "strength": signal_strength, "trend_15m": trend_15m,
                     "rsi": rsi_now, "momentum_60s": momentum_60s,
                     "current_price": current_price, "timestamp": time.monotonic(),
+                    "skip_reason": self._skip_reason,
                     **self._last_signal_breakdown,
                 }
                 return signals
@@ -1023,9 +1036,11 @@ class ScalpStrategy(BaseStrategy):
                 current_price, available, signal_strength, total_scalp,
             )
             if amount is None:
+                self._skip_reason = "POSITION_SIZE_ZERO"
                 return signals
 
             # Share signal state with options strategy
+            self._skip_reason = ""  # Clear — we're entering
             self.last_signal_state = {
                 "side": side,
                 "reason": reason,
@@ -1035,6 +1050,7 @@ class ScalpStrategy(BaseStrategy):
                 "momentum_60s": momentum_60s,
                 "current_price": current_price,
                 "timestamp": time.monotonic(),
+                "skip_reason": "",
                 **self._last_signal_breakdown,
             }
             # Clear post-streak gate on successful entry (first trade back done)
@@ -1065,6 +1081,7 @@ class ScalpStrategy(BaseStrategy):
                 "momentum_60s": momentum_60s,
                 "current_price": current_price,
                 "timestamp": time.monotonic(),
+                "skip_reason": self._skip_reason,
                 **self._last_signal_breakdown,
             }
             # Log scanning status every 30 seconds with pass/fail per condition
@@ -1209,6 +1226,7 @@ class ScalpStrategy(BaseStrategy):
                 "bull_mom": False, "bull_vol": False, "bull_rsi": False, "bull_bb": False,
                 "bear_mom": False, "bear_vol": False, "bear_rsi": False, "bear_bb": False,
             }
+            self._skip_reason = f"NO_MOMENTUM ({abs(momentum_60s):.3f}% < {eff_mom:.3f}%)"
             return None
 
         # Direction is locked by momentum
@@ -1265,6 +1283,7 @@ class ScalpStrategy(BaseStrategy):
                 "bull_mom": False, "bull_vol": False, "bull_rsi": False, "bull_bb": False,
                 "bear_mom": False, "bear_vol": False, "bear_rsi": False, "bear_bb": False,
             }
+            self._skip_reason = f"WEAK_COUNTER_TREND ({mom_direction} vs 15m {trend_15m})"
             return None
 
         # ── Post-streak gate: first trade after streak pause needs 3/4 ─────

@@ -78,6 +78,7 @@ export interface StrategyLog {
   signal_bb?: boolean;     // BB mean-reversion signal active (for active side)
   bull_count?: number;     // 0-11: how many signals fire bullish
   bear_count?: number;     // 0-11: how many signals fire bearish
+  skip_reason?: string;    // Why bot isn't entering (e.g. "REGIME_CHOPPY", "STRENGTH_GATE")
 }
 
 export interface BotStatus {

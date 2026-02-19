@@ -511,6 +511,7 @@ class AlphaBot:
                         "signal_bb": sig_bb,
                         "bull_count": bull_count,
                         "bear_count": bear_count,
+                        "skip_reason": sig.get("skip_reason", "") if sig else "",
                     })
                 except Exception:
                     logger.debug("Failed to log strategy selection for %s", pair)
