@@ -40,6 +40,21 @@ const BONUS_SIGNALS = ['MOM_5M', 'TCONT', 'VWAP', 'BBSQZ', 'LIQSWEEP', 'FVG', 'V
 
 const ALL_PAIR_BASES = ['BTC', 'ETH', 'XRP', 'SOL'] as const;
 
+type TimePeriod = '24h' | '7d' | '14d' | 'all';
+
+const TIME_PERIODS: { key: TimePeriod; label: string }[] = [
+  { key: '24h', label: '24h' },
+  { key: '7d', label: '7d' },
+  { key: '14d', label: '14d' },
+  { key: 'all', label: 'All Time' },
+];
+
+function getPeriodCutoff(period: TimePeriod): Date | null {
+  if (period === 'all') return null;
+  const ms = { '24h': 24, '7d': 7 * 24, '14d': 14 * 24 }[period] * 60 * 60 * 1000;
+  return new Date(Date.now() - ms);
+}
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -76,20 +91,28 @@ function computeSetupStats(trades: Trade[], setupType: string) {
 export default function StrategiesPage() {
   const { trades, setupConfigs, signalStates, pairConfigs } = useSupabase();
   const [activeTab, setActiveTab] = useState<Strategy>('scalp');
+  const [timePeriod, setTimePeriod] = useState<TimePeriod>('all');
 
   const filteredTrades = useMemo(
     () => trades.filter((t) => t.strategy === activeTab),
     [trades, activeTab],
   );
 
-  // Setup stats
+  // Trades filtered by selected time period (for setup stats only)
+  const periodTrades = useMemo(() => {
+    const cutoff = getPeriodCutoff(timePeriod);
+    if (!cutoff) return trades;
+    return trades.filter((t) => new Date(t.timestamp).getTime() >= cutoff.getTime());
+  }, [trades, timePeriod]);
+
+  // Setup stats scoped to selected time period
   const setupStats = useMemo(() => {
     const map: Record<string, ReturnType<typeof computeSetupStats>> = {};
     for (const st of SETUP_TYPES) {
-      map[st] = computeSetupStats(trades, st);
+      map[st] = computeSetupStats(periodTrades, st);
     }
     return map;
-  }, [trades]);
+  }, [periodTrades]);
 
   // Sort setups by P&L ascending (worst first)
   const sortedSetups = useMemo(() => {
@@ -184,7 +207,25 @@ export default function StrategiesPage() {
       {/* Setup Control                                                        */}
       {/* ------------------------------------------------------------------- */}
       <div>
-        <h2 className="text-lg font-semibold text-white mb-4">Setup Control</h2>
+        <div className="flex items-center justify-between mb-4">
+          <h2 className="text-lg font-semibold text-white">Setup Control</h2>
+          <div className="flex gap-1">
+            {TIME_PERIODS.map(({ key, label }) => (
+              <button
+                key={key}
+                onClick={() => setTimePeriod(key)}
+                className={cn(
+                  'px-3 py-1 text-xs font-medium rounded-lg transition-colors',
+                  timePeriod === key
+                    ? 'bg-teal-600 text-white'
+                    : 'text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800 bg-zinc-800/50',
+                )}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
+        </div>
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
           {sortedSetups.map((setupType) => {
             const stats = setupStats[setupType];
