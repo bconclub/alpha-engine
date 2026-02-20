@@ -70,8 +70,9 @@ class OptionsScalpStrategy(BaseStrategy):
     ETH_STRIKE_ROUND = 20                # ETH: nearest $20
 
     # ── Premium limits ────────────────────────────────────────────
-    MAX_PREMIUM_CAPITAL_PCT = 20.0       # Max 20% of capital
-    MAX_PREMIUM_USD = 2.00               # Hard cap $2
+    OPTIONS_LEVERAGE = 50                # Delta options are 50x leveraged
+    MAX_PREMIUM_CAPITAL_PCT = 20.0       # Max 20% of capital (compared against collateral)
+    MAX_PREMIUM_USD = 2.00               # Hard cap $2 collateral
     MIN_PREMIUM_USD = 0.01               # Skip illiquid < $0.01
 
     # ── Entry ─────────────────────────────────────────────────────
@@ -610,23 +611,26 @@ class OptionsScalpStrategy(BaseStrategy):
         if premium <= 0:
             return []
 
-        # 10. Premium checks
+        # 10. Premium / collateral checks (options are 50x leveraged)
+        collateral = premium / self.OPTIONS_LEVERAGE
         exchange_capital = self.risk_manager.get_exchange_capital(self._exchange_id)
-        max_premium = min(
+        max_collateral = min(
             exchange_capital * (self.MAX_PREMIUM_CAPITAL_PCT / 100),
             self.MAX_PREMIUM_USD,
         )
 
-        if premium > max_premium:
+        if collateral > max_collateral:
             if self._tick_count % 30 == 0:
                 self.logger.info(
-                    "[%s] Premium $%.4f > max $%.2f — skipping %s",
-                    self.pair, premium, max_premium, symbol,
+                    "[%s] Collateral $%.4f (premium $%.4f @ %dx) > max $%.4f — skipping %s",
+                    self.pair, collateral, premium, self.OPTIONS_LEVERAGE,
+                    max_collateral, symbol,
                 )
             await self._log_skip(
-                f"{self.pair} — OPTIONS SKIP: premium ${premium:.2f} > ${max_premium:.2f} cap",
+                f"{self.pair} — OPTIONS SKIP: collateral ${collateral:.4f} "
+                f"(premium ${premium:.4f} @ {self.OPTIONS_LEVERAGE}x) > ${max_collateral:.4f} cap",
                 {"option_type": option_type, "strike": atm_strike, "premium": premium,
-                 "max_premium": max_premium, "strength": strength},
+                 "collateral": collateral, "max_collateral": max_collateral, "strength": strength},
             )
             return []
 
@@ -672,7 +676,7 @@ class OptionsScalpStrategy(BaseStrategy):
             reason=reason,
             strategy=self.name,
             pair=symbol,
-            leverage=1,
+            leverage=self.OPTIONS_LEVERAGE,
             position_type="long",
             exchange_id="delta",
             metadata={
@@ -849,7 +853,7 @@ class OptionsScalpStrategy(BaseStrategy):
             reason=reason,
             strategy=self.name,
             pair=self.option_symbol or self.pair,
-            leverage=1,
+            leverage=self.OPTIONS_LEVERAGE,
             position_type="long",
             reduce_only=True,
             exchange_id="delta",
