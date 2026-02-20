@@ -861,6 +861,12 @@ class ScalpStrategy(BaseStrategy):
 
         # ── In position: check exit ────────────────────────────────────
         if self.in_position:
+            # Keep signal state timestamp fresh while in position so options_scalp
+            # doesn't see it as stale. Preserve existing signal data (side/strength).
+            if self.last_signal_state is not None:
+                self.last_signal_state["timestamp"] = time.monotonic()
+                self.last_signal_state["current_price"] = current_price
+
             # Update class-level live P&L (shared, so 2nd position gate can check)
             ScalpStrategy._live_pnl[self.pair] = self._calc_pnl_pct(current_price)
 
@@ -889,6 +895,10 @@ class ScalpStrategy(BaseStrategy):
         # Check position limits
         if self.risk_manager.has_position(self.pair):
             self._skip_reason = "ALREADY_IN_POSITION"
+            # Refresh timestamp so options_scalp doesn't see stale signal
+            if self.last_signal_state is not None:
+                self.last_signal_state["timestamp"] = time.monotonic()
+                self.last_signal_state["current_price"] = current_price
             return signals
 
         total_scalp = sum(
@@ -898,6 +908,10 @@ class ScalpStrategy(BaseStrategy):
         max_pos = self.SPOT_MAX_POSITIONS if not self.is_futures else self.MAX_POSITIONS
         if total_scalp >= max_pos:
             self._skip_reason = f"MAX_POSITIONS ({total_scalp}/{max_pos})"
+            # Refresh timestamp so options_scalp doesn't see stale signal
+            if self.last_signal_state is not None:
+                self.last_signal_state["timestamp"] = time.monotonic()
+                self.last_signal_state["current_price"] = current_price
             return signals
 
         # ── COOLDOWN: pause after SL hit (PER PAIR) ────────────────
