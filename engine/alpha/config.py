@@ -62,6 +62,10 @@ class DeltaConfig:
     pairs: list[str] = field(default_factory=lambda: _env_list("DELTA_PAIRS"))
     enable_shorting: bool = field(default_factory=lambda: _env_bool("ENABLE_SHORTING", True))
 
+    # Options overlay
+    options_enabled: bool = field(default_factory=lambda: _env_bool("DELTA_OPTIONS_ENABLED", False))
+    options_pairs: list[str] = field(default_factory=lambda: _env_list("DELTA_OPTIONS_PAIRS", "BTC/USD:USD,ETH/USD:USD"))
+
     # Delta India fee structure (base rates BEFORE GST)
     taker_fee: float = field(default_factory=lambda: _env_float("DELTA_TAKER_FEE", 0.0005))   # 0.05% per side
     maker_fee: float = field(default_factory=lambda: _env_float("DELTA_MAKER_FEE", 0.0002))   # 0.02% per side

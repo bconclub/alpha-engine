@@ -178,11 +178,12 @@ class AlphaBot:
         #             market_analyzer=self.analyzer,
         #         )
 
-        # Options overlay — buy CALLs/PUTs on 3/4+ scalp signals (BTC/ETH only)
-        if self.delta and self.delta_options:
-            for pair in self.delta_pairs:
-                if "BTC" not in pair and "ETH" not in pair:
-                    continue  # Delta only has BTC/ETH options
+        # Options overlay — buy CALLs/PUTs on 3/4+ scalp signals
+        if self.delta and self.delta_options and config.delta.options_enabled:
+            for pair in config.delta.options_pairs:
+                if pair not in self._scalp_strategies:
+                    logger.warning("Options pair %s not in scalp strategies — skipping", pair)
+                    continue
                 scalp = self._scalp_strategies.get(pair)
                 self._options_strategies[pair] = OptionsScalpStrategy(
                     pair, self.executor, self.risk_manager,
@@ -2459,23 +2460,27 @@ class AlphaBot:
             )
 
             # Delta Options — separate ccxt instance for option markets
-            delta_options_session = aiohttp.ClientSession(
-                connector=aiohttp.TCPConnector(
-                    resolver=aiohttp.resolver.ThreadedResolver(), ssl=True,
+            if config.delta.options_enabled:
+                delta_options_session = aiohttp.ClientSession(
+                    connector=aiohttp.TCPConnector(
+                        resolver=aiohttp.resolver.ThreadedResolver(), ssl=True,
+                    )
                 )
-            )
-            self.delta_options = ccxt.delta({
-                "apiKey": delta_key,
-                "secret": delta_secret,
-                "enableRateLimit": True,
-                "options": {"defaultType": "option"},
-                "session": delta_options_session,
-            })
-            self.delta_options.urls["api"] = {
-                "public": config.delta.base_url,
-                "private": config.delta.base_url,
-            }
-            logger.info("Delta Exchange India options initialized")
+                self.delta_options = ccxt.delta({
+                    "apiKey": delta_key,
+                    "secret": delta_secret,
+                    "enableRateLimit": True,
+                    "options": {"defaultType": "option"},
+                    "session": delta_options_session,
+                })
+                self.delta_options.urls["api"] = {
+                    "public": config.delta.base_url,
+                    "private": config.delta.base_url,
+                }
+                logger.info("Delta Exchange India options initialized (pairs: %s)",
+                            ", ".join(config.delta.options_pairs))
+            else:
+                logger.info("Delta options disabled (set DELTA_OPTIONS_ENABLED=true to enable)")
         else:
             self.delta_pairs = []  # no Delta pairs if no credentials
             logger.info("Delta credentials not set -- futures disabled")
