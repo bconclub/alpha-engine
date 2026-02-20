@@ -9,7 +9,7 @@ import type { StrategyLog, Exchange, OpenPosition } from '@/lib/types';
 // Used ONLY as fallback when DB doesn't have signal_count/signal_* fields
 const RSI_LONG_THRESHOLD = 35;     // was 40 — matches scalp.py RSI_THRESHOLD_LONG
 const RSI_SHORT_THRESHOLD = 65;    // was 60 — matches scalp.py RSI_THRESHOLD_SHORT
-const MOMENTUM_MIN_PCT = 0.08;     // was 0.15 — matches scalp.py MOMENTUM_MIN_PCT
+const MOMENTUM_MIN_PCT = 0.20;     // matches scalp.py MOMENTUM_MIN_PCT (v3.14.3)
 const VOL_SPIKE_RATIO = 0.8;       // was 1.2 — matches scalp.py VOLUME_SPIKE_RATIO
 const BB_TREND_UPPER = 0.85;
 const BB_TREND_LOWER = 0.15;

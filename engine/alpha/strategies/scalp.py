@@ -1239,25 +1239,13 @@ class ScalpStrategy(BaseStrategy):
         eff_mom, eff_vol, eff_rsi_l, eff_rsi_s = self._effective_thresholds(widened)
         widen_tag = " WIDE" if widened else ""
 
-        # ══════════════════════════════════════════════════════════════
-        # GATE 0: MOMENTUM MUST FIRE — no momentum = no trade, period
-        # ══════════════════════════════════════════════════════════════
-        if abs(momentum_60s) < eff_mom:
-            # Still build breakdown for dashboard (empty signals)
-            self._last_signal_breakdown = {
-                "bull_count": 0, "bear_count": 0,
-                "bull_signals": [], "bear_signals": [],
-                "bull_mom": False, "bull_vol": False, "bull_rsi": False, "bull_bb": False,
-                "bear_mom": False, "bear_vol": False, "bear_rsi": False, "bear_bb": False,
-            }
-            self._skip_reason = f"NO_MOMENTUM ({abs(momentum_60s):.3f}% < {eff_mom:.3f}%)"
-            return None
-
-        # Direction is locked by momentum
+        # Direction determined by momentum sign (even below gate, for dashboard)
         mom_direction = "long" if momentum_60s > 0 else "short"
 
         # ── MOMENTUM STRENGTH TIERS ─────────────────────────────────────
         mom_abs = abs(momentum_60s)
+        below_gate = mom_abs < eff_mom
+
         if mom_abs >= 0.20:
             mom_strength = "STRONG"
         elif mom_abs >= 0.12:
@@ -1292,33 +1280,16 @@ class ScalpStrategy(BaseStrategy):
         # WEAK momentum in SIDEWAYS already requires 4/4 signals (line above).
         # No hard skip — 4/4 is sufficient protection. Let strong setups through.
 
-        # WEAK momentum counter to 15m trend = skip (don't fight the bigger picture)
-        if mom_strength == "WEAK" and (
-            (mom_direction == "long" and trend_15m == "bearish")
-            or (mom_direction == "short" and trend_15m == "bullish")
-        ):
-            self.logger.info(
-                "[%s] WEAK mom %s counter-trend (15m=%s) — skipping entry",
-                self.pair, mom_direction, trend_15m,
-            )
-            self._last_signal_breakdown = {
-                "bull_count": 0, "bear_count": 0,
-                "bull_signals": [], "bear_signals": [],
-                "bull_mom": False, "bull_vol": False, "bull_rsi": False, "bull_bb": False,
-                "bear_mom": False, "bear_vol": False, "bear_rsi": False, "bear_bb": False,
-            }
-            self._skip_reason = f"WEAK_COUNTER_TREND ({mom_direction} vs 15m {trend_15m})"
-            return None
-
         # ── Post-streak gate: first trade after streak pause needs 3/4 ─────
         if ScalpStrategy._pair_post_streak.get(self._base_asset, False):
             required_long = max(required_long, self.POST_STREAK_STRENGTH)
             required_short = max(required_short, self.POST_STREAK_STRENGTH)
 
         self.logger.debug(
-            "[%s] MOM %s: %+.3f%% dir=%s req=L%d/S%d regime=%s",
+            "[%s] MOM %s: %+.3f%% dir=%s req=L%d/S%d regime=%s gate=%s",
             self.pair, mom_strength, momentum_60s, mom_direction,
             required_long, required_short, self._market_regime,
+            "PASS" if not below_gate else "BLOCKED",
         )
 
         # ── Count bullish and bearish signals ──────────────────────────────
@@ -1488,6 +1459,29 @@ class ScalpStrategy(BaseStrategy):
                 "bear_rsi": any(s.startswith("RSI:") for s in bear_signals),
                 "bear_bb": any(s.startswith(("BB:", "BBSQZ:")) for s in bear_signals),
             }
+
+        # ══════════════════════════════════════════════════════════════
+        # GATE 0: MOMENTUM MUST FIRE — no momentum = no trade, period
+        # Signal breakdown is already computed above so dashboard shows
+        # what WOULD fire, but we block the actual entry here.
+        # ══════════════════════════════════════════════════════════════
+        if below_gate:
+            self._last_signal_breakdown = _build_breakdown()
+            self._skip_reason = f"NO_MOMENTUM ({abs(momentum_60s):.3f}% < {eff_mom:.3f}%)"
+            return None
+
+        # WEAK momentum counter to 15m trend = skip (don't fight the bigger picture)
+        if mom_strength == "WEAK" and (
+            (mom_direction == "long" and trend_15m == "bearish")
+            or (mom_direction == "short" and trend_15m == "bullish")
+        ):
+            self.logger.info(
+                "[%s] WEAK mom %s counter-trend (15m=%s) — skipping entry",
+                self.pair, mom_direction, trend_15m,
+            )
+            self._last_signal_breakdown = _build_breakdown()
+            self._skip_reason = f"WEAK_COUNTER_TREND ({mom_direction} vs 15m {trend_15m})"
+            return None
 
         # ── RSI EXTREME OVERRIDE: RSI <30 or >70 → enter immediately ─────
         # Strong oversold/overbought overrides all other conditions.
