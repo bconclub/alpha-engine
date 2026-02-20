@@ -232,7 +232,7 @@ class ScalpStrategy(BaseStrategy):
     RSI_REVERSAL_LONG = 70            # long exit when RSI crosses above 70
     RSI_REVERSAL_SHORT = 30           # short exit when RSI crosses below 30
     MOMENTUM_DYING_PCT = 0.04         # exit if abs(momentum) drops below 0.04% (dying)
-    REVERSAL_MIN_PROFIT_PCT = 0.10    # need at least +0.10% to consider reversal exit
+    REVERSAL_MIN_PROFIT_PCT = 0.30    # need at least +0.30% peak to consider reversal exit (was 0.10 — exiting dust)
 
     # ── Legacy trailing defaults (futures=0, spot overrides in __init__) ─
     TRAILING_ACTIVATE_PCT = 0.0       # futures: no trailing (momentum riding instead)
@@ -245,7 +245,7 @@ class ScalpStrategy(BaseStrategy):
     DISABLED_SETUPS: set[str] = {"TREND_CONT", "BB_SQUEEZE"}
 
     # ── Entry thresholds — 3-of-4 with 15m trend soft weight ────────────
-    MOMENTUM_MIN_PCT = 0.15           # 0.15%+ move in 60s (raised from 0.08 — too many weak entries)
+    MOMENTUM_MIN_PCT = 0.20           # 0.20%+ move in 60s (raised from 0.15 — losers peaked 0.00-0.08%)
     VOL_SPIKE_RATIO = 0.8             # volume > 0.8x average (was 1.2 — most vol is under 1x)
     RSI_EXTREME_LONG = 35             # RSI < 35 = oversold → long (was 40, too loose)
     RSI_EXTREME_SHORT = 65            # RSI > 65 = overbought → short (was 60, too loose)

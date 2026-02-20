@@ -1,3 +1,5 @@
+**Last updated: v3.13.6 — 2026-02-20**
+
 # Alpha Trade Signals — Complete Reference
 
 How the bot decides when to enter, how it manages positions, and when it exits.
@@ -12,7 +14,7 @@ Every 5 seconds the bot computes all 11 indicators from 30 x 1m candles. Each si
 
 | # | Signal | Tag | Long Condition | Short Condition |
 |---|--------|-----|---------------|-----------------|
-| 1 | **Momentum 60s** | MOM | momentum_60s >= +0.08% | momentum_60s <= -0.08% |
+| 1 | **Momentum 60s** | MOM | momentum_60s >= +0.15% | momentum_60s <= -0.15% |
 | 2 | **Volume Spike** | VOL | vol_ratio >= 0.8x AND mom > 0 | vol_ratio >= 0.8x AND mom < 0 |
 | 3 | **RSI Extremes** | RSI | RSI(14) < 35 | RSI(14) > 65 |
 | 4 | **Bollinger Band** | BB | bb_position <= 0.15 (bottom 15%) | bb_position >= 0.85 (top 15%) |
@@ -25,7 +27,7 @@ Every 5 seconds the bot computes all 11 indicators from 30 x 1m candles. Each si
 | 6 | **Trend Continuation** | TCONT | New 15-candle high/low + volume >= 1.0x average |
 | 7 | **VWAP + EMA Alignment** | VWAP | Long: price > VWAP(30) AND EMA(9) > EMA(21). Short: inverse |
 | 8 | **BB Squeeze Breakout** | BBSQZ | BB inside Keltner Channel (squeeze) + price breaks out with volume |
-| 9 | **Liquidity Sweep** | LIQSWEEP | Sweep past swing H/L (12 candles) then reclaim + RSI divergence |
+| 9 | ~~**Liquidity Sweep**~~ | ~~LIQSWEEP~~ | **DISABLED** — poor performance (134-contract sweep lost $0.82) |
 | 10 | **Fair Value Gap** | FVG | 3-candle imbalance gap >= 0.05%, price fills the gap |
 | 11 | **Volume Divergence** | VOLDIV | Price rising + volume declining 20% (hollow pump), or price falling + volume declining 20% (exhausted sellers) |
 
@@ -35,7 +37,7 @@ Every 5 seconds the bot computes all 11 indicators from 30 x 1m candles. Each si
 
 ### Gate 0 — Momentum Direction Lock
 
-Momentum must be above the 0.08% minimum (Gate 0). Direction is locked:
+Momentum must be above the **0.15% minimum** (Gate 0). Direction is locked:
 - `momentum_60s > 0` → `mom_direction = "long"` — only long entries allowed
 - `momentum_60s < 0` → `mom_direction = "short"` — only short entries allowed
 
@@ -46,27 +48,50 @@ If signals fire against the momentum direction, the entry is **blocked** and log
 
 ### Momentum Strength Tiers
 
-After Gate 0, momentum is scored to set the signal bar:
+After Gate 0, momentum is scored:
 
 | Tier | Momentum | Required Signals | Meaning |
 |------|----------|-----------------|---------|
 | **STRONG** | >= 0.20% | 3/4 | High conviction, standard entry |
-| **MODERATE** | 0.12% - 0.20% | 3/4 | Normal, standard entry |
-| **WEAK** | 0.08% - 0.12% | **4/4** | Just passed gate, need full confirmation |
-| Below gate | < 0.08% | — | Blocked by Gate 0, no entry possible |
+| **MODERATE** | 0.15% - 0.20% | 3/4 | Just above gate, standard entry |
+| Below gate | < 0.15% | — | Blocked by Gate 0, no entry possible |
+
+> **Note:** The old WEAK tier (0.08-0.12%) no longer exists — the gate at 0.15% eliminates weak-momentum entries entirely.
 
 ### RSI Override
 
-RSI < 30 or RSI > 70 triggers **immediate entry** bypassing the 3/4 signal count, but still requires momentum in the matching direction.
+RSI < 30 or RSI > 70 triggers **immediate entry** bypassing the 3/4 signal count, but still requires momentum in the matching direction (and momentum >= 0.15%).
+
+### Big Size Signal Gate (v3.13.6)
+
+Positions exceeding **50 contracts** require **4/4 signals** — no exceptions. This prevents large capital commitment on marginal setups.
+
+```
+BIG_SIZE_GATE: XRP/USD:USD 62 contracts > 50 — needs 4/4 signals but got 3/4, skipping
+```
+
+### Large Position Momentum Gate (v3.13.4)
+
+Large positions (per-pair thresholds below) require **0.12%+ momentum**:
+
+| Pair | Threshold |
+|------|-----------|
+| XRP | >= 50 contracts |
+| ETH | >= 3 contracts |
+| BTC | >= 2 contracts |
+| SOL | >= 3 contracts |
 
 ### Entry Requirements Summary
 
 ```
-Standard:  3/4 signals + momentum direction match (STRONG/MODERATE)
-Weak mom:  4/4 signals + momentum direction match (0.08-0.12%)
-RSI <30:   immediate long entry (still needs mom_direction == "long")
-RSI >70:   immediate short entry (still needs mom_direction == "short")
-2nd pos:   3/4+ signal strength
+Standard:    3/4 signals + momentum >= 0.15% + direction match
+RSI <30:     immediate long entry (still needs mom_direction == "long" + mom >= 0.15%)
+RSI >70:     immediate short entry (still needs mom_direction == "short" + mom >= 0.15%)
+>50 contracts: 4/4 signals required (BIG_SIZE_GATE)
+Large pos:   momentum >= 0.12% required (LARGE_POS_GATE)
+Counter-trend: 4/4 signals (longing in TRENDING_DOWN or shorting in TRENDING_UP)
+High vol:    4/4 signals required
+2nd pos:     3/4+ signal strength, 60% reduced allocation
 Post-streak: 3/4 signal strength (first trade after 3 consecutive losses)
 ```
 
@@ -75,6 +100,7 @@ Post-streak: 3/4 signal strength (first trade after 3 consecutive losses)
 These setup types are **hardcoded off** — the engine will never enter on them:
 - `TREND_CONT` — trend continuation
 - `BB_SQUEEZE` — Bollinger squeeze breakout
+- `LIQ_SWEEP` — liquidity sweep (**also disabled in code**: `if False`)
 
 If a signal combination maps to a disabled setup, entry is blocked and logged:
 ```
@@ -84,7 +110,7 @@ If a signal combination maps to a disabled setup, entry is blocked and logged:
 ### Idle Threshold Widening
 
 After 30 minutes with no entry, thresholds loosen by 20%:
-- Momentum: 0.08% → 0.064%
+- Momentum: 0.15% → 0.12%
 - Volume: 0.8x → 0.64x
 - RSI thresholds widen proportionally
 
@@ -102,7 +128,7 @@ The combination of signals that fire determines the setup type:
 | `VWAP_RECLAIM` | VWAP signal active |
 | ~~`TREND_CONT`~~ | ~~TCONT signal~~ — **DISABLED** |
 | ~~`BB_SQUEEZE`~~ | ~~BBSQZ signal~~ — **DISABLED** |
-| `LIQ_SWEEP` | LIQSWEEP signal (liquidity sweep) |
+| ~~`LIQ_SWEEP`~~ | ~~LIQSWEEP signal~~ — **DISABLED** |
 | `FVG_FILL` | FVG signal (fair value gap) |
 | `VOL_DIVERGENCE` | VOLDIV signal (volume divergence) |
 | `MULTI_SIGNAL` | 4+ signals fired simultaneously |
@@ -110,28 +136,32 @@ The combination of signals that fire determines the setup type:
 
 ---
 
-## 3-Phase Exit System
+## Momentum Riding Exit System (v3.13.5)
+
+Replaces the old tight trailing stop with a two-mode system: **ride momentum** with a wide ratchet floor, or **exit immediately** on signal reversal.
 
 ### Always Active (ALL phases)
 
 | Exit Type | Trigger |
 |-----------|---------|
 | **Hard SL** | Price hits SL floor (0.25% all pairs, capped at 0.50% futures / 3.0% spot) |
-| **Ratchet Floor** | Capital PnL drops below locked floor → instant exit |
-| **Hard TP** | Capital PnL >= 10% AND trail NOT active (safety net) |
+| **Hard TP** | Capital PnL >= 10% (safety net) |
+| **Ratchet Floor** | PnL drops below locked floor → instant exit (`RATCHET`) |
 
-### Ratcheting Profit Floors
+### Ratchet Floor Table
 
-Floors only go up — once locked, they never decrease.
+Floors are based on **price PnL %** (not capital %). Floor only moves UP — once locked, it never decreases.
 
-| Capital PnL Reached | Floor Locks At |
-|---------------------|----------------|
-| +6% | 0% (breakeven) |
-| +10% | +4% |
-| +15% | +8% |
-| +20% | +12% |
+| Peak PnL % Reached | Floor Locks At | Capital at 20x |
+|---------------------|----------------|----------------|
+| +0.30% | +0.10% | +2.0% |
+| +0.50% | +0.20% | +4.0% |
+| +1.00% | +0.50% | +10.0% |
+| +2.00% | +1.00% | +20.0% |
+| +3.00% | +1.75% | +35.0% |
+| +5.00% | +3.00% | +60.0% |
 
-If current capital PnL drops below the locked floor → **EXIT IMMEDIATELY** (market order, reason: `PROFIT_LOCK`).
+If current PnL drops below the locked floor → **FLOOR_EXIT** (market order, reason: `RATCHET`).
 
 ### Phase 1: Hands-Off (0-30 seconds)
 
@@ -151,26 +181,56 @@ Exception: If peak PnL >= +0.5%, skip immediately to Phase 2.
 
 Dynamic SL: `max(pair_floor, ATR_14 * 1.5)`, capped at the SL Cap.
 
-### Phase 2: Watch & Trail (30s - 10 minutes)
+### Phase 2: Momentum Riding (30s - 10 minutes)
+
+**MODE 1 — RIDING (momentum aligned + profitable):**
+- Momentum_60s is in the same direction as the position → **STAY IN**
+- Ratchet floor protects profits passively
+- Breakeven safety: if peak was >= +0.30% and price returns to entry → exit `BREAKEVEN`
+- Log: `RIDING: XRP peak=+0.45% floor=+0.10% mom=0.180% — momentum aligned`
+
+**MODE 2 — SIGNAL REVERSAL (exit immediately):**
+
+Three reversal triggers (any one fires → exit at market):
+
+| Trigger | Condition | Example |
+|---------|-----------|---------|
+| **Momentum Flip** | Long + momentum_60s < 0, or Short + momentum_60s > 0 | `mom_flip (-0.120%)` |
+| **Momentum Dying** | abs(momentum_60s) < 0.04% | `mom_dying (0.025% < 0.04%)` |
+| **RSI Extreme Cross** | Long + RSI crosses above 70, or Short + RSI crosses below 30 | `RSI_cross_72>70` |
+
+Reversal exit requires **minimum +0.10% profit** (don't exit a loser on reversal — SL handles losers).
+
+If reversal fires but NOT in profit, and peak was >= +0.30% → **BREAKEVEN** exit instead.
+
+### Phase 2: Spot Profit Protection (unchanged)
 
 | Exit Type | Trigger |
 |-----------|---------|
-| **Trailing Stop** | Peak PnL >= +0.25% activates trail (futures) / +0.80% (spot) |
-| **Breakeven** | Peak >= +0.20% AND price returns to entry |
-| **Decay Emergency** | Peak capital >= +3% AND current < peak x 40% (lost 60%+) |
-| **Signal Reversal** | In profit >= +0.30% AND RSI flips (>70 for long, <30 for short) or momentum reverses |
+| **Pullback** | Peak >= +0.50% AND current < peak × 50% |
+| **Decay** | Peak >= +0.40% AND current < +0.15% |
+| **Breakeven** | Peak >= +0.30% AND current <= +0.05% |
 
 ### Phase 3: Trail or Cut (10 - 30 minutes)
 
 | Exit Type | Trigger |
 |-----------|---------|
-| **Trailing** | Continues from Phase 2 |
-| **Decay Emergency** | Same as Phase 2 (repeated check) |
 | **Flatline** | 10+ min hold AND \|PnL\| < 0.05% — **ONLY if losing** |
 | **Timeout** | 30 min hold AND not trailing — **ONLY if losing** |
 | **Safety** | 30 min hold AND PnL < 0% (cut losers) |
 
-**Winners are NEVER closed by flatline or timeout.** Only trail, ratchet, or decay emergency can close a winner.
+**Winners are NEVER closed by flatline or timeout.** Only ratchet floor, reversal, or hard TP can close a winner.
+
+### Price-Only Exits (WebSocket tick — `check_exits_immediate`)
+
+Every price tick also checks (no OHLCV/momentum needed):
+- Hard SL
+- Hard TP (10% capital)
+- Ratchet floor (updates peak + checks floor)
+- Breakeven (if peaked high enough)
+- Phase 3 flatline/timeout
+
+This catches fast moves between 5-second OHLCV cycles.
 
 ### Fee-Aware Minimum
 
@@ -178,32 +238,8 @@ Discretionary exits are skipped if gross profit < $0.10. **Protective exits alwa
 
 | Always Execute | Fee Check Applies |
 |----------------|-------------------|
-| SL, TRAIL, BREAKEVEN, PROFIT_LOCK | DECAY_EMERGENCY, REVERSAL |
-| HARD_TP, RATCHET, SAFETY | FLAT, TIMEOUT |
-
----
-
-## Trailing Stop Tiers
-
-Trail activates at +0.25% peak PnL (futures) or +0.80% (spot). Distance widens as profit grows — never tightens:
-
-### Futures Trail Tiers
-
-| Peak PnL | Trail Distance | Locks Min At | Capital at 20x |
-|----------|----------------|--------------|----------------|
-| +0.25% | 0.10% | +0.15% | +3% |
-| +0.50% | 0.15% | +0.35% | +7% |
-| +1.00% | 0.20% | +0.80% | +16% |
-| +2.00% | 0.30% | +1.70% | +34% |
-
-### Spot Trail
-
-| Parameter | Value |
-|-----------|-------|
-| Activation | +0.80% peak |
-| Distance | 0.40% behind peak |
-
-Trail tracks from **peak** price, not current price.
+| SL, TRAIL, BREAKEVEN, PROFIT_LOCK | REVERSAL |
+| HARD_TP, HARD_TP_10PCT, RATCHET, SAFETY | FLAT, TIMEOUT |
 
 ---
 
@@ -213,7 +249,7 @@ Trail tracks from **peak** price, not current price.
 
 | Rule | Value |
 |------|-------|
-| Max concurrent (futures) | 2 per exchange |
+| Max concurrent (futures) | Unlimited (allocation % handles sizing) |
 | Max concurrent (spot) | 1 |
 | Max per pair | 1 (no scaling) |
 | 2nd position strength | 3/4+ signals |
@@ -237,30 +273,38 @@ Max 10 trades per hour.
 
 ---
 
-## Capital Allocation
+## Capital Allocation (v3.13.6)
+
+### Dynamic Position Sizing — No Hardcoded Contract Caps
+
+Sizing flow:
+1. Get allocation % for pair (performance-based, adaptive)
+2. Reduce for 2nd simultaneous position (60% factor)
+3. Calculate collateral from allocation
+4. Safety cap: never use more than 80% of balance on one position
+5. Total exposure cap: never exceed 90% of balance across all positions
+6. Calculate notional at leverage, convert to contracts (round down)
+7. Minimum 1 contract — if can't afford, skip (`INSUFFICIENT_CAPITAL`)
+8. Large position gate: per-pair contract thresholds require 0.12% momentum
+9. Big size gate: >50 contracts requires 4/4 signals
 
 ### Per-Pair Base Allocation (% of exchange capital)
 
 | Pair | Allocation | Rationale |
 |------|------------|-----------|
-| XRP | 50% | Best performer |
+| XRP | **30%** | **CAPPED from 50%** — SLs at 100+ contracts too costly (~$0.50+) |
 | ETH | 30% | Mixed, catches big moves |
 | BTC | 20% | Lowest win rate, diversification |
 | SOL | 15% | Newer, building data |
 
 ### Performance Adjustment (last 5 trades per pair)
 
-- Win rate < 20%: reduce to minimum
-- Win rate > 60%: boost allocation
+- Win rate < 20%: reduce to 25% of base (minimum 5%)
+- Win rate > 60%: boost by 20% (capped at 70%)
 
-### Contract Sizing (Delta Futures)
+### Balance Refresh
 
-| Pair | Contract Size | Max Contracts |
-|------|--------------|---------------|
-| BTC/USD:USD | 0.001 BTC | 1 |
-| ETH/USD:USD | 0.01 ETH | 2 |
-| XRP/USD:USD | 1.0 XRP | 50 |
-| SOL/USD:USD | varies | 1 |
+Exchange balance is refreshed from API every 60 seconds before sizing decisions, so new deposits are picked up automatically.
 
 ### Spot Sizing (Binance)
 
@@ -297,10 +341,10 @@ SCANNING (every 5s)
   │
   ├── Fetch 30x 1m candles
   ├── Compute all 11 indicators (RSI, BB, KC, EMA, VWAP, momentum, volume)
-  ├── Gate 0: momentum >= 0.08%? → sets direction (long/short)
-  ├── Momentum tier: STRONG/MODERATE/WEAK → sets required signals (3 or 4)
+  ├── Gate 0: momentum >= 0.15%? → sets direction (long/short)
+  ├── Momentum tier: STRONG/MODERATE → sets required signals (3/4)
   ├── Count bull/bear signals (each signal fires for one direction)
-  ├── Setup blocked? (TREND_CONT, BB_SQUEEZE disabled)
+  ├── Setup blocked? (TREND_CONT, BB_SQUEEZE, LIQ_SWEEP disabled)
   ├── Gate: signal_count >= required? OR RSI override?
   │
   ├── YES → Build entry signal
@@ -309,9 +353,13 @@ SCANNING (every 5s)
   │     │     ├── NO → DIRECTION BLOCK (logged, no entry)
   │     │     └── YES ↓
   │     │
+  │     ├── Per-pair strength gate (3/4 for all pairs)
+  │     ├── Dynamic position sizing (allocation → collateral → contracts)
+  │     ├── Big size gate: >50 contracts → 4/4 required?
+  │     ├── Large pos gate: per-pair threshold + 0.12% momentum?
+  │     │
   │     ├── Risk manager approves?
   │     │     ├── Daily loss limit OK?
-  │     │     ├── Position limits OK?
   │     │     ├── Balance available?
   │     │     └── Cooldowns clear?
   │     │
@@ -319,12 +367,14 @@ SCANNING (every 5s)
   │           │
   │           └── Fill confirmed → Track position
   │                 │
-  │                 ├── Phase 1 (0-30s): SL + ratchet + hard TP only
-  │                 ├── Phase 2 (30s-10m): Trail + breakeven + decay + reversal
-  │                 └── Phase 3 (10-30m): Trail + flat/timeout (losers only)
+  │                 ├── Phase 1 (0-30s): SL + ratchet floor + hard TP only
+  │                 ├── Phase 2 (30s-10m): Momentum riding / signal reversal
+  │                 │     ├── MODE 1: momentum aligned → RIDE (stay in)
+  │                 │     └── MODE 2: momentum flip/dying/RSI → REVERSAL EXIT
+  │                 └── Phase 3 (10-30m): Flatline/timeout (losers only)
   │                       │
   │                       └── EXIT triggered
-  │                             ├── Protective exits (TRAIL/SL/RATCHET/etc): always execute
+  │                             ├── Protective exits (SL/RATCHET/BREAKEVEN/etc): always execute
   │                             ├── Discretionary exits: skip if gross < $0.10
   │                             ├── Record P&L (gross - fees = net)
   │                             ├── Update win/loss streak
@@ -340,20 +390,21 @@ SCANNING (every 5s)
 
 | Code | Meaning |
 |------|---------|
-| `TRAIL` | Trailing stop triggered |
-| `PROFIT_LOCK` | Ratchet floor breached (locked profit) |
-| `TP` | Take profit hit |
-| `HARD_TP` | 10% capital gain safety (if not trailing) |
-| `TP_EXCHANGE` | TP filled by exchange |
-| `MANUAL` | Manual close from dashboard |
 | `SL` | Stop loss hit |
 | `SL_EXCHANGE` | SL filled by exchange |
-| `DECAY_EMERGENCY` | Lost 60%+ of peak profit |
-| `REVERSAL` | Signal reversal exit |
+| `RATCHET` | Ratchet floor breached (locked profit dropped below floor) |
+| `REVERSAL` | Signal reversal exit (momentum flip, dying, or RSI extreme cross) |
+| `HARD_TP_10PCT` | 10% capital gain safety net |
+| `TP` | Take profit hit |
+| `TP_EXCHANGE` | TP filled by exchange |
+| `BREAKEVEN` | Breakeven protection (peaked high, returned to entry) |
 | `FLAT` | Flatline (no movement 10m, losers only) |
 | `TIMEOUT` | Hard timeout 30m (losers only) |
-| `BREAKEVEN` | Breakeven protection |
 | `SAFETY` | Losing after timeout |
+| `SPOT_PULLBACK` | Spot: profit pulled back > 50% from peak |
+| `SPOT_DECAY` | Spot: profit decayed below 0.15% after peaking |
+| `SPOT_BREAKEVEN` | Spot: profit decayed to near-zero after peaking |
+| `MANUAL` | Manual close from dashboard |
 | `DUST` | Dust balance cleanup |
 | `ORPHAN` | Orphaned strategy closed |
 | `PHANTOM` | Phantom position cleared |
@@ -363,29 +414,55 @@ SCANNING (every 5s)
 
 ---
 
+## Skip Reason Codes (v3.13.2)
+
+When the bot decides NOT to enter, the reason is tracked and shown on the dashboard:
+
+| Code | Meaning |
+|------|---------|
+| `NO_MOMENTUM` | abs(momentum_60s) < 0.15% — no real movement |
+| `STRENGTH_GATE` | Signal count below minimum (e.g., 2/4 < 3/4) |
+| `DIRECTION_BLOCK` | Signals fire against momentum direction |
+| `INSUFFICIENT_CAPITAL` | Can't afford 1 contract with current allocation |
+| `LARGE_POS_GATE` | Large position needs 0.12%+ momentum |
+| `BIG_SIZE_GATE` | >50 contracts needs 4/4 signals |
+| `SETUP_BLOCKED` | Setup type is disabled (TREND_CONT, BB_SQUEEZE, LIQ_SWEEP) |
+| `POSITION_SIZE_ZERO` | Sizing returned zero |
+| `WEAK_COUNTER_TREND` | Weak momentum against 15m trend |
+
+---
+
 ## Key Thresholds Reference
 
 | Parameter | Futures | Spot |
 |-----------|---------|------|
-| Entry gate | 3/4 signals (4/4 if weak mom) | same |
+| Entry gate | 3/4 signals (4/4 if >50 contracts) | 3/4 |
+| Momentum minimum | **0.15%** (60s) | same |
 | Momentum direction | must match signal direction | same |
 | Leverage | 20x (capped) | 1x |
 | SL distance | 0.25% floor, 0.50% cap | 2.0% floor, 3.0% cap |
-| Trail activation | +0.25% peak | +0.80% peak |
-| Trail start distance | 0.10% | 0.40% |
-| Hard TP | 10% capital (if not trailing) | same |
-| Ratchet floors | +6%→0%, +10%→4%, +15%→8%, +20%→12% | N/A |
-| Breakeven trigger | +0.20% peak | +0.30% peak |
-| Decay emergency | peak >= 3% cap, current < peak x 40% | same |
+| Exit system | **Momentum riding + ratchet floor** | Spot trail + pullback protection |
+| Hard TP | 10% capital | same |
+| Ratchet floors | +0.30%→0.10%, +0.50%→0.20%, +1.00%→0.50%, +2.00%→1.00%, +3.00%→1.75%, +5.00%→3.00% | N/A |
+| Reversal exit | momentum flip / dying < 0.04% / RSI cross 70/30 | N/A |
+| Reversal min profit | +0.10% PnL | N/A |
+| Breakeven trigger | +0.30% peak | +0.30% peak |
 | Fee minimum | gross > $0.10 (discretionary exits only) | same |
 | Flatline | 10 min, losers only | same |
 | Timeout | 30 min, losers only | same |
 | Daily loss stop | 20% drawdown | same |
 | Rate limit | 10 trades/hour | same |
-| Max concurrent | 2 per exchange | 1 |
+| Max concurrent | Unlimited (sizing caps exposure) | 1 |
+| XRP allocation | **30%** (capped from 50%) | N/A |
+| ETH allocation | 30% | N/A |
+| BTC allocation | 20% | N/A |
+| SOL allocation | 15% | N/A |
+| Max collateral | 80% of balance per position | N/A |
+| Max total exposure | 90% of balance | N/A |
+| 2nd position | 60% of normal allocation | N/A |
+| Big size gate | >50 contracts → 4/4 signals | N/A |
+| Large pos gate | Per-pair threshold → 0.12% momentum | N/A |
 | RSI override | < 30 or > 70 | same |
-| Momentum min | 0.08% (60s) | same |
-| Momentum WEAK | 0.08-0.12% → requires 4/4 | same |
 | Volume min | 0.8x average | same |
-| Disabled setups | TREND_CONT, BB_SQUEEZE | same |
+| Disabled setups | TREND_CONT, BB_SQUEEZE, LIQ_SWEEP | same |
 | Mixed RT fee | 0.083% | ~0.20% |
