@@ -235,6 +235,18 @@ class ScalpStrategy(BaseStrategy):
     MOM_FLIP_CONFIRM_SECONDS = 15     # momentum must stay flipped for 15s before reversal exit
     REVERSAL_MIN_PROFIT_PCT = 0.30    # need at least +0.30% peak to consider reversal exit (was 0.10 — exiting dust)
 
+    # ── Trailing stop tiers: peak PnL % → trail distance % from peak price ─
+    # When peak crosses a tier, trail_stop_price = peak * (1 - trail_dist/100)
+    # SL is max(hard_sl, trail_stop) for longs — only ever tightens.
+    TRAIL_TIER_TABLE: list[tuple[float, float]] = [
+        (0.30, 0.15),   # peak +0.30% → trail 0.15% from peak
+        (0.35, 0.20),   # peak +0.35% → trail 0.20% from peak
+        (0.50, 0.25),   # peak +0.50% → trail 0.25% from peak
+        (1.00, 0.40),   # peak +1.00% → trail 0.40% from peak
+        (2.00, 0.70),   # peak +2.00% → trail 0.70% from peak
+        (3.00, 1.00),   # peak +3.00% → trail 1.00% from peak
+    ]
+
     # ── Legacy trailing defaults (futures=0, spot overrides in __init__) ─
     TRAILING_ACTIVATE_PCT = 0.0       # futures: no trailing (momentum riding instead)
     TRAILING_DISTANCE_PCT = 0.0       # futures: no trailing (ratchet floor instead)
@@ -400,12 +412,14 @@ class ScalpStrategy(BaseStrategy):
         self.highest_since_entry: float = 0.0
         self.lowest_since_entry: float = float("inf")
         self._trailing_active: bool = False
+        self._trail_stop_price: float = 0.0      # actual trailing stop price (0 = not yet active)
+        self._trail_distance_pct: float = 0.0     # current trail distance tier in %
         # Spot uses wider trail distance and activation (no leverage, needs room)
         # Futures uses momentum-riding ratchet floor system instead of tight trail
         if not is_futures:
             self.TRAILING_ACTIVATE_PCT = self.SPOT_TRAIL_ACTIVATE_PCT
             self.TRAILING_DISTANCE_PCT = self.SPOT_TRAIL_DISTANCE_PCT
-        self._trail_distance_pct: float = self.SPOT_TRAIL_DISTANCE_PCT if not is_futures else 0.0
+            self._trail_distance_pct = self.SPOT_TRAIL_DISTANCE_PCT
         self._peak_unrealized_pnl: float = 0.0  # track peak P&L for decay exit
         self._profit_floor_pct: float = -999.0  # ratcheting capital floor (not yet locked)
         self._in_position_tick: int = 0  # counts 1s ticks while in position (for OHLCV refresh)
@@ -422,6 +436,8 @@ class ScalpStrategy(BaseStrategy):
         self._prev_rsi: float = 50.0
         # Momentum flip confirmation timer (0 = not flipped)
         self._mom_flip_since: float = 0.0
+        # Suppress repeated reversal exit logs (only log first detection)
+        self._reversal_exit_logged: bool = False
 
         # Rate limiting
         self._hourly_trades: list[float] = []
@@ -843,7 +859,7 @@ class ScalpStrategy(BaseStrategy):
             if self.in_position:
                 hold_sec = now - self.entry_time
                 pnl_now = self._calc_pnl_pct(current_price)
-                trail_tag = " [TRAILING]" if self._trailing_active else ""
+                trail_tag = f" [TRAILING trail=$%.2f dist=%.2f%%]" % (self._trail_stop_price, self._trail_distance_pct) if self._trailing_active else ""
                 self.logger.info(
                     "[%s] (%s) %s @ $%.2f | %ds | PnL=%+.2f%% | SL=%.2f%% | RSI=%.1f | ATR=%.3f%% | mom=%+.3f%%%s",
                     self.pair, tag, self.position_side, self.entry_price,
@@ -1588,6 +1604,78 @@ class ScalpStrategy(BaseStrategy):
                 break
         return self._profit_floor_pct
 
+    def _update_trail_stop(self) -> None:
+        """Update trailing stop price based on peak PnL tier table.
+
+        Computes trail_stop from the PEAK price (not current), using the
+        widest matching tier.  Trail stop only ever moves UP for longs
+        (tightens) and DOWN for shorts.  Sets self._trailing_active when
+        first tier is crossed.
+        """
+        if not self.is_futures:
+            return  # spot uses pullback system, not trail tiers
+
+        peak_pnl = self._peak_unrealized_pnl
+        side = self.position_side or "long"
+
+        # Find best matching tier (iterate reversed = highest first)
+        new_dist: float | None = None
+        for min_peak, trail_dist in reversed(self.TRAIL_TIER_TABLE):
+            if peak_pnl >= min_peak:
+                new_dist = trail_dist
+                break
+
+        if new_dist is None:
+            return  # peak hasn't reached first tier yet
+
+        # Compute trail stop from peak PRICE (not entry)
+        if side == "long":
+            peak_price = self.highest_since_entry
+            candidate = peak_price * (1 - new_dist / 100)
+            # Trail stop only moves UP for longs
+            if candidate > self._trail_stop_price:
+                old_stop = self._trail_stop_price
+                self._trail_stop_price = candidate
+                self._trail_distance_pct = new_dist
+                if not self._trailing_active:
+                    self._trailing_active = True
+                    self.logger.info(
+                        "[%s] TRAIL ACTIVATED — peak +%.2f%% dist=%.2f%% "
+                        "trail_stop=$%.2f (entry=$%.2f)",
+                        self.pair, peak_pnl, new_dist,
+                        candidate, self.entry_price,
+                    )
+                elif candidate - old_stop > 0.001:  # only log meaningful moves
+                    self.logger.info(
+                        "[%s] TRAIL SL MOVED: $%.2f → $%.2f "
+                        "(peak=+%.2f%% trail_dist=%.2f%%)",
+                        self.pair, old_stop, candidate,
+                        peak_pnl, new_dist,
+                    )
+        else:  # short
+            peak_price = self.lowest_since_entry
+            candidate = peak_price * (1 + new_dist / 100)
+            # Trail stop only moves DOWN for shorts
+            if self._trail_stop_price == 0 or candidate < self._trail_stop_price:
+                old_stop = self._trail_stop_price
+                self._trail_stop_price = candidate
+                self._trail_distance_pct = new_dist
+                if not self._trailing_active:
+                    self._trailing_active = True
+                    self.logger.info(
+                        "[%s] TRAIL ACTIVATED — peak +%.2f%% dist=%.2f%% "
+                        "trail_stop=$%.2f (entry=$%.2f)",
+                        self.pair, peak_pnl, new_dist,
+                        candidate, self.entry_price,
+                    )
+                elif old_stop - candidate > 0.001:
+                    self.logger.info(
+                        "[%s] TRAIL SL MOVED: $%.2f → $%.2f "
+                        "(peak=+%.2f%% trail_dist=%.2f%%)",
+                        self.pair, old_stop, candidate,
+                        peak_pnl, new_dist,
+                    )
+
     def _check_exits(self, current_price: float, rsi_now: float, momentum_60s: float) -> list[Signal]:
         """MOMENTUM RIDING EXIT SYSTEM — ride momentum, exit on reversal.
 
@@ -1611,25 +1699,35 @@ class ScalpStrategy(BaseStrategy):
         else:
             self.lowest_since_entry = min(self.lowest_since_entry, current_price)
 
+        # Update trailing stop tiers (moves trail_stop_price up for longs)
+        self._update_trail_stop()
+
         # ══════════════════════════════════════════════════════════════
-        # ALWAYS: Hard SL — fires in ALL phases
+        # ALWAYS: Hard SL + Trail Stop — fires in ALL phases
+        # Trail stop overrides hard SL when tighter (only moves toward price)
         # ══════════════════════════════════════════════════════════════
         if side == "long":
-            sl_price = self.entry_price * (1 - self._sl_pct / 100)
+            hard_sl = self.entry_price * (1 - self._sl_pct / 100)
+            sl_price = max(hard_sl, self._trail_stop_price) if self._trail_stop_price > 0 else hard_sl
             if current_price <= sl_price:
+                exit_label = "TRAIL" if self._trailing_active and sl_price > hard_sl else "SL"
                 self.logger.info(
-                    "[%s] SL HIT %.2f%% (SL=%.2f%%) — %ds in",
-                    self.pair, pnl_pct, self._sl_pct, int(hold_seconds),
+                    "[%s] %s HIT pnl=%+.2f%% (sl=$%.2f trail=$%.2f) — %ds in",
+                    self.pair, exit_label, pnl_pct, sl_price,
+                    self._trail_stop_price, int(hold_seconds),
                 )
-                return self._do_exit(current_price, pnl_pct, side, "SL", hold_seconds)
+                return self._do_exit(current_price, pnl_pct, side, exit_label, hold_seconds)
         else:
-            sl_price = self.entry_price * (1 + self._sl_pct / 100)
+            hard_sl = self.entry_price * (1 + self._sl_pct / 100)
+            sl_price = min(hard_sl, self._trail_stop_price) if self._trail_stop_price > 0 else hard_sl
             if current_price >= sl_price:
+                exit_label = "TRAIL" if self._trailing_active and sl_price < hard_sl else "SL"
                 self.logger.info(
-                    "[%s] SL HIT %.2f%% (SL=%.2f%%) — %ds in",
-                    self.pair, pnl_pct, self._sl_pct, int(hold_seconds),
+                    "[%s] %s HIT pnl=%+.2f%% (sl=$%.2f trail=$%.2f) — %ds in",
+                    self.pair, exit_label, pnl_pct, sl_price,
+                    self._trail_stop_price, int(hold_seconds),
                 )
-                return self._do_exit(current_price, pnl_pct, side, "SL", hold_seconds)
+                return self._do_exit(current_price, pnl_pct, side, exit_label, hold_seconds)
 
         # ══════════════════════════════════════════════════════════════
         # ALWAYS: Hard TP — 10% capital safety net
@@ -1719,23 +1817,23 @@ class ScalpStrategy(BaseStrategy):
                 if self._mom_flip_since == 0:
                     # First detection — start timer
                     self._mom_flip_since = time.monotonic()
-                    if self._tick_count % 12 == 0:
-                        self.logger.info(
-                            "MOM_FLIP_START: %s mom=%.3f%% — confirming for %ds",
-                            self.pair, momentum_60s, self.MOM_FLIP_CONFIRM_SECONDS,
-                        )
+                    self.logger.info(
+                        "MOM_FLIP_START: %s mom=%.3f%% — confirming for %ds",
+                        self.pair, momentum_60s, self.MOM_FLIP_CONFIRM_SECONDS,
+                    )
                 elif time.monotonic() - self._mom_flip_since >= self.MOM_FLIP_CONFIRM_SECONDS:
                     # Confirmed — momentum stayed flipped for 15s+
                     flip_dur = int(time.monotonic() - self._mom_flip_since)
                     reversal_reason = f"mom_flip_confirmed ({momentum_60s:+.3f}%, {flip_dur}s)"
             else:
-                # Momentum re-aligned — reset timer
+                # Momentum re-aligned — reset timer and clear reversal log flag
                 if self._mom_flip_since > 0:
                     self.logger.info(
                         "MOM_FLIP_RESET: %s mom=%.3f%% re-aligned after %.0fs — false alarm",
                         self.pair, momentum_60s, time.monotonic() - self._mom_flip_since,
                     )
                 self._mom_flip_since = 0.0
+                self._reversal_exit_logged = False  # allow fresh log if it flips again
 
             # Check 2: momentum dying (below 0.02% absolute — truly dead)
             if not reversal_reason and abs(momentum_60s) < self.MOMENTUM_DYING_PCT:
@@ -1747,10 +1845,14 @@ class ScalpStrategy(BaseStrategy):
 
             # If confirmed reversal AND in profit → exit
             if reversal_reason and pnl_pct >= self.REVERSAL_MIN_PROFIT_PCT:
-                self.logger.info(
-                    "REVERSAL_EXIT: %s peak=+%.2f%% mom flipped to %.3f%% — exiting (%s)",
-                    self.pair, self._peak_unrealized_pnl, momentum_60s, reversal_reason,
-                )
+                if not self._reversal_exit_logged:
+                    self._reversal_exit_logged = True
+                    self.logger.info(
+                        "REVERSAL_DETECTED: %s peak=+%.2f%% pnl=%+.2f%% mom=%.3f%% — "
+                        "attempting exit (%s)",
+                        self.pair, self._peak_unrealized_pnl, pnl_pct,
+                        momentum_60s, reversal_reason,
+                    )
                 return self._do_exit(current_price, pnl_pct, side, "REVERSAL", hold_seconds)
 
             # If reversal signal but NOT in profit — check breakeven
@@ -1764,6 +1866,14 @@ class ScalpStrategy(BaseStrategy):
                     at_be = current_price >= be_price
                 if at_be:
                     return self._do_exit(current_price, pnl_pct, side, "BREAKEVEN", hold_seconds)
+
+            # Log reversal pending once (suppresses spam while waiting)
+            if reversal_reason and not self._reversal_exit_logged:
+                self._reversal_exit_logged = True
+                self.logger.info(
+                    "REVERSAL_PENDING: %s pnl=%+.2f%% (need +%.2f%% for exit) — %s",
+                    self.pair, pnl_pct, self.REVERSAL_MIN_PROFIT_PCT, reversal_reason,
+                )
 
         else:
             # ── SPOT PROFIT PROTECTION (unchanged) ────────────────────
@@ -1819,20 +1929,25 @@ class ScalpStrategy(BaseStrategy):
         else:
             self.lowest_since_entry = min(self.lowest_since_entry, current_price)
 
+        # Update trailing stop tiers on every WS tick
+        self._update_trail_stop()
+
         # Update live P&L for class-level tracker
         ScalpStrategy._live_pnl[self.pair] = pnl_pct
 
         exit_type: str | None = None
 
-        # ── ALWAYS: Hard SL ──────────────────────────────────────────
+        # ── ALWAYS: Hard SL + Trail Stop ──────────────────────────────
         if side == "long":
-            sl_price = self.entry_price * (1 - self._sl_pct / 100)
+            hard_sl = self.entry_price * (1 - self._sl_pct / 100)
+            sl_price = max(hard_sl, self._trail_stop_price) if self._trail_stop_price > 0 else hard_sl
             if current_price <= sl_price:
-                exit_type = "SL"
+                exit_type = "TRAIL" if self._trailing_active and sl_price > hard_sl else "SL"
         elif side == "short":
-            sl_price = self.entry_price * (1 + self._sl_pct / 100)
+            hard_sl = self.entry_price * (1 + self._sl_pct / 100)
+            sl_price = min(hard_sl, self._trail_stop_price) if self._trail_stop_price > 0 else hard_sl
             if current_price >= sl_price:
-                exit_type = "SL"
+                exit_type = "TRAIL" if self._trailing_active and sl_price < hard_sl else "SL"
 
         # ── ALWAYS: Ratchet floor (PnL-based, not capital-based) ─────
         if not exit_type:
@@ -1850,13 +1965,14 @@ class ScalpStrategy(BaseStrategy):
         if now_mono - self._last_ws_sl_log >= 10:
             self._last_ws_sl_log = now_mono
             floor_info = f" Floor=+{self._profit_floor_pct:.2f}%" if self._profit_floor_pct > -999 else ""
+            trail_info = f" Trail=$%.2f(%.2f%%)" % (self._trail_stop_price, self._trail_distance_pct) if self._trailing_active else ""
             self.logger.info(
                 "[%s] WS TICK: %s @ $%.2f PnL=%+.2f%% (%+.1f%%cap) peak=%+.2f%% "
-                "SL=$%.2f(%.2f%%) hold=%ds%s%s",
+                "SL=$%.2f(%.2f%%) hold=%ds%s%s%s",
                 self.pair, side, current_price, pnl_pct, capital_pnl,
                 self._peak_unrealized_pnl, sl_price, self._sl_pct,
                 int(hold_seconds),
-                floor_info,
+                floor_info, trail_info,
                 " -> " + exit_type + "!" if exit_type else "",
             )
 
@@ -1999,13 +2115,8 @@ class ScalpStrategy(BaseStrategy):
             else:
                 state = "holding"
 
-            # Calculate trail stop price (from actual peak, not current price)
-            trail_stop: float | None = None
-            if self._trailing_active:
-                if self.position_side == "long":
-                    trail_stop = self.highest_since_entry * (1 - self._trail_distance_pct / 100)
-                elif self.position_side == "short":
-                    trail_stop = self.lowest_since_entry * (1 + self._trail_distance_pct / 100)
+            # Use actual trail stop price (computed by _update_trail_stop)
+            trail_stop: float | None = self._trail_stop_price if self._trail_stop_price > 0 else None
 
             # Peak P&L (highest/lowest price relative to entry)
             if self.position_side == "long" and self.entry_price > 0:
@@ -2649,11 +2760,13 @@ class ScalpStrategy(BaseStrategy):
         self.highest_since_entry = price
         self.lowest_since_entry = price
         self._trailing_active = False
-        self._trail_distance_pct = self.TRAILING_DISTANCE_PCT  # reset to initial tier
+        self._trail_stop_price = 0.0              # reset trailing stop price
+        self._trail_distance_pct = 0.0             # reset trail distance tier
         self._peak_unrealized_pnl = 0.0  # reset peak P&L tracker for decay exit
         self._profit_floor_pct = -999.0  # reset ratcheting profit floor
         self._in_position_tick = 0  # reset tick counter for OHLCV refresh cadence
         self._mom_flip_since = 0.0  # reset momentum flip confirmation timer
+        self._reversal_exit_logged = False  # reset reversal log suppression
         self._hourly_trades.append(time.time())
 
     def _record_scalp_result(self, pnl_pct: float, exit_type: str) -> None:
@@ -2755,10 +2868,12 @@ class ScalpStrategy(BaseStrategy):
         self.entry_price = 0.0
         self.entry_amount = 0.0
         self._trailing_active = False
-        self._trail_distance_pct = self.TRAILING_DISTANCE_PCT
+        self._trail_stop_price = 0.0
+        self._trail_distance_pct = 0.0
         self._peak_unrealized_pnl = 0.0  # reset for next trade
         self._profit_floor_pct = -999.0  # reset ratcheting profit floor
         self._in_position_tick = 0  # reset tick counter
+        self._reversal_exit_logged = False
         self._last_position_exit = now
         ScalpStrategy._live_pnl.pop(self.pair, None)  # clean up live P&L tracker
 

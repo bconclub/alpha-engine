@@ -5,7 +5,16 @@ import Link from 'next/link';
 import { useSupabase } from '@/components/providers/SupabaseProvider';
 import { useLivePrices } from '@/hooks/useLivePrices';
 import { getSupabase } from '@/lib/supabase';
-import { formatNumber, formatCurrency, formatPrice, cn } from '@/lib/utils';
+import { cn } from '@/lib/utils';
+import {
+  type PositionDisplay,
+  TRAIL_ACTIVATION_PCT,
+  fmtPrice,
+  fmtPnl,
+  getPositionState,
+  StateBadge,
+  PositionRangeBar,
+} from './PositionBar';
 
 // Delta contract sizes (must match engine)
 const DELTA_CONTRACT_SIZE: Record<string, number> = {
@@ -15,248 +24,9 @@ const DELTA_CONTRACT_SIZE: Record<string, number> = {
   'XRP/USD:USD': 1.0,
 };
 
-const TRAIL_ACTIVATION_PCT = 0.30; // must match engine TRAILING_ACTIVATE_PCT
-const DEFAULT_SL_PCT = 0.25;      // must match engine STOP_LOSS_PCT fallback
-
 function extractBaseAsset(pair: string): string {
   if (pair.includes('/')) return pair.split('/')[0];
   return pair.replace(/USD.*$/, '');
-}
-
-/** Format a price with 4 decimals for cheap assets (XRP), 2 for the rest */
-function fmtPrice(value: number): string {
-  const decimals = Math.abs(value) < 10 ? 4 : 2;
-  return formatNumber(value, decimals);
-}
-
-/** Format a dollar P&L with 4 decimals when the absolute value is small */
-function fmtPnl(value: number): string {
-  const decimals = Math.abs(value) < 10 ? 4 : 2;
-  return `$${formatNumber(Math.abs(value), decimals)}`;
-}
-
-interface PositionDisplay {
-  id: string;
-  pair: string;
-  pairShort: string;
-  positionType: 'long' | 'short';
-  entryPrice: number;
-  currentPrice: number | null;
-  contracts: number;
-  leverage: number;
-  pricePnlPct: number | null;    // raw price move %
-  capitalPnlPct: number | null;  // leveraged capital return %
-  pnlUsd: number | null;         // dollar P&L (gross, no fees)
-  collateral: number | null;     // actual capital at risk
-  duration: string;
-  trailActive: boolean;
-  trailStopPrice: number | null;
-  peakPnlPct: number | null;     // highest price P&L % reached
-  slPrice: number | null;
-  tpPrice: number | null;
-  exchange: string;
-}
-
-// ---------------------------------------------------------------------------
-// Position State Badge
-// ---------------------------------------------------------------------------
-
-type PositionState = 'near_sl' | 'at_risk' | 'holding_loss' | 'holding_gain' | 'trailing';
-
-function getPositionState(pos: PositionDisplay): PositionState {
-  const pnl = pos.pricePnlPct ?? 0;
-  const peak = pos.peakPnlPct ?? 0;
-
-  // TRAILING: only if trail genuinely active AND peak confirms it
-  if (pos.trailActive && peak >= TRAIL_ACTIVATION_PCT) {
-    return 'trailing';
-  }
-
-  // Compute SL distance to check "near SL"
-  if (pos.slPrice != null && pos.currentPrice != null && pos.entryPrice > 0) {
-    const slDist = Math.abs(pos.entryPrice - pos.slPrice);
-    const currentDist = pos.positionType === 'long'
-      ? pos.currentPrice - pos.slPrice
-      : pos.slPrice - pos.currentPrice;
-    // Near SL: within 30% of the SL distance from entry
-    if (currentDist <= slDist * 0.30 && currentDist >= 0) {
-      return 'near_sl';
-    }
-  }
-
-  if (pnl < -0.15) return 'at_risk';
-  if (pnl < 0) return 'holding_loss';
-  return 'holding_gain';
-}
-
-function StateBadge({ state, trailStopPrice, entryPrice }: {
-  state: PositionState;
-  trailStopPrice: number | null;
-  entryPrice: number;
-}) {
-  switch (state) {
-    case 'near_sl':
-      return (
-        <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-medium bg-[#ff1744]/15 text-[#ff1744]">
-          <span className="w-1.5 h-1.5 rounded-full bg-[#ff1744] animate-pulse" />
-          NEAR SL
-        </span>
-      );
-    case 'at_risk':
-      return (
-        <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-medium bg-[#ff1744]/10 text-[#ff1744]">
-          AT RISK
-        </span>
-      );
-    case 'holding_loss':
-      return (
-        <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-medium bg-amber-400/10 text-amber-400">
-          HOLDING
-        </span>
-      );
-    case 'holding_gain':
-      return (
-        <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-medium bg-[#00c853]/10 text-[#00c853]">
-          HOLDING
-        </span>
-      );
-    case 'trailing':
-      return (
-        <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-medium bg-[#00c853]/10 text-[#00c853]">
-          <span className="w-1.5 h-1.5 rounded-full bg-[#00c853] animate-pulse" />
-          TRAILING
-          {trailStopPrice != null && (
-            <span className="text-zinc-400 font-normal ml-0.5">
-              @${fmtPrice(trailStopPrice)}
-            </span>
-          )}
-        </span>
-      );
-  }
-}
-
-// ---------------------------------------------------------------------------
-// Position Range Bar (SL ← Entry → Peak/TP)
-// ---------------------------------------------------------------------------
-
-function PositionRangeBar({ pos }: { pos: PositionDisplay }) {
-  const pnl = pos.pricePnlPct ?? 0;
-  const entry = pos.entryPrice;
-  const current = pos.currentPrice;
-  const peak = pos.peakPnlPct ?? 0;
-
-  if (current == null || entry <= 0) return null;
-
-  // Compute SL price (from DB or estimate)
-  const slPrice = pos.slPrice ?? (
-    pos.positionType === 'long'
-      ? entry * (1 - DEFAULT_SL_PCT / 100)
-      : entry * (1 + DEFAULT_SL_PCT / 100)
-  );
-
-  // Range: SL distance below entry, peak/trail above entry
-  const slDistPct = DEFAULT_SL_PCT; // distance from entry to SL in %
-  const peakPct = Math.max(peak, Math.abs(pnl), 0.05); // at least 0.05 to avoid zero range
-
-  // Total range: SL side + profit side
-  const totalRange = slDistPct + Math.max(peakPct, TRAIL_ACTIVATION_PCT);
-
-  // Entry position as % of total bar width (SL is at 0%, entry is partway)
-  const entryPos = (slDistPct / totalRange) * 100;
-
-  // Current price position on the bar
-  const currentPos = ((slDistPct + pnl) / totalRange) * 100;
-  const clampedCurrentPos = Math.max(0, Math.min(100, currentPos));
-
-  // Trail activation line position
-  const trailLinePos = ((slDistPct + TRAIL_ACTIVATION_PCT) / totalRange) * 100;
-
-  // Trail stop position (if active)
-  let trailStopPos: number | null = null;
-  if (pos.trailActive && pos.trailStopPrice != null && entry > 0) {
-    const trailStopPnl = pos.positionType === 'long'
-      ? ((pos.trailStopPrice - entry) / entry) * 100
-      : ((entry - pos.trailStopPrice) / entry) * 100;
-    trailStopPos = Math.max(0, Math.min(100, ((slDistPct + trailStopPnl) / totalRange) * 100));
-  }
-
-  // Fill bar: from entry to current
-  const fillLeft = Math.min(entryPos, clampedCurrentPos);
-  const fillWidth = Math.abs(clampedCurrentPos - entryPos);
-  const isProfit = pnl >= 0;
-
-  return (
-    <div className="w-full">
-      {/* Bar with markers */}
-      <div className="relative h-2.5 bg-zinc-800 rounded-full overflow-hidden">
-        {/* SL zone background (left side, subtle red) */}
-        <div
-          className="absolute top-0 bottom-0 bg-[#ff1744]/8 rounded-l-full"
-          style={{ left: 0, width: `${entryPos}%` }}
-        />
-
-        {/* Fill bar: current P&L relative to entry */}
-        <div
-          className={cn(
-            'absolute top-0 bottom-0 transition-all duration-500 rounded-full',
-            isProfit ? 'bg-[#00c853]' : 'bg-[#ff1744]',
-          )}
-          style={{ left: `${fillLeft}%`, width: `${fillWidth}%` }}
-        />
-
-        {/* Entry line */}
-        <div
-          className="absolute top-0 bottom-0 w-px bg-zinc-500"
-          style={{ left: `${entryPos}%` }}
-        />
-
-        {/* Trail activation line (dashed) */}
-        <div
-          className="absolute top-0 bottom-0 w-px bg-[#00c853]/30"
-          style={{ left: `${Math.min(trailLinePos, 100)}%` }}
-        />
-
-        {/* Trail stop line (if active) */}
-        {trailStopPos != null && (
-          <div
-            className="absolute top-0 bottom-0 w-px bg-[#ffd600]"
-            style={{ left: `${trailStopPos}%` }}
-          />
-        )}
-
-        {/* Current price marker dot */}
-        <div
-          className={cn(
-            'absolute top-1/2 -translate-y-1/2 w-2 h-2 rounded-full border border-zinc-900 z-10 transition-all duration-500',
-            isProfit ? 'bg-[#00c853]' : 'bg-[#ff1744]',
-          )}
-          style={{ left: `${clampedCurrentPos}%`, marginLeft: '-4px' }}
-        />
-      </div>
-
-      {/* Labels below bar */}
-      <div className="relative h-3 mt-0.5">
-        <span className="absolute text-[8px] font-mono text-[#ff1744]/70" style={{ left: 0 }}>
-          SL ${fmtPrice(slPrice)}
-        </span>
-        <span
-          className="absolute text-[8px] font-mono text-zinc-500 -translate-x-1/2"
-          style={{ left: `${entryPos}%` }}
-        >
-          Entry
-        </span>
-        {pos.trailActive && pos.trailStopPrice != null ? (
-          <span className="absolute right-0 text-[8px] font-mono text-[#ffd600]/70">
-            Trail ${fmtPrice(pos.trailStopPrice)}
-          </span>
-        ) : (
-          <span className="absolute right-0 text-[8px] font-mono text-zinc-600">
-            {peak > 0 ? `Peak +${peak.toFixed(2)}%` : `+${TRAIL_ACTIVATION_PCT}%`}
-          </span>
-        )}
-      </div>
-    </div>
-  );
 }
 
 // ---------------------------------------------------------------------------
@@ -428,10 +198,10 @@ export function LivePositions() {
         <h3 className="text-sm font-medium text-zinc-400 uppercase tracking-wider">
           Live Positions
         </h3>
-        <span className="text-[10px] text-zinc-500 font-mono flex items-center gap-1.5">
+        <span className="text-xs text-zinc-500 font-mono flex items-center gap-1.5">
           {positions.length} active
           {livePrices.lastUpdated > 0 && (
-            <span className="inline-flex items-center gap-1 text-[9px]">
+            <span className="inline-flex items-center gap-1 text-[11px]">
               <span className="w-1.5 h-1.5 rounded-full bg-[#00c853] animate-pulse" />
               LIVE
             </span>
@@ -473,7 +243,7 @@ export function LivePositions() {
                     {pos.pairShort}
                   </Link>
                   <span className={cn(
-                    'text-[10px] font-semibold px-1.5 py-0.5 rounded',
+                    'text-xs font-semibold px-1.5 py-0.5 rounded',
                     pos.positionType === 'short'
                       ? 'bg-[#ff1744]/10 text-[#ff1744]'
                       : 'bg-[#00c853]/10 text-[#00c853]',
@@ -491,7 +261,7 @@ export function LivePositions() {
                     onClick={() => handleClose(pos.id, pos.pair)}
                     disabled={isClosing}
                     className={cn(
-                      'px-2 py-0.5 rounded text-[10px] font-semibold transition-colors',
+                      'px-2.5 py-1 rounded text-xs font-semibold transition-colors',
                       isClosing
                         ? 'bg-zinc-700/50 text-zinc-500 cursor-not-allowed'
                         : 'bg-[#ff1744]/10 text-[#ff1744] hover:bg-[#ff1744]/20 active:bg-[#ff1744]/30',
@@ -499,7 +269,7 @@ export function LivePositions() {
                   >
                     {isClosing ? 'Closing...' : 'Close'}
                   </button>
-                  <span className="text-[9px] text-zinc-600 font-mono">{pos.duration}</span>
+                  <span className="text-[11px] text-zinc-500 font-mono">{pos.duration}</span>
                 </div>
               </div>
 
@@ -507,25 +277,25 @@ export function LivePositions() {
               {pos.pricePnlPct != null ? (
                 <div className="grid grid-cols-2 sm:grid-cols-4 gap-x-4 gap-y-1 text-xs font-mono">
                   <div>
-                    <div className="text-[9px] text-zinc-500 uppercase">P&L</div>
+                    <div className="text-[11px] text-zinc-500 uppercase">P&L</div>
                     <div className={cn('font-bold', pnlColor)}>
                       {pos.pnlUsd != null ? `${pos.pnlUsd >= 0 ? '+' : '-'}${fmtPnl(pos.pnlUsd)}` : '\u2014'}
                     </div>
                   </div>
                   <div>
-                    <div className="text-[9px] text-zinc-500 uppercase">Return</div>
+                    <div className="text-[11px] text-zinc-500 uppercase">Return</div>
                     <div className={cn('font-bold', pnlColor)}>
                       {pos.capitalPnlPct != null ? `${pos.capitalPnlPct >= 0 ? '+' : ''}${pos.capitalPnlPct.toFixed(1)}%` : '\u2014'}
                     </div>
                   </div>
                   <div>
-                    <div className="text-[9px] text-zinc-500 uppercase">Entry &rarr; Now</div>
+                    <div className="text-[11px] text-zinc-500 uppercase">Entry &rarr; Now</div>
                     <div className="text-zinc-300">
                       ${fmtPrice(pos.entryPrice)} &rarr; ${pos.currentPrice != null ? fmtPrice(pos.currentPrice) : '...'}
                     </div>
                   </div>
                   <div>
-                    <div className="text-[9px] text-zinc-500 uppercase">Price Move</div>
+                    <div className="text-[11px] text-zinc-500 uppercase">Price Move</div>
                     <div className={cn(pnlColor)}>
                       {pos.pricePnlPct >= 0 ? '+' : ''}{pos.pricePnlPct.toFixed(pos.entryPrice < 10 ? 4 : 3)}%
                     </div>
@@ -542,7 +312,7 @@ export function LivePositions() {
                     <PositionRangeBar pos={pos} />
                   </div>
                 )}
-                <span className="text-[10px] font-mono text-zinc-500 whitespace-nowrap shrink-0">
+                <span className="text-xs font-mono text-zinc-500 whitespace-nowrap shrink-0">
                   {pos.contracts}{pos.exchange === 'delta' ? ' ct' : ''}
                   {pos.collateral != null && ` \u00b7 $${pos.collateral < 10 ? pos.collateral.toFixed(4) : pos.collateral.toFixed(2)}`}
                 </span>

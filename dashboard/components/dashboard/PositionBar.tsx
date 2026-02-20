@@ -1,0 +1,259 @@
+'use client';
+
+/**
+ * Shared position visualization components used by both
+ * LivePositions (homepage) and TradeTable (trades page).
+ */
+
+import { formatNumber, cn } from '@/lib/utils';
+
+// ---------------------------------------------------------------------------
+// Constants
+// ---------------------------------------------------------------------------
+
+export const TRAIL_ACTIVATION_PCT = 0.30; // must match engine TRAILING_ACTIVATE_PCT
+export const DEFAULT_SL_PCT = 0.25;       // must match engine STOP_LOSS_PCT fallback
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+/** Format a price with 4 decimals for cheap assets (XRP), 2 for the rest */
+export function fmtPrice(value: number): string {
+  const decimals = Math.abs(value) < 10 ? 4 : 2;
+  return formatNumber(value, decimals);
+}
+
+/** Format a dollar P&L with 4 decimals when the absolute value is small */
+export function fmtPnl(value: number): string {
+  const decimals = Math.abs(value) < 10 ? 4 : 2;
+  return `$${formatNumber(Math.abs(value), decimals)}`;
+}
+
+// ---------------------------------------------------------------------------
+// Types
+// ---------------------------------------------------------------------------
+
+export interface PositionDisplay {
+  id: string;
+  pair: string;
+  pairShort: string;
+  positionType: 'long' | 'short';
+  entryPrice: number;
+  currentPrice: number | null;
+  contracts: number;
+  leverage: number;
+  pricePnlPct: number | null;    // raw price move %
+  capitalPnlPct: number | null;  // leveraged capital return %
+  pnlUsd: number | null;         // dollar P&L (gross, no fees)
+  collateral: number | null;     // actual capital at risk
+  duration: string;
+  trailActive: boolean;
+  trailStopPrice: number | null;
+  peakPnlPct: number | null;     // highest price P&L % reached
+  slPrice: number | null;
+  tpPrice: number | null;
+  exchange: string;
+}
+
+// ---------------------------------------------------------------------------
+// Position State Badge
+// ---------------------------------------------------------------------------
+
+export type PositionState = 'near_sl' | 'at_risk' | 'holding_loss' | 'holding_gain' | 'trailing';
+
+export function getPositionState(pos: PositionDisplay): PositionState {
+  const pnl = pos.pricePnlPct ?? 0;
+  const peak = pos.peakPnlPct ?? 0;
+
+  // TRAILING: only if trail genuinely active AND peak confirms it
+  if (pos.trailActive && peak >= TRAIL_ACTIVATION_PCT) {
+    return 'trailing';
+  }
+
+  // Compute SL distance to check "near SL"
+  if (pos.slPrice != null && pos.currentPrice != null && pos.entryPrice > 0) {
+    const slDist = Math.abs(pos.entryPrice - pos.slPrice);
+    const currentDist = pos.positionType === 'long'
+      ? pos.currentPrice - pos.slPrice
+      : pos.slPrice - pos.currentPrice;
+    // Near SL: within 30% of the SL distance from entry
+    if (currentDist <= slDist * 0.30 && currentDist >= 0) {
+      return 'near_sl';
+    }
+  }
+
+  if (pnl < -0.15) return 'at_risk';
+  if (pnl < 0) return 'holding_loss';
+  return 'holding_gain';
+}
+
+export function StateBadge({ state, trailStopPrice }: {
+  state: PositionState;
+  trailStopPrice: number | null;
+  entryPrice?: number;
+}) {
+  switch (state) {
+    case 'near_sl':
+      return (
+        <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium bg-[#ff1744]/15 text-[#ff1744]">
+          <span className="w-1.5 h-1.5 rounded-full bg-[#ff1744] animate-pulse" />
+          NEAR SL
+        </span>
+      );
+    case 'at_risk':
+      return (
+        <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium bg-[#ff1744]/10 text-[#ff1744]">
+          AT RISK
+        </span>
+      );
+    case 'holding_loss':
+      return (
+        <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium bg-amber-400/10 text-amber-400">
+          HOLDING
+        </span>
+      );
+    case 'holding_gain':
+      return (
+        <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium bg-[#00c853]/10 text-[#00c853]">
+          HOLDING
+        </span>
+      );
+    case 'trailing':
+      return (
+        <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium bg-[#00c853]/10 text-[#00c853]">
+          <span className="w-1.5 h-1.5 rounded-full bg-[#00c853] animate-pulse" />
+          TRAILING
+          {trailStopPrice != null && (
+            <span className="text-zinc-400 font-normal ml-0.5">
+              @${fmtPrice(trailStopPrice)}
+            </span>
+          )}
+        </span>
+      );
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Position Range Bar (SL <- Entry -> Peak/TP)
+// ---------------------------------------------------------------------------
+
+export function PositionRangeBar({ pos }: { pos: PositionDisplay }) {
+  const pnl = pos.pricePnlPct ?? 0;
+  const entry = pos.entryPrice;
+  const current = pos.currentPrice;
+  const peak = pos.peakPnlPct ?? 0;
+
+  if (current == null || entry <= 0) return null;
+
+  // Compute SL price (from DB or estimate)
+  const slPrice = pos.slPrice ?? (
+    pos.positionType === 'long'
+      ? entry * (1 - DEFAULT_SL_PCT / 100)
+      : entry * (1 + DEFAULT_SL_PCT / 100)
+  );
+
+  // Range: SL distance below entry, peak/trail above entry
+  const slDistPct = DEFAULT_SL_PCT; // distance from entry to SL in %
+  const peakPct = Math.max(peak, Math.abs(pnl), 0.05); // at least 0.05 to avoid zero range
+
+  // Total range: SL side + profit side
+  const totalRange = slDistPct + Math.max(peakPct, TRAIL_ACTIVATION_PCT);
+
+  // Entry position as % of total bar width (SL is at 0%, entry is partway)
+  const entryPos = (slDistPct / totalRange) * 100;
+
+  // Current price position on the bar
+  const currentPos = ((slDistPct + pnl) / totalRange) * 100;
+  const clampedCurrentPos = Math.max(0, Math.min(100, currentPos));
+
+  // Trail activation line position
+  const trailLinePos = ((slDistPct + TRAIL_ACTIVATION_PCT) / totalRange) * 100;
+
+  // Trail stop position (if active)
+  let trailStopPos: number | null = null;
+  if (pos.trailActive && pos.trailStopPrice != null && entry > 0) {
+    const trailStopPnl = pos.positionType === 'long'
+      ? ((pos.trailStopPrice - entry) / entry) * 100
+      : ((entry - pos.trailStopPrice) / entry) * 100;
+    trailStopPos = Math.max(0, Math.min(100, ((slDistPct + trailStopPnl) / totalRange) * 100));
+  }
+
+  // Fill bar: from entry to current
+  const fillLeft = Math.min(entryPos, clampedCurrentPos);
+  const fillWidth = Math.abs(clampedCurrentPos - entryPos);
+  const isProfit = pnl >= 0;
+
+  return (
+    <div className="w-full">
+      {/* Bar with markers */}
+      <div className="relative h-2.5 bg-zinc-800 rounded-full overflow-hidden">
+        {/* SL zone background (left side, subtle red) */}
+        <div
+          className="absolute top-0 bottom-0 bg-[#ff1744]/8 rounded-l-full"
+          style={{ left: 0, width: `${entryPos}%` }}
+        />
+
+        {/* Fill bar: current P&L relative to entry */}
+        <div
+          className={cn(
+            'absolute top-0 bottom-0 transition-all duration-500 rounded-full',
+            isProfit ? 'bg-[#00c853]' : 'bg-[#ff1744]',
+          )}
+          style={{ left: `${fillLeft}%`, width: `${fillWidth}%` }}
+        />
+
+        {/* Entry line */}
+        <div
+          className="absolute top-0 bottom-0 w-px bg-zinc-500"
+          style={{ left: `${entryPos}%` }}
+        />
+
+        {/* Trail activation line (dashed) */}
+        <div
+          className="absolute top-0 bottom-0 w-px bg-[#00c853]/30"
+          style={{ left: `${Math.min(trailLinePos, 100)}%` }}
+        />
+
+        {/* Trail stop line (if active) */}
+        {trailStopPos != null && (
+          <div
+            className="absolute top-0 bottom-0 w-px bg-[#ffd600]"
+            style={{ left: `${trailStopPos}%` }}
+          />
+        )}
+
+        {/* Current price marker dot */}
+        <div
+          className={cn(
+            'absolute top-1/2 -translate-y-1/2 w-2 h-2 rounded-full border border-zinc-900 z-10 transition-all duration-500',
+            isProfit ? 'bg-[#00c853]' : 'bg-[#ff1744]',
+          )}
+          style={{ left: `${clampedCurrentPos}%`, marginLeft: '-4px' }}
+        />
+      </div>
+
+      {/* Labels below bar */}
+      <div className="relative h-4 mt-0.5">
+        <span className="absolute text-[10px] font-mono text-[#ff1744]/70" style={{ left: 0 }}>
+          SL ${fmtPrice(slPrice)}
+        </span>
+        <span
+          className="absolute text-[10px] font-mono text-zinc-500 -translate-x-1/2"
+          style={{ left: `${entryPos}%` }}
+        >
+          Entry
+        </span>
+        {pos.trailActive && pos.trailStopPrice != null ? (
+          <span className="absolute right-0 text-[10px] font-mono text-[#ffd600]/70">
+            Trail ${fmtPrice(pos.trailStopPrice)}
+          </span>
+        ) : (
+          <span className="absolute right-0 text-[10px] font-mono text-zinc-600">
+            {peak > 0 ? `Peak +${peak.toFixed(2)}%` : `+${TRAIL_ACTIVATION_PCT}%`}
+          </span>
+        )}
+      </div>
+    </div>
+  );
+}

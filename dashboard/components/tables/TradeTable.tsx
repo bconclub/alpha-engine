@@ -23,6 +23,14 @@ import {
 import { Badge } from '@/components/ui/Badge';
 import { useSupabase } from '@/components/providers/SupabaseProvider';
 import { useLivePrices } from '@/hooks/useLivePrices';
+import {
+  type PositionDisplay,
+  TRAIL_ACTIVATION_PCT,
+  DEFAULT_SL_PCT,
+  getPositionState,
+  StateBadge,
+  PositionRangeBar,
+} from '@/components/dashboard/PositionBar';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -306,6 +314,91 @@ function calcUnrealizedPnL(
   const pnlPct = collateral > 0 ? (grossPnl / collateral) * 100 : 0;
 
   return { pnl: grossPnl, pnl_pct: pnlPct };
+}
+
+/** Build a PositionDisplay from a Trade + current price (for range bar / state badge) */
+function buildPositionDisplay(
+  trade: Trade,
+  currentPrice: number | null,
+): PositionDisplay | null {
+  if (trade.status !== 'open') return null;
+
+  const asset = extractBaseAsset(trade.pair);
+  const leverage = trade.leverage > 1 ? trade.leverage : 1;
+  const entry = trade.price;
+
+  let pricePnlPct: number | null = null;
+  let capitalPnlPct: number | null = null;
+  let pnlUsd: number | null = null;
+  let collateral: number | null = null;
+
+  if (currentPrice != null && entry > 0) {
+    if (trade.position_type === 'short') {
+      pricePnlPct = ((entry - currentPrice) / entry) * 100;
+    } else {
+      pricePnlPct = ((currentPrice - entry) / entry) * 100;
+    }
+    capitalPnlPct = pricePnlPct * leverage;
+
+    let coinAmount = trade.amount;
+    if (trade.exchange === 'delta') {
+      const contractSize = DELTA_CONTRACT_SIZE[trade.pair] ?? 1.0;
+      coinAmount = trade.amount * contractSize;
+    }
+    if (trade.position_type === 'short') {
+      pnlUsd = (entry - currentPrice) * coinAmount;
+    } else {
+      pnlUsd = (currentPrice - entry) * coinAmount;
+    }
+    const notional = entry * coinAmount;
+    collateral = leverage > 1 ? notional / leverage : notional;
+  }
+
+  const peakPnlPct = trade.peak_pnl ?? (pricePnlPct != null && pricePnlPct > 0 ? pricePnlPct : 0);
+  const trailActive = (
+    trade.position_state === 'trailing'
+    && peakPnlPct >= TRAIL_ACTIVATION_PCT
+  );
+
+  let trailStopPrice: number | null = trade.trail_stop_price ?? null;
+  if (trailStopPrice == null && trailActive && currentPrice != null && pricePnlPct != null) {
+    let trailDist = 0.30;
+    const tiers: [number, number][] = [[0.50, 0.30], [1.00, 0.50], [2.00, 0.70], [3.00, 1.00]];
+    for (const [minProfit, dist] of tiers) {
+      if (pricePnlPct >= minProfit) trailDist = dist;
+    }
+    if (trade.position_type === 'short') {
+      trailStopPrice = currentPrice * (1 + trailDist / 100);
+    } else {
+      trailStopPrice = currentPrice * (1 - trailDist / 100);
+    }
+  }
+
+  const openedMs = new Date(trade.timestamp).getTime();
+  const mins = Math.floor((Date.now() - openedMs) / 60000);
+  const duration = mins < 60 ? `${mins}m` : `${Math.floor(mins / 60)}h${mins % 60}m`;
+
+  return {
+    id: trade.id,
+    pair: trade.pair,
+    pairShort: asset,
+    positionType: trade.position_type as 'long' | 'short',
+    entryPrice: entry,
+    currentPrice,
+    contracts: trade.amount,
+    leverage,
+    pricePnlPct,
+    capitalPnlPct,
+    pnlUsd,
+    collateral,
+    duration,
+    trailActive,
+    trailStopPrice,
+    peakPnlPct,
+    slPrice: trade.stop_loss ?? null,
+    tpPrice: trade.take_profit ?? null,
+    exchange: trade.exchange,
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -786,21 +879,27 @@ export default function TradeTable({ trades }: TradeTableProps) {
                         </span>
                       )}
                       <HoldTimeCell trade={trade} now={now} />
-                      {trade.status === 'open' && trade.position_state === 'trailing' && (
-                        <span className="text-emerald-400 text-[10px]">
-                          &#x1F7E2; TRAIL {trade.peak_pnl != null ? `+${trade.peak_pnl.toFixed(2)}%` : ''}
-                        </span>
-                      )}
-                      {trade.status === 'open' && trade.position_state === 'holding' && (
-                        <span className="text-zinc-500 text-[10px]">
-                          &#x23F3; {trade.current_pnl != null ? `${trade.current_pnl >= 0 ? '+' : ''}${trade.current_pnl.toFixed(2)}%` : 'holding'}
-                        </span>
-                      )}
-                      {trade.status === 'open' && trade.stop_loss != null && (
-                        <span className="text-red-400 text-[10px] font-mono">
-                          SL {formatPrice(trade.stop_loss)}
-                        </span>
-                      )}
+                      {trade.status === 'open' && (() => {
+                        const asset = extractBaseAsset(trade.pair);
+                        const cp = livePrices.prices[trade.pair] ?? currentPrices.get(asset) ?? null;
+                        const posDisplay = buildPositionDisplay(trade, cp);
+                        if (!posDisplay) return null;
+                        const posState = getPositionState(posDisplay);
+                        return (
+                          <>
+                            <StateBadge
+                              state={posState}
+                              trailStopPrice={posDisplay.trailStopPrice}
+                              entryPrice={posDisplay.entryPrice}
+                            />
+                            <div className="w-full mt-1">
+                              <div className="max-w-[200px]">
+                                <PositionRangeBar pos={posDisplay} />
+                              </div>
+                            </div>
+                          </>
+                        );
+                      })()}
                       {trade.status !== 'open' && (() => {
                         const reason = getExitReason(trade);
                         return reason ? (
@@ -1133,54 +1232,29 @@ export default function TradeTable({ trades }: TradeTableProps) {
                           )}
                         </td>
 
-                        {/* Trail Info */}
+                        {/* Trail Info — Range bar for open, exit label for closed */}
                         <td className="px-4 py-3 text-xs">
-                          {trade.status === 'open' ? (
-                            trade.position_state === 'trailing' ? (
-                              <div className="flex items-center gap-1.5 min-w-[120px]">
-                                <div className="flex-1 max-w-[100px]">
-                                  <div className="h-1.5 rounded-full bg-emerald-400/30 overflow-hidden">
-                                    <div className="h-full rounded-full bg-emerald-400 animate-pulse" style={{ width: '100%' }} />
-                                  </div>
-                                </div>
-                                <span className="text-[10px] font-mono text-emerald-400 font-semibold whitespace-nowrap">
-                                  TRAILING
-                                </span>
-                              </div>
-                            ) : trade.position_state === 'holding' || trade.status === 'open' ? (() => {
-                              const TRAIL_ACT = 0.30;
-                              // Compute CURRENT live price P&L (moves up AND down with price)
-                              let currentPnl = trade.current_pnl ?? 0;
-                              const livePrice = livePrices.prices[trade.pair] ?? null;
-                              if (livePrice && trade.price > 0) {
-                                currentPnl = trade.position_type === 'short'
-                                  ? ((trade.price - livePrice) / trade.price) * 100
-                                  : ((livePrice - trade.price) / trade.price) * 100;
-                              }
-                              // Bar shows CURRENT position relative to 0.30% — goes up and down
-                              const displayPnl = Math.max(currentPnl, 0);
-                              const progress = Math.min((displayPnl / TRAIL_ACT) * 100, 100);
-                              const barColor = progress >= 66 ? 'bg-emerald-400' : progress >= 33 ? 'bg-amber-400' : 'bg-red-400';
-                              const txtColor = progress >= 66 ? 'text-emerald-400' : progress >= 33 ? 'text-amber-400' : 'text-red-400';
+                          {trade.status === 'open' ? (() => {
+                            const asset = extractBaseAsset(trade.pair);
+                            const cp = livePrices.prices[trade.pair] ?? currentPrices.get(asset) ?? null;
+                            const posDisplay = buildPositionDisplay(trade, cp);
+                            if (posDisplay) {
+                              const posState = getPositionState(posDisplay);
                               return (
-                                <div className="flex items-center gap-1.5 min-w-[120px]">
-                                  <div className="flex-1 max-w-[100px]">
-                                    <div className="h-1.5 rounded-full bg-zinc-800 overflow-hidden">
-                                      <div
-                                        className={cn('h-full rounded-full transition-all duration-500', barColor)}
-                                        style={{ width: `${progress}%` }}
-                                      />
-                                    </div>
+                                <div className="min-w-[160px] space-y-1">
+                                  <StateBadge
+                                    state={posState}
+                                    trailStopPrice={posDisplay.trailStopPrice}
+                                    entryPrice={posDisplay.entryPrice}
+                                  />
+                                  <div className="max-w-[180px]">
+                                    <PositionRangeBar pos={posDisplay} />
                                   </div>
-                                  <span className={cn('text-[10px] font-mono whitespace-nowrap', txtColor)}>
-                                    {displayPnl.toFixed(2)}/{TRAIL_ACT.toFixed(2)}%
-                                  </span>
                                 </div>
                               );
-                            })() : (
-                              <span className="text-zinc-600">&mdash;</span>
-                            )
-                          ) : (() => {
+                            }
+                            return <span className="text-zinc-600">&mdash;</span>;
+                          })() : (() => {
                             const exitR = getExitReason(trade);
                             if (exitR === 'TRAIL') return <span className="text-emerald-400">Trailed</span>;
                             if (exitR === 'PROFIT_LOCK') return <span className="text-emerald-400">Locked</span>;
