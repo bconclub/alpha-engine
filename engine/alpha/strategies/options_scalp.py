@@ -367,6 +367,14 @@ class OptionsScalpStrategy(BaseStrategy):
                 signal_reason = ss.get("reason", "")
                 spot_price = ss.get("current_price", 0)
 
+        # Fallback: fetch spot price from futures exchange if scalp didn't provide one
+        if spot_price <= 0 and self.futures_exchange:
+            try:
+                ticker = await self.futures_exchange.fetch_ticker(self.pair)
+                spot_price = ticker.get("last") or ticker.get("bid") or 0
+            except Exception:
+                pass
+
         # ── Expiry info ──
         expiry_label: str | None = None
         expiry_ts: str | None = None
