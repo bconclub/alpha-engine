@@ -76,7 +76,7 @@ class OptionsScalpStrategy(BaseStrategy):
 
     # ── Entry ─────────────────────────────────────────────────────
     MIN_SIGNAL_STRENGTH = 3              # 3-of-4 or 4-of-4 required
-    SIGNAL_STALENESS_SEC = 15            # Signal must be < 15s old
+    SIGNAL_STALENESS_SEC = 30            # Signal must be < 30s old
     CONTRACTS_PER_TRADE = 1              # 1 contract per trade
 
     # ── Exit thresholds ───────────────────────────────────────────
@@ -490,32 +490,62 @@ class OptionsScalpStrategy(BaseStrategy):
         """Check scalp's signal state for 3/4+ momentum, buy option."""
         # 1. Read scalp strategy's latest signal
         if not self._scalp or not hasattr(self._scalp, "last_signal_state"):
+            if self._tick_count % 30 == 0:
+                self.logger.info("[%s] OPTIONS: no scalp ref (scalp=%s)", self.pair, bool(self._scalp))
             return []
 
         signal_state = self._scalp.last_signal_state
-        if signal_state is None:
+
+        # Log full signal check on every tick for debugging
+        if signal_state is not None:
+            self.logger.info(
+                "[%s] OPTIONS CHECK: strength=%s side=%s age=%.1fs reason=%s",
+                self.pair,
+                signal_state.get("strength", 0),
+                signal_state.get("side"),
+                time.monotonic() - signal_state.get("timestamp", 0),
+                (signal_state.get("reason", "") or "")[:60],
+            )
+        else:
+            if self._tick_count % 6 == 0:
+                self.logger.info("[%s] OPTIONS: signal_state is None", self.pair)
             return []
 
         # 2. Check signal freshness
         signal_age = time.monotonic() - signal_state.get("timestamp", 0)
         if signal_age > self.SIGNAL_STALENESS_SEC:
+            self.logger.info(
+                "[%s] OPTIONS STALE: age=%.1fs > %ds — skipping",
+                self.pair, signal_age, self.SIGNAL_STALENESS_SEC,
+            )
             return []
 
         # 3. Check signal strength (3-of-4 minimum)
         strength = signal_state.get("strength", 0)
         if strength < self.MIN_SIGNAL_STRENGTH:
+            if self._tick_count % 6 == 0:
+                self.logger.info(
+                    "[%s] OPTIONS WEAK: strength=%d < %d — waiting",
+                    self.pair, strength, self.MIN_SIGNAL_STRENGTH,
+                )
             return []
 
         side = signal_state.get("side")
         if side is None:
+            self.logger.info("[%s] OPTIONS: 3/4+ but side=None — skipping", self.pair)
             return []
 
         # 4. Determine option type
         option_type = "call" if side == "long" else "put"
+        self.logger.info(
+            "[%s] OPTIONS SIGNAL READY: %s %d/4 — checking chain/premium",
+            self.pair, option_type.upper(), strength,
+        )
 
         # 5. Get current underlying price
         current_price = signal_state.get("current_price", 0)
         if current_price <= 0:
+            self.logger.info("[%s] OPTIONS: no current_price in signal", self.pair)
             return []
 
         # 6. Check expiry validity
