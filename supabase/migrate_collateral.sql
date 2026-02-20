@@ -44,15 +44,25 @@ WHERE collateral IS NULL
 -- Recalculate gross_pnl, net_pnl, pnl_pct for options trades
 -- where gross_pnl looks suspiciously small (< $0.01 when premium diff > $0.10)
 
--- Recalculate all options trades from scratch using stored entry/exit premiums
+-- Recalculate all options trades from scratch using stored entry/exit premiums.
+-- Dollar amounts are REAL wallet P&L (notional ÷ leverage).
+-- At 50x: BTC $95→$68 notional=-$27, real wallet loss=-$27/50=-$0.54.
+-- pnl_pct stays vs collateral: -$0.54 / $1.90 * 100 = -28.42%
 UPDATE public.trades
 SET
-  gross_pnl = (exit_price - entry_price) * amount,  -- premium diff × contracts
-  pnl = (exit_price - entry_price) * amount - COALESCE(entry_fee, 0) - COALESCE(exit_fee, 0),
+  gross_pnl = (exit_price - entry_price) * amount / leverage,  -- real wallet gross
+  entry_fee = COALESCE(entry_fee, 0) / CASE WHEN leverage > 0 THEN leverage ELSE 1 END,
+  exit_fee = COALESCE(exit_fee, 0) / CASE WHEN leverage > 0 THEN leverage ELSE 1 END,
+  pnl = (exit_price - entry_price) * amount / leverage
+        - COALESCE(entry_fee, 0) / CASE WHEN leverage > 0 THEN leverage ELSE 1 END
+        - COALESCE(exit_fee, 0) / CASE WHEN leverage > 0 THEN leverage ELSE 1 END,
   pnl_pct = CASE
     WHEN entry_price > 0 AND leverage > 0 THEN
-      ((exit_price - entry_price) * amount - COALESCE(entry_fee, 0) - COALESCE(exit_fee, 0))
-      / (entry_price * amount / leverage) * 100
+      (
+        (exit_price - entry_price) * amount / leverage
+        - COALESCE(entry_fee, 0) / CASE WHEN leverage > 0 THEN leverage ELSE 1 END
+        - COALESCE(exit_fee, 0) / CASE WHEN leverage > 0 THEN leverage ELSE 1 END
+      ) / (entry_price * amount / leverage) * 100
     ELSE 0
   END
 WHERE strategy = 'options_scalp'

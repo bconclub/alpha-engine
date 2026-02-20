@@ -102,13 +102,13 @@ def calc_pnl(
         contract_size = DELTA_CONTRACT_SIZE.get(pair, 0.01)
         coin_amount = float(amount) * contract_size
 
-    # Gross P&L
+    # Gross P&L (notional)
     if position_type in ("long", "spot"):
         gross_pnl = (exit_price - entry_price) * coin_amount
     else:  # short
         gross_pnl = (entry_price - exit_price) * coin_amount
 
-    # Fees
+    # Fees (notional)
     entry_notional = entry_price * coin_amount
     exit_notional = exit_price * coin_amount
     entry_fee_dollars = entry_notional * entry_fee_rate
@@ -119,6 +119,16 @@ def calc_pnl(
     lev = max(int(leverage or 1), 1)
     collateral = entry_notional / lev if lev > 1 else entry_notional
     pnl_pct = (net_pnl / collateral * 100) if collateral > 0 else 0.0
+
+    # Options: convert notional P&L to REAL wallet P&L (÷ leverage).
+    # At 50x, you only posted 1/50th of premium as collateral.
+    # Notional: (68-95)*1 = -$27.  Real wallet loss: -$27/50 = -$0.54.
+    # pnl_pct stays the same (-28.52%) — it's already vs collateral.
+    if is_option and lev > 1:
+        gross_pnl /= lev
+        entry_fee_dollars /= lev
+        exit_fee_dollars /= lev
+        net_pnl = gross_pnl - entry_fee_dollars - exit_fee_dollars
 
     return PnLResult(
         round(net_pnl, 8), round(pnl_pct, 4), round(gross_pnl, 8),

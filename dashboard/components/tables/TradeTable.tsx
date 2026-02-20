@@ -338,7 +338,9 @@ function calcUnrealizedPnL(
   const collateral = notional / leverage;
   const pnlPct = collateral > 0 ? (grossPnl / collateral) * 100 : 0;
 
-  return { pnl: grossPnl, pnl_pct: pnlPct };
+  // Options: real wallet P&L = notional / leverage
+  const realPnl = isOption && leverage > 1 ? grossPnl / leverage : grossPnl;
+  return { pnl: realPnl, pnl_pct: pnlPct };
 }
 
 /** Build a PositionDisplay from a Trade + current price (for range bar / state badge) */
@@ -377,6 +379,8 @@ function buildPositionDisplay(
     } else {
       pnlUsd = (currentPrice - entry) * coinAmount;
     }
+    // Options: real wallet P&L = notional / leverage
+    if (isOption && leverage > 1) pnlUsd = pnlUsd / leverage;
     const notional = entry * coinAmount;
     // capitalPnlPct = return on collateral (margin posted)
     capitalPnlPct = pricePnlPct * leverage;
@@ -631,15 +635,19 @@ export default function TradeTable({ trades }: TradeTableProps) {
   /** Get P&L display values for a trade (realized or unrealized) */
   function getDisplayPnL(trade: Trade): { pnl: number; pnlPct: number | null; grossPnl: number | null; isUnrealized: boolean } {
     if (trade.status === 'closed') {
-      // Options: always recalculate from entry/exit premium to fix legacy DB values
-      // (old trades had coin_amount multiplied by ETH contract size 0.01)
+      // Options: always recalculate from entry/exit premiums to fix legacy DB values.
+      // Dollar amounts are REAL wallet P&L (notional ÷ leverage).
+      // At 50x: BTC $95→$68 = -$27 notional, but real wallet loss = -$27/50 = -$0.54.
       if (isOptionTrade(trade) && trade.price > 0 && trade.exit_price != null) {
         const contracts = trade.amount || 1;
-        const grossPnl = (trade.exit_price - trade.price) * contracts;
-        const totalFees = (trade.entry_fee ?? 0) + (trade.exit_fee ?? 0);
-        const netPnl = grossPnl - totalFees;
-        // pnl_pct vs collateral (margin posted = premium / leverage)
         const leverage = trade.leverage > 1 ? trade.leverage : 1;
+        const notionalGross = (trade.exit_price - trade.price) * contracts;
+        const totalFees = (trade.entry_fee ?? 0) + (trade.exit_fee ?? 0);
+        // Real wallet impact = notional / leverage
+        const grossPnl = notionalGross / leverage;
+        const realFees = totalFees / leverage;
+        const netPnl = grossPnl - realFees;
+        // pnl_pct vs collateral (stays the same: net / collateral * 100)
         const collateral = (trade.price * contracts) / leverage;
         const pnlPct = collateral > 0 ? (netPnl / collateral) * 100 : 0;
         return { pnl: netPnl, pnlPct, grossPnl, isUnrealized: false };
