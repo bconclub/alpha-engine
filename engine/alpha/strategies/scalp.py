@@ -242,8 +242,7 @@ class ScalpStrategy(BaseStrategy):
     # ── DISABLED PAIRS — skip entirely ────────────────────────────────
     DISABLED_PAIRS: set[str] = set()
 
-    # ── DISABLED SETUPS — hardcoded safety net (also checked via dashboard setup_config)
-    DISABLED_SETUPS: set[str] = {"TREND_CONT", "BB_SQUEEZE"}
+    # ── DISABLED SETUPS — controlled via dashboard setup_config only (no hardcoded blocks)
 
     # ── Entry thresholds — 3-of-4 with 15m trend soft weight ────────────
     MOMENTUM_MIN_PCT = 0.20           # 0.20%+ move in 60s (raised from 0.15 — losers peaked 0.00-0.08%)
@@ -2241,54 +2240,83 @@ class ScalpStrategy(BaseStrategy):
     # ======================================================================
 
     @staticmethod
-    def _classify_setup(reason: str) -> str:
-        """Classify entry into a setup type based on which signals fired.
+    def _classify_setups(reason: str) -> list[str]:
+        """Classify entry into ALL matching setup types, ordered by priority.
 
-        Reads the signal tags from the reason string to determine the dominant
-        setup pattern. Returns a short uppercase setup name for DB storage.
+        Returns a list of setup names from highest to lowest priority.
+        The caller picks the first enabled one.  Priority order:
+          1. MULTI_SIGNAL  (4+ signals)
+          2. VWAP_RECLAIM  (VWAP tag present)
+          3. MOMENTUM_BURST (MOM + VOL)
+          4. BB_SQUEEZE    (BBSQZ tag)
+          5. MEAN_REVERT   (BB + RSI)
+          6. LIQ_SWEEP     (LIQSWEEP tag)
+          7. FVG_FILL      (FVG tag)
+          8. VOL_DIVERGENCE (VOLDIV tag)
+          9. TREND_CONT    (TCONT tag)
+         10. RSI_OVERRIDE  (RSI-OVERRIDE tag)
+         11. MIXED         (always-present fallback)
         """
         r = reason.upper()
+        matches: list[str] = []
 
-        # RSI override is its own setup
-        if "RSI-OVERRIDE" in r:
-            return "RSI_OVERRIDE"
-
-        # Named setups — in priority order (most specific first)
-        if "BBSQZ:" in r:
-            return "BB_SQUEEZE"
-        if "LIQSWEEP:" in r:
-            return "LIQ_SWEEP"
-        if "FVG:" in r:
-            return "FVG_FILL"
-        if "VOLDIV:" in r:
-            return "VOL_DIVERGENCE"
-        if "VWAP:" in r:
-            return "VWAP_RECLAIM"
-        if "TCONT:" in r:
-            return "TREND_CONT"
-
-        # Combination setups
         has_mom = "MOM:" in r or "MOM5M:" in r
         has_vol = "VOL:" in r
         has_rsi = "RSI:" in r
         has_bb = "BB:" in r
 
-        if has_mom and has_vol:
-            return "MOMENTUM_BURST"
-        if has_bb and has_rsi:
-            return "MEAN_REVERT"
-
-        # Count total signal tags to determine if multi-signal
+        # Count total distinct signal tags
         signal_count = sum([
             has_mom, has_vol, has_rsi, has_bb,
             "VWAP:" in r, "TCONT:" in r, "BBSQZ:" in r,
             "LIQSWEEP:" in r, "FVG:" in r, "VOLDIV:" in r,
             "MOM5M:" in r.replace("MOM:", ""),
         ])
-        if signal_count >= 4:
-            return "MULTI_SIGNAL"
 
-        return "MIXED"
+        # Priority 1: MULTI_SIGNAL — 4+ distinct signal tags
+        if signal_count >= 4:
+            matches.append("MULTI_SIGNAL")
+
+        # Priority 2: VWAP_RECLAIM
+        if "VWAP:" in r:
+            matches.append("VWAP_RECLAIM")
+
+        # Priority 3: MOMENTUM_BURST
+        if has_mom and has_vol:
+            matches.append("MOMENTUM_BURST")
+
+        # Priority 4: BB_SQUEEZE
+        if "BBSQZ:" in r:
+            matches.append("BB_SQUEEZE")
+
+        # Priority 5: MEAN_REVERT
+        if has_bb and has_rsi:
+            matches.append("MEAN_REVERT")
+
+        # Priority 6: LIQ_SWEEP
+        if "LIQSWEEP:" in r:
+            matches.append("LIQ_SWEEP")
+
+        # Priority 7: FVG_FILL
+        if "FVG:" in r:
+            matches.append("FVG_FILL")
+
+        # Priority 8: VOL_DIVERGENCE
+        if "VOLDIV:" in r:
+            matches.append("VOL_DIVERGENCE")
+
+        # Priority 9: TREND_CONT
+        if "TCONT:" in r:
+            matches.append("TREND_CONT")
+
+        # Priority 10: RSI_OVERRIDE
+        if "RSI-OVERRIDE" in r:
+            matches.append("RSI_OVERRIDE")
+
+        # Priority 11: MIXED (always present as fallback)
+        matches.append("MIXED")
+
+        return matches
 
     # ======================================================================
     # SIGNAL STATE WRITE (for dashboard Signal Monitor)
@@ -2432,21 +2460,31 @@ class ScalpStrategy(BaseStrategy):
         order_type: str = "market",
     ) -> Signal | None:
         """Build an entry signal with ATR-dynamic SL. Trail handles the TP."""
-        setup_type = self._classify_setup(reason)
+        candidates = self._classify_setups(reason)
 
-        # ── Hardcoded toxic setup gate (safety net) ──────
-        if setup_type in self.DISABLED_SETUPS:
+        # ── Pick the highest-priority ENABLED setup ──────
+        # Walk the priority list; skip any setup disabled via dashboard toggle.
+        # Only block if ALL matching setups are disabled.
+        setup_type: str | None = None
+        disabled_list: list[str] = []
+        for candidate in candidates:
+            if self._setup_config.get(candidate, True):
+                setup_type = candidate
+                break
+            disabled_list.append(candidate)
+
+        if setup_type is None:
             self.logger.info(
-                "[%s] SETUP_BLOCKED: %s — hardcoded disable", self.pair, setup_type,
+                "[%s] SETUP_DISABLED: all candidates %s — skipping entry",
+                self.pair, disabled_list,
             )
             return None
 
-        # ── Setup disable gate (from dashboard setup_config) ──────
-        if not self._setup_config.get(setup_type, True):
+        if disabled_list:
             self.logger.info(
-                "[%s] SETUP_DISABLED: %s — skipping entry", self.pair, setup_type,
+                "[%s] SETUP_FALLBACK: skipped %s → using %s",
+                self.pair, disabled_list, setup_type,
             )
-            return None
 
         self.logger.info(
             "[%s] %s -> %s entry (%s) SL=%.2f%% TP=%.2f%% ATR=%.3f%% setup=%s",
