@@ -7,11 +7,14 @@ futures positions.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 
 from alpha.config import config
 from alpha.strategies.base import Signal
 from alpha.utils import setup_logger, utcnow
+
+_OPTION_SYMBOL_RE = re.compile(r'\d{6}-\d+-[CP]')
 
 logger = setup_logger("risk_manager")
 
@@ -57,6 +60,8 @@ class RiskManager:
 
         self.open_positions: list[Position] = []
         self.daily_pnl: float = 0.0
+        self.daily_pnl_scalp: float = 0.0
+        self.daily_pnl_options: float = 0.0
         self.daily_pnl_by_pair: dict[str, float] = {}
         self.trade_results: list[bool] = []  # True=win, False=loss (last N)
         self.is_paused = False
@@ -335,6 +340,10 @@ class RiskManager:
     def record_close(self, pair: str, pnl: float) -> None:
         """Record a closed trade's P&L."""
         self.daily_pnl += pnl
+        if _OPTION_SYMBOL_RE.search(pair):
+            self.daily_pnl_options += pnl
+        else:
+            self.daily_pnl_scalp += pnl
         self.daily_pnl_by_pair[pair] = self.daily_pnl_by_pair.get(pair, 0.0) + pnl
         self.trade_results.append(pnl >= 0)
         # Remove first matching position for this pair
@@ -378,8 +387,11 @@ class RiskManager:
 
     def reset_daily(self) -> None:
         """Called at midnight to reset daily counters."""
-        logger.info("Daily reset -- previous daily PnL: $%.4f", self.daily_pnl)
+        logger.info("Daily reset -- previous daily PnL: $%.4f (scalp=$%.4f, options=$%.4f)",
+                     self.daily_pnl, self.daily_pnl_scalp, self.daily_pnl_options)
         self.daily_pnl = 0.0
+        self.daily_pnl_scalp = 0.0
+        self.daily_pnl_options = 0.0
         self.daily_pnl_by_pair.clear()
         if self.is_paused and "daily loss" in self._pause_reason:
             self.is_paused = False
@@ -405,6 +417,8 @@ class RiskManager:
         return {
             "capital": self.capital,
             "daily_pnl": self.daily_pnl,
+            "daily_pnl_scalp": self.daily_pnl_scalp,
+            "daily_pnl_options": self.daily_pnl_options,
             "daily_loss_pct": self.daily_loss_pct,
             "open_positions": len(self.open_positions),
             "total_exposure_pct": self.total_exposure_pct,

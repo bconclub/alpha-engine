@@ -16,7 +16,7 @@ INSERT INTO pair_config (pair, enabled, allocation_pct) VALUES
   ('BTC', true, 20),
   ('ETH', true, 30),
   ('XRP', true, 50),
-  ('SOL', false, 0)
+  ('SOL', true, 20)
 ON CONFLICT (pair) DO NOTHING;
 
 -- Setup configuration (dashboard <-> engine)

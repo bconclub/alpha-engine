@@ -89,9 +89,12 @@ function computeSetupStats(trades: Trade[], setupType: string) {
 // ---------------------------------------------------------------------------
 
 export default function StrategiesPage() {
-  const { trades, setupConfigs, signalStates, pairConfigs } = useSupabase();
+  const { trades, setupConfigs, signalStates, pairConfigs, botStatus } = useSupabase();
   const [activeTab, setActiveTab] = useState<Strategy>('scalp');
   const [timePeriod, setTimePeriod] = useState<TimePeriod>('all');
+
+  const scalpEnabled = botStatus?.scalp_enabled ?? true;
+  const optionsEnabled = botStatus?.options_scalp_enabled ?? false;
 
   const filteredTrades = useMemo(
     () => trades.filter((t) => t.strategy === activeTab),
@@ -197,11 +200,59 @@ export default function StrategiesPage() {
     });
   }, [setupConfigMap]);
 
+  const handleStrategyToggle = useCallback(async (strategy: 'scalp' | 'options_scalp') => {
+    const client = getSupabase();
+    if (!client) return;
+    const currentlyEnabled = strategy === 'scalp' ? scalpEnabled : optionsEnabled;
+    await client.from('bot_commands').insert({
+      command: 'toggle_strategy',
+      params: { strategy, enabled: !currentlyEnabled },
+      executed: false,
+    });
+  }, [scalpEnabled, optionsEnabled]);
+
   return (
     <div className="space-y-6">
       <h1 className="text-xl md:text-2xl font-bold tracking-tight text-white">
         Strategy Performance
       </h1>
+
+      {/* ------------------------------------------------------------------- */}
+      {/* Strategy Toggles                                                     */}
+      {/* ------------------------------------------------------------------- */}
+      <div className="flex gap-3">
+        {([
+          { key: 'scalp' as const, label: 'Scalp', enabled: scalpEnabled },
+          { key: 'options_scalp' as const, label: 'Options Scalp', enabled: optionsEnabled },
+        ]).map(({ key, label, enabled }) => (
+          <div
+            key={key}
+            className={cn(
+              'flex items-center gap-3 border rounded-xl px-4 py-3 transition-all',
+              enabled ? 'border-zinc-700 bg-zinc-900/50' : 'border-zinc-800 bg-zinc-900/30 opacity-60',
+            )}
+          >
+            <span className="text-sm font-semibold text-white">{label}</span>
+            <button
+              onClick={() => handleStrategyToggle(key)}
+              className={cn(
+                'relative inline-flex h-5 w-9 items-center rounded-full transition-colors duration-200 shrink-0',
+                enabled ? 'bg-emerald-500' : 'bg-zinc-700',
+              )}
+            >
+              <span
+                className={cn(
+                  'inline-block h-3 w-3 rounded-full bg-white transition-transform duration-200',
+                  enabled ? 'translate-x-5' : 'translate-x-1',
+                )}
+              />
+            </button>
+            <span className={cn('text-[10px] font-mono', enabled ? 'text-emerald-400' : 'text-zinc-500')}>
+              {enabled ? 'ON' : 'OFF'}
+            </span>
+          </div>
+        ))}
+      </div>
 
       {/* ------------------------------------------------------------------- */}
       {/* Setup Control                                                        */}

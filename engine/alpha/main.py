@@ -58,6 +58,10 @@ class AlphaBot:
         # Options overlay strategies: pair -> OptionsScalpStrategy
         self._options_strategies: dict[str, OptionsScalpStrategy] = {}
 
+        # Strategy enable/disable flags (toggled from dashboard)
+        self._scalp_enabled: bool = True
+        self._options_enabled: bool = config.delta.options_enabled
+
         # WebSocket price feed for real-time exit checks
         self._price_feed: PriceFeed | None = None
 
@@ -945,6 +949,14 @@ class AlphaBot:
             "leverage": config.delta.leverage,
             "active_strategy_count": active_count,
             "uptime_seconds": int(time.monotonic() - self._start_time) if self._start_time else 0,
+            # Strategy toggles
+            "scalp_enabled": self._scalp_enabled,
+            "options_scalp_enabled": self._options_enabled,
+            # INR exchange rate for dashboard display
+            "inr_usd_rate": await self._get_inr_usd_rate(),
+            # Daily P&L breakdown
+            "daily_pnl_scalp": rm.daily_pnl_scalp,
+            "daily_pnl_options": rm.daily_pnl_options,
         }
 
         # ── Aggregate market regime from all scalp strategies ──────────
@@ -1031,6 +1043,41 @@ class AlphaBot:
                 # Only scalp and options_scalp are active — force_strategy is a no-op
                 result_msg = "Only scalp and options_scalp strategies are active"
                 await self.alerts.send_command_confirmation("force_strategy", result_msg)
+
+            elif command == "toggle_strategy":
+                strategy = params.get("strategy", "")
+                enabled = params.get("enabled", True)
+                if strategy == "scalp":
+                    self._scalp_enabled = enabled
+                    tasks = []
+                    if enabled:
+                        for pair, scalp in self._scalp_strategies.items():
+                            if not scalp.is_active:
+                                tasks.append(scalp.start())
+                    else:
+                        for pair, scalp in self._scalp_strategies.items():
+                            if scalp.is_active:
+                                tasks.append(scalp.stop())
+                    if tasks:
+                        await asyncio.gather(*tasks, return_exceptions=True)
+                    result_msg = f"Scalp {'enabled' if enabled else 'disabled'}"
+                elif strategy == "options_scalp":
+                    self._options_enabled = enabled
+                    tasks = []
+                    if enabled:
+                        for pair, opts in self._options_strategies.items():
+                            if not opts.is_active:
+                                tasks.append(opts.start())
+                    else:
+                        for pair, opts in self._options_strategies.items():
+                            if opts.is_active:
+                                tasks.append(opts.stop())
+                    if tasks:
+                        await asyncio.gather(*tasks, return_exceptions=True)
+                    result_msg = f"Options scalp {'enabled' if enabled else 'disabled'}"
+                else:
+                    result_msg = f"Unknown strategy: {strategy}"
+                await self.alerts.send_command_confirmation("toggle_strategy", result_msg)
 
             elif command == "update_config":
                 if "max_position_pct" in params:

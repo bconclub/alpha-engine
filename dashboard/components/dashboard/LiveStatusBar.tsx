@@ -115,6 +115,8 @@ export function LiveStatusBar() {
   const deltaBalanceInr = botStatus?.delta_balance_inr;
 
   const totalCapital = deltaBalance > 0 ? deltaBalance : (botStatus?.capital || 0);
+  const inrRate = botStatus?.inr_usd_rate ?? 86.5;
+  const capitalInr = Math.round(totalCapital * inrRate);
 
   const openPositionCount = botStatus?.open_positions ?? 0;
 
@@ -217,6 +219,9 @@ export function LiveStatusBar() {
           <div className="bg-zinc-900/50 border border-zinc-800 rounded-lg px-2.5 py-2 text-center">
             <div className="text-[9px] uppercase tracking-wider text-zinc-500 mb-1">Capital</div>
             <span className="font-mono text-sm font-bold text-white">{formatCurrency(totalCapital)}</span>
+            {capitalInr > 0 && (
+              <div className="text-[9px] text-zinc-500 font-mono">{'\u20B9'}{capitalInr.toLocaleString('en-IN')}</div>
+            )}
           </div>
         </div>
 
@@ -415,9 +420,14 @@ export function LiveStatusBar() {
         {/* Center: Total Capital + Bot State */}
         <div className="flex flex-col items-center gap-1 border-x border-zinc-800 px-6">
           <span className="text-[10px] uppercase tracking-wider text-zinc-500">Total Capital</span>
-          <span className="font-mono text-xl font-bold text-white truncate max-w-full">
-            {formatCurrency(totalCapital)}
-          </span>
+          <div className="flex items-baseline gap-2">
+            <span className="font-mono text-xl font-bold text-white truncate">
+              {formatCurrency(totalCapital)}
+            </span>
+            {capitalInr > 0 && (
+              <span className="text-[10px] text-zinc-500 font-mono">{'\u20B9'}{capitalInr.toLocaleString('en-IN')}</span>
+            )}
+          </div>
           {deltaBalance > 0 && openPositionCount > 0 && (
             <span className="text-[10px] font-mono text-amber-400">{openPositionCount} open</span>
           )}

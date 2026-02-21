@@ -118,6 +118,14 @@ export interface BotStatus {
   atr_ratio?: number;
   net_change_30m?: number;
   regime_since?: string;
+  // Strategy toggles
+  scalp_enabled?: boolean;
+  options_scalp_enabled?: boolean;
+  // INR exchange rate
+  inr_usd_rate?: number;
+  // Daily P&L breakdown
+  daily_pnl_scalp?: number;
+  daily_pnl_options?: number;
 }
 
 export interface BotCommand {
