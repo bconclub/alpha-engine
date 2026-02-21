@@ -24,6 +24,11 @@ const DELTA_CONTRACT_SIZE: Record<string, number> = {
   'XRP/USD:USD': 1.0,
 };
 
+const OPTION_SYMBOL_RE = /\d{6}-\d+-[CP]/;
+function isOptionPosition(pos: { pair: string; strategy?: string }): boolean {
+  return pos.strategy === 'options_scalp' || OPTION_SYMBOL_RE.test(pos.pair);
+}
+
 function extractBaseAsset(pair: string): string {
   if (pair.includes('/')) return pair.split('/')[0];
   return pair.replace(/USD.*$/, '');
@@ -34,7 +39,7 @@ function extractBaseAsset(pair: string): string {
 // ---------------------------------------------------------------------------
 
 export function LivePositions() {
-  const { openPositions, strategyLog } = useSupabase();
+  const { openPositions, strategyLog, optionsState } = useSupabase();
   const livePrices = useLivePrices(openPositions.length > 0);
 
   // Track which positions are being closed
@@ -101,13 +106,24 @@ export function LivePositions() {
 
     return openPositions.map((pos) => {
       const asset = extractBaseAsset(pos.pair);
-      // Priority: live API price (3s) → bot DB price (~10s) → strategy_log (~5min)
-      const currentPrice =
-        livePrices.prices[pos.pair]       // exact pair match from API (e.g. "BTC/USD:USD")
-        ?? pos.current_price              // bot writes to DB every ~10s
-        ?? fallbackPrices.get(asset)      // strategy_log price (every ~5min)
-        ?? null;
+      const isOption = isOptionPosition(pos);
       const leverage = pos.leverage > 1 ? pos.leverage : 1;
+
+      // For options: use current_premium from options_state (NOT spot price!)
+      // Spot price for ETH is ~$2000, but option premium is ~$11
+      let currentPrice: number | null = null;
+      if (isOption) {
+        const pairKey = `${asset}/USD:USD`;
+        const optState = optionsState.find((s) => s.pair === pairKey);
+        currentPrice = optState?.current_premium ?? null;
+      } else {
+        // Priority: live API price (3s) → bot DB price (~10s) → strategy_log (~5min)
+        currentPrice =
+          livePrices.prices[pos.pair]
+          ?? pos.current_price
+          ?? fallbackPrices.get(asset)
+          ?? null;
+      }
 
       // Calculate P&L
       let pricePnlPct: number | null = null;
@@ -116,7 +132,7 @@ export function LivePositions() {
       let collateral: number | null = null;
 
       if (currentPrice != null && pos.entry_price > 0) {
-        // Price move %
+        // Price move % (premium change for options, spot change for futures)
         if (pos.position_type === 'short') {
           pricePnlPct = ((pos.entry_price - currentPrice) / pos.entry_price) * 100;
         } else {
@@ -126,8 +142,9 @@ export function LivePositions() {
         capitalPnlPct = pricePnlPct * leverage;
 
         // Dollar P&L (gross — fees deducted on close)
+        // Options: 1 contract = 1 unit (no contract size conversion)
         let coinAmount = pos.amount;
-        if (pos.exchange === 'delta') {
+        if (pos.exchange === 'delta' && !isOption) {
           const contractSize = DELTA_CONTRACT_SIZE[pos.pair] ?? 1.0;
           coinAmount = pos.amount * contractSize;
         }
@@ -136,6 +153,8 @@ export function LivePositions() {
         } else {
           pnlUsd = (currentPrice - pos.entry_price) * coinAmount;
         }
+        // Options: real wallet P&L = notional / leverage
+        if (isOption && leverage > 1) pnlUsd = pnlUsd / leverage;
 
         // Collateral = notional / leverage
         const notional = pos.entry_price * coinAmount;
@@ -188,7 +207,7 @@ export function LivePositions() {
         exchange: pos.exchange,
       };
     });
-  }, [openPositions, livePrices.prices, fallbackPrices]);
+  }, [openPositions, livePrices.prices, fallbackPrices, optionsState]);
 
   if (positions.length === 0) return null;
 

@@ -658,11 +658,14 @@ export default function TradeTable({ trades }: TradeTableProps) {
     }
 
     if (trade.status === 'open') {
-      // Options: use current_premium from options_state (NOT spot price)
+      // Options: use pnl_usd / pnl_pct / current_premium from options_state
+      // (NOT the spot price, which is the underlying asset price, not the premium)
       if (isOptionTrade(trade) && trade.price > 0) {
         const asset = extractBaseAsset(trade.pair);
         const pairKey = `${asset}/USD:USD`;
         const optState = optionsState.find((s) => s.pair === pairKey);
+
+        // Try current_premium first (calculate real wallet P&L ourselves)
         const currentPremium = optState?.current_premium;
         if (currentPremium != null && currentPremium > 0) {
           const contracts = trade.amount || 1;
@@ -673,8 +676,16 @@ export default function TradeTable({ trades }: TradeTableProps) {
           const pnlPct = collateral > 0 ? (grossPnl / collateral) * 100 : 0;
           return { pnl: grossPnl, pnlPct, grossPnl, isUnrealized: true };
         }
-        // Fallback: show DB values if no live premium
-        return { pnl: trade.pnl, pnlPct: trade.pnl_pct ?? null, grossPnl: trade.gross_pnl ?? null, isUnrealized: false };
+
+        // Fallback: use engine-calculated pnl_usd / pnl_pct from options_state
+        if (optState?.pnl_usd != null) {
+          const leverage = trade.leverage > 1 ? trade.leverage : 1;
+          const realPnl = optState.pnl_usd / leverage;
+          return { pnl: realPnl, pnlPct: optState.pnl_pct ?? 0, grossPnl: realPnl, isUnrealized: true };
+        }
+
+        // Last fallback: show zeros with "live" tag so user knows it's updating
+        return { pnl: 0, pnlPct: 0, grossPnl: 0, isUnrealized: true };
       }
 
       const asset = extractBaseAsset(trade.pair);
