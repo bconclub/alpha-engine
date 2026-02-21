@@ -165,7 +165,25 @@ create table if not exists public.bot_status (
     -- Flags
     is_running        boolean      not null default true,
     is_paused         boolean      not null default false,
-    pause_reason      text
+    pause_reason      text,
+
+    -- Strategy toggles
+    scalp_enabled          boolean not null default true,
+    options_scalp_enabled  boolean not null default false,
+
+    -- INR exchange rate
+    inr_usd_rate      numeric(10,2),
+
+    -- Daily P&L breakdown
+    daily_pnl_scalp   numeric(20,8) not null default 0,
+    daily_pnl_options  numeric(20,8) not null default 0,
+
+    -- Market regime
+    market_regime     text,
+    chop_score        numeric(10,4),
+    atr_ratio         numeric(10,4),
+    net_change_30m    numeric(10,4),
+    regime_since      text
 );
 
 -- Indexes: latest-status lookup, timeline
@@ -183,8 +201,8 @@ create table if not exists public.bot_commands (
     created_at    timestamptz not null default now(),
 
     -- Command
-    command       text not null                          -- 'pause', 'resume', 'force_strategy', 'update_config', 'update_pair_config', 'close_trade'
-                  check (command in ('pause', 'resume', 'force_strategy', 'update_config', 'update_pair_config', 'close_trade')),
+    command       text not null                          -- 'pause', 'resume', 'force_strategy', 'update_config', 'update_pair_config', 'close_trade', 'toggle_strategy'
+                  check (command in ('pause', 'resume', 'force_strategy', 'update_config', 'update_pair_config', 'close_trade', 'toggle_strategy')),
     params        jsonb not null default '{}'::jsonb,    -- e.g. {"strategy": "grid"} or {"pair": "ETH/USDT"}
 
     -- Execution tracking
