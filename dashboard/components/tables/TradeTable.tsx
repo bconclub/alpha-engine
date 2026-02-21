@@ -436,7 +436,7 @@ function buildPositionDisplay(
 // ---------------------------------------------------------------------------
 
 export default function TradeTable({ trades }: TradeTableProps) {
-  const { strategyLog } = useSupabase();
+  const { strategyLog, optionsState } = useSupabase();
   const hasOpenTrades = trades.some((t) => t.status === 'open');
   const livePrices = useLivePrices(hasOpenTrades);
 
@@ -658,6 +658,25 @@ export default function TradeTable({ trades }: TradeTableProps) {
     }
 
     if (trade.status === 'open') {
+      // Options: use current_premium from options_state (NOT spot price)
+      if (isOptionTrade(trade) && trade.price > 0) {
+        const asset = extractBaseAsset(trade.pair);
+        const pairKey = `${asset}/USD:USD`;
+        const optState = optionsState.find((s) => s.pair === pairKey);
+        const currentPremium = optState?.current_premium;
+        if (currentPremium != null && currentPremium > 0) {
+          const contracts = trade.amount || 1;
+          const leverage = trade.leverage > 1 ? trade.leverage : 1;
+          const notionalGross = (currentPremium - trade.price) * contracts;
+          const grossPnl = notionalGross / leverage;
+          const collateral = (trade.price * contracts) / leverage;
+          const pnlPct = collateral > 0 ? (grossPnl / collateral) * 100 : 0;
+          return { pnl: grossPnl, pnlPct, grossPnl, isUnrealized: true };
+        }
+        // Fallback: show DB values if no live premium
+        return { pnl: trade.pnl, pnlPct: trade.pnl_pct ?? null, grossPnl: trade.gross_pnl ?? null, isUnrealized: false };
+      }
+
       const asset = extractBaseAsset(trade.pair);
       // Priority: live API price (3s) → strategy_log price (~5min)
       const currentPrice = livePrices.prices[trade.pair] ?? currentPrices.get(asset) ?? null;
@@ -940,7 +959,12 @@ export default function TradeTable({ trades }: TradeTableProps) {
                       <HoldTimeCell trade={trade} now={now} />
                       {trade.status === 'open' && (() => {
                         const asset = extractBaseAsset(trade.pair);
-                        const cp = livePrices.prices[trade.pair] ?? currentPrices.get(asset) ?? null;
+                        let cp: number | null = livePrices.prices[trade.pair] ?? currentPrices.get(asset) ?? null;
+                        // Options: use current_premium from options_state, NOT spot price
+                        if (isOptionTrade(trade)) {
+                          const optState = optionsState.find((s) => s.pair === `${asset}/USD:USD`);
+                          cp = optState?.current_premium ?? null;
+                        }
                         const posDisplay = buildPositionDisplay(trade, cp);
                         if (!posDisplay) return null;
                         const posState = getPositionState(posDisplay);
@@ -1323,7 +1347,11 @@ export default function TradeTable({ trades }: TradeTableProps) {
                         <td className="px-4 py-3 text-xs">
                           {trade.status === 'open' ? (() => {
                             const asset = extractBaseAsset(trade.pair);
-                            const cp = livePrices.prices[trade.pair] ?? currentPrices.get(asset) ?? null;
+                            let cp: number | null = livePrices.prices[trade.pair] ?? currentPrices.get(asset) ?? null;
+                            if (isOptionTrade(trade)) {
+                              const optState = optionsState.find((s) => s.pair === `${asset}/USD:USD`);
+                              cp = optState?.current_premium ?? null;
+                            }
                             const posDisplay = buildPositionDisplay(trade, cp);
                             if (posDisplay) {
                               const posState = getPositionState(posDisplay);
