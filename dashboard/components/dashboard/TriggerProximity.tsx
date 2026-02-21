@@ -306,9 +306,13 @@ export function TriggerProximity() {
       }
     }
 
-    // Build lookup of open positions by base asset + exchange
+    // Build lookup of open SCALP positions by base asset + exchange
+    // Only show "IN TRADE" badge for scalp positions (not options)
+    const OPTION_SYMBOL_RE = /\d{6}-\d+-[CP]/;
     const positionMap = new Map<string, OpenPosition>();
     for (const pos of (openPositions ?? [])) {
+      // Skip options positions — they show in Options Overview, not here
+      if (pos.strategy === 'options_scalp' || OPTION_SYMBOL_RE.test(pos.pair)) continue;
       const asset = extractBaseAsset(pos.pair);
       const key = `${asset}-${pos.exchange}`;
       positionMap.set(key, pos);

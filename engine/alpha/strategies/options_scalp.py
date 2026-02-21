@@ -185,7 +185,7 @@ class OptionsScalpStrategy(BaseStrategy):
     # ==================================================================
 
     async def on_start(self) -> None:
-        """Load option markets on startup."""
+        """Load option markets on startup + restore position state from DB."""
         if self.options_exchange:
             try:
                 await self.options_exchange.load_markets()
@@ -201,17 +201,135 @@ class OptionsScalpStrategy(BaseStrategy):
                 self.logger.error("[%s] Failed to load options markets: %s", self.pair, e)
 
         await self._refresh_option_chain()
+
+        # Restore position state from DB if engine restarted with open option trade
+        await self._restore_position_from_db()
+
         self.logger.info(
             "[%s] OPTIONS SCALP ACTIVE — min_strength=%d, "
             "TP=%d%% SL=%d%% Trail=%d%%/%d%% Pullback=%d%% Decay=%d%% "
-            "Timeout=%dm Phase1=%ds MaxPremium=$%.2f",
+            "Timeout=%dm Phase1=%ds MaxPremium=$%.2f%s",
             self.pair, self.MIN_SIGNAL_STRENGTH,
             int(self.TP_PREMIUM_GAIN_PCT), int(self.SL_PREMIUM_LOSS_PCT),
             int(self.TRAILING_ACTIVATE_PCT), int(self.TRAILING_DISTANCE_PCT),
             int(self.PULLBACK_EXIT_PCT), int(self.DECAY_THRESHOLD_PCT),
             self.TIMEOUT_MINUTES, self.PHASE1_HANDS_OFF_SEC,
             self.MAX_PREMIUM_USD,
+            f" | RESTORED: {self.option_side} {self.option_symbol}" if self.in_position else "",
         )
+
+    async def _restore_position_from_db(self) -> None:
+        """Restore in-memory position state from DB after engine restart.
+
+        Checks the trades table for an open options_scalp trade on this pair's
+        underlying asset. If found, restores all position tracking fields so
+        exit management continues seamlessly.
+        """
+        if not self._db or not self._db.is_connected:
+            return
+
+        try:
+            # Options trades are stored with the option symbol as pair
+            # (e.g. ETH/USD:USD-260222-1980-C), but we need to find by strategy
+            open_trades = await self._db.get_open_trades(pair=None)
+            for trade in open_trades:
+                if trade.get("strategy") != "options_scalp":
+                    continue
+                # Match by base asset (BTC or ETH)
+                trade_pair = trade.get("pair", "")
+                trade_asset = trade_pair.split("/")[0] if "/" in trade_pair else ""
+                if trade_asset != self._base_asset:
+                    continue
+
+                # Found our open option trade — restore state
+                self.in_position = True
+                self.option_symbol = trade_pair
+                self.entry_premium = trade.get("entry_price", 0)
+                self.entry_time = time.monotonic()  # can't restore exact time, use now
+                self.highest_premium = max(
+                    self.entry_premium,
+                    trade.get("current_price") or self.entry_premium,
+                )
+
+                # Determine option side from position_type or pair suffix
+                if trade_pair.endswith("-C"):
+                    self.option_side = "call"
+                elif trade_pair.endswith("-P"):
+                    self.option_side = "put"
+                else:
+                    self.option_side = "call"  # fallback
+
+                # Restore trailing state
+                self._trailing_active = trade.get("position_state") == "trailing"
+                self.strike_price = trade.get("stop_loss", 0) or 0  # strike stored elsewhere
+
+                # Try to parse strike from symbol: ETH/USD:USD-260222-1980-C
+                parts = trade_pair.split("-")
+                if len(parts) >= 3:
+                    try:
+                        self.strike_price = float(parts[-2])
+                    except ValueError:
+                        pass
+
+                # Try to restore expiry from symbol: -YYMMDD-
+                if len(parts) >= 2:
+                    try:
+                        expiry_str = parts[-3] if len(parts) >= 4 else parts[1]
+                        self.expiry_dt = datetime.strptime(expiry_str, "%y%m%d").replace(
+                            hour=12, tzinfo=timezone.utc,
+                        )
+                    except (ValueError, IndexError):
+                        pass
+
+                self.logger.info(
+                    "[%s] RESTORED from DB: %s %s strike=$%.0f entry=$%.4f peak=$%.4f trail=%s",
+                    self.pair, self.option_side, self.option_symbol,
+                    self.strike_price, self.entry_premium, self.highest_premium,
+                    self._trailing_active,
+                )
+                break  # Only one position per asset
+
+        except Exception as e:
+            self.logger.error("[%s] Failed to restore position from DB: %s", self.pair, e)
+
+    async def _update_position_state_in_db(self, current_premium: float) -> None:
+        """Write live position state to the trades table so dashboard shows real P&L.
+
+        Similar to scalp.py's _update_position_state_in_db, writes:
+        current_price (premium), position_state, current_pnl, peak_pnl
+        every ~10s.
+        """
+        if not self._db or not self._db.is_connected:
+            return
+        if not self.in_position or not self.option_symbol:
+            return
+
+        try:
+            # P&L %
+            pnl_pct = 0.0
+            if self.entry_premium > 0:
+                pnl_pct = (current_premium - self.entry_premium) / self.entry_premium * 100
+
+            # Peak P&L %
+            peak_pnl = 0.0
+            if self.entry_premium > 0:
+                peak_pnl = (self.highest_premium - self.entry_premium) / self.entry_premium * 100
+
+            state = "trailing" if self._trailing_active else "holding"
+
+            # Find our open trade (options trade pair = option symbol)
+            open_trade = await self._db.get_open_trade(
+                pair=self.option_symbol, exchange="delta", strategy="options_scalp",
+            )
+            if open_trade:
+                await self._db.update_trade(open_trade["id"], {
+                    "position_state": state,
+                    "current_price": round(current_premium, 8),
+                    "current_pnl": round(pnl_pct, 4),
+                    "peak_pnl": round(peak_pnl, 4),
+                })
+        except Exception as e:
+            self.logger.debug("[%s] position state DB update failed: %s", self.pair, e)
 
     # ==================================================================
     # OPTION CHAIN MANAGEMENT
@@ -776,6 +894,10 @@ class OptionsScalpStrategy(BaseStrategy):
 
         # Track peak premium
         self.highest_premium = max(self.highest_premium, current_premium)
+
+        # Write position state to trades table every tick (~10s)
+        # so dashboard shows live P&L for options positions
+        await self._update_position_state_in_db(current_premium)
 
         # P&L
         premium_change_pct = (

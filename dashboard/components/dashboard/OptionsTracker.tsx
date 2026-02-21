@@ -3,7 +3,7 @@
 import { useMemo } from 'react';
 import { useSupabase } from '@/components/providers/SupabaseProvider';
 import { formatShortDate, formatTimeAgo, cn } from '@/lib/utils';
-import type { OptionsState, ActivityLogRow } from '@/lib/types';
+import type { OptionsState, ActivityLogRow, OpenPosition } from '@/lib/types';
 
 // Options-eligible assets (options_scalp only runs on BTC + ETH)
 const OPTIONS_ASSETS = ['BTC', 'ETH'] as const;
@@ -42,19 +42,32 @@ function isStale(updatedAt: string | null): boolean {
   return ageMs(updatedAt) > 2 * 60 * 1000;
 }
 
+const OPTION_SYMBOL_RE = /\d{6}-\d+-[CP]/;
+
 interface MergedPairState {
   asset: string;
   pair: string;
   state: OptionsState | null;
   recentEvents: ActivityLogRow[];
   stale: boolean;
+  /** Fallback: open options trade from trades table (if options_state lacks position info) */
+  openTrade: OpenPosition | null;
 }
 
 export function OptionsTracker() {
-  const { optionsState, optionsLog } = useSupabase();
+  const { optionsState, optionsLog, openPositions } = useSupabase();
 
   const pairStates = useMemo(() => {
     const results: MergedPairState[] = [];
+
+    // Build a map of open options trades by base asset
+    const optionTrades = new Map<string, OpenPosition>();
+    for (const pos of (openPositions ?? [])) {
+      if (pos.strategy === 'options_scalp' || OPTION_SYMBOL_RE.test(pos.pair)) {
+        const asset = extractBaseAsset(pos.pair);
+        optionTrades.set(asset, pos);
+      }
+    }
 
     for (const asset of OPTIONS_ASSETS) {
       const pair = `${asset}/USD:USD`;
@@ -73,11 +86,12 @@ export function OptionsTracker() {
         state,
         recentEvents: assetEvents.slice(0, 5),
         stale: isStale(state?.updated_at ?? null),
+        openTrade: optionTrades.get(asset) ?? null,
       });
     }
 
     return results;
-  }, [optionsState, optionsLog]);
+  }, [optionsState, optionsLog, openPositions]);
 
   return (
     <div className="bg-[#0d1117] border border-zinc-800 rounded-xl p-3 md:p-5">
@@ -101,11 +115,29 @@ export function OptionsTracker() {
 
 function PairCard({ ps }: { ps: MergedPairState }) {
   const s = ps.state;
-  // Position is only "live" if position_side is set AND data is fresh (< 5 min)
-  // Stale position_side means engine crashed/restarted without clearing state
+  // Position is "live" if:
+  //   1. options_state has position_side set AND data is fresh (< 5 min), OR
+  //   2. There's an open options trade in the trades table (fallback for engine restart)
   const positionSideSet = s?.position_side != null;
   const dataAge = ageMs(s?.updated_at ?? null);
-  const hasPosition = positionSideSet && dataAge < 5 * 60 * 1000;
+  const hasPositionFromState = positionSideSet && dataAge < 5 * 60 * 1000;
+  const hasPositionFromTrades = ps.openTrade != null;
+  const hasPosition = hasPositionFromState || hasPositionFromTrades;
+
+  // Derive position info: prefer options_state, fallback to trades table
+  const positionSide = s?.position_side ?? (
+    hasPositionFromTrades
+      ? (ps.openTrade!.pair.endsWith('-C') ? 'call' : ps.openTrade!.pair.endsWith('-P') ? 'put' : 'call')
+      : null
+  );
+  const entryPremium = s?.entry_premium ?? (hasPositionFromTrades ? ps.openTrade!.entry_price : null);
+  const currentPremium = s?.current_premium ?? (hasPositionFromTrades ? (ps.openTrade!.current_price ?? null) : null);
+  const pnlPct = s?.pnl_pct ?? (hasPositionFromTrades ? (ps.openTrade!.current_pnl ?? null) : null);
+  const pnlUsd = s?.pnl_usd ?? null;
+  const positionStrike = s?.position_strike ?? null;
+  const trailingActive = s?.trailing_active ?? (hasPositionFromTrades && ps.openTrade!.position_state === 'trailing');
+  const highestPremium = s?.highest_premium ?? null;
+
   const isReady = (s?.signal_strength ?? 0) >= 3;
   const strength = s?.signal_strength ?? 0;
 
@@ -128,7 +160,7 @@ function PairCard({ ps }: { ps: MergedPairState }) {
           {hasPosition && (
             <span className="px-1.5 py-0.5 rounded text-[9px] font-mono font-medium text-[#7c4dff] bg-[#7c4dff]/10 flex items-center gap-1">
               <span className="w-1.5 h-1.5 rounded-full bg-[#7c4dff] animate-pulse" />
-              {s?.position_side?.toUpperCase()} OPEN
+              {positionSide?.toUpperCase()} OPEN
             </span>
           )}
           {ps.stale ? (
@@ -221,9 +253,9 @@ function PairCard({ ps }: { ps: MergedPairState }) {
             <div className="bg-[#7c4dff]/5 border border-[#7c4dff]/20 rounded p-2 mb-2">
               <div className="flex items-center justify-between mb-1.5">
                 <span className="text-[10px] font-medium text-[#7c4dff] uppercase">
-                  {s.position_side?.toUpperCase()} Position
+                  {positionSide?.toUpperCase()} Position
                 </span>
-                {s.trailing_active && (
+                {trailingActive && (
                   <span className="flex items-center gap-1 text-[9px] font-mono text-[#00c853]">
                     <span className="w-1.5 h-1.5 rounded-full bg-[#00c853] animate-pulse" />
                     TRAILING
@@ -231,32 +263,34 @@ function PairCard({ ps }: { ps: MergedPairState }) {
                 )}
               </div>
               <div className="grid grid-cols-2 gap-x-3 gap-y-1 text-[9px] font-mono text-zinc-400">
-                <div>
-                  <span className="text-zinc-600">Strike </span>
-                  {fmtStrike(s.position_strike)}
-                </div>
+                {positionStrike != null && (
+                  <div>
+                    <span className="text-zinc-600">Strike </span>
+                    {fmtStrike(positionStrike)}
+                  </div>
+                )}
                 <div>
                   <span className="text-zinc-600">Entry </span>
-                  {fmtPrem(s.entry_premium)}
+                  {fmtPrem(entryPremium)}
                 </div>
                 <div>
                   <span className="text-zinc-600">Now </span>
-                  {fmtPrem(s.current_premium)}
+                  {currentPremium != null ? fmtPrem(currentPremium) : <span className="text-zinc-600">updating...</span>}
                 </div>
                 <div>
                   <span className="text-zinc-600">P&L </span>
                   <span className={cn(
                     'font-medium',
-                    (s.pnl_pct ?? 0) >= 0 ? 'text-[#00c853]' : 'text-[#ff1744]',
+                    (pnlPct ?? 0) >= 0 ? 'text-[#00c853]' : 'text-[#ff1744]',
                   )}>
-                    {s.pnl_pct != null ? `${s.pnl_pct >= 0 ? '+' : ''}${s.pnl_pct.toFixed(1)}%` : '—'}
-                    {s.pnl_usd != null && ` ($${s.pnl_usd >= 0 ? '+' : ''}${s.pnl_usd.toFixed(4)})`}
+                    {pnlPct != null ? `${pnlPct >= 0 ? '+' : ''}${pnlPct.toFixed(1)}%` : '—'}
+                    {pnlUsd != null && ` ($${pnlUsd >= 0 ? '+' : ''}${pnlUsd.toFixed(4)})`}
                   </span>
                 </div>
               </div>
-              {s.highest_premium != null && s.entry_premium != null && s.entry_premium > 0 && (
+              {highestPremium != null && entryPremium != null && entryPremium > 0 && (
                 <div className="text-[8px] font-mono text-zinc-600 mt-1">
-                  Peak ${s.highest_premium.toFixed(4)} ({((s.highest_premium - s.entry_premium) / s.entry_premium * 100).toFixed(1)}%)
+                  Peak ${highestPremium.toFixed(4)} ({((highestPremium - entryPremium) / entryPremium * 100).toFixed(1)}%)
                 </div>
               )}
             </div>
