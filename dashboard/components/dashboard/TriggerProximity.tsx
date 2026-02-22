@@ -35,7 +35,9 @@ interface TriggerInfo {
   trend: 'bullish' | 'bearish' | 'neutral';
   // Signal state from bot (or fallback calc)
   signalSide: 'long' | 'short' | null;
-  indicators: IndicatorStatus[];   // 4 indicators for the active side
+  indicators: IndicatorStatus[];   // 4 indicators for the active side (legacy)
+  bullIndicators: IndicatorStatus[];  // 4 bull indicators (MOM, VOL, RSI, BB)
+  bearIndicators: IndicatorStatus[];  // 4 bear indicators (MOM, VOL, RSI, BB)
   signalCount: number;
   bullCount: number;               // directional bull signal count
   bearCount: number;               // directional bear signal count
@@ -106,6 +108,20 @@ function computeTrigger(log: StrategyLog): TriggerInfo {
       { active: log.signal_bb === true,  label: 'BB',  direction: dotDir },
     ];
 
+    // Per-direction indicators from bot breakdown fields
+    const bullIndicators: IndicatorStatus[] = [
+      { active: log.bull_mom === true, label: 'MOM', direction: 'bull' },
+      { active: log.bull_vol === true, label: 'VOL', direction: 'bull' },
+      { active: log.bull_rsi === true, label: 'RSI', direction: 'bull' },
+      { active: log.bull_bb === true,  label: 'BB',  direction: 'bull' },
+    ];
+    const bearIndicators: IndicatorStatus[] = [
+      { active: log.bear_mom === true, label: 'MOM', direction: 'bear' },
+      { active: log.bear_vol === true, label: 'VOL', direction: 'bear' },
+      { active: log.bear_rsi === true, label: 'RSI', direction: 'bear' },
+      { active: log.bear_bb === true,  label: 'BB',  direction: 'bear' },
+    ];
+
     let overallStatus: string;
     let statusColor: string;
 
@@ -129,7 +145,8 @@ function computeTrigger(log: StrategyLog): TriggerInfo {
     return {
       pair, exchange, isFutures, hasData,
       rsi, volumeRatio, priceChangePct, currentPrice, bbUpper, bbLower,
-      trend, signalSide, indicators, signalCount, bullCount, bearCount,
+      trend, signalSide, indicators, bullIndicators, bearIndicators,
+      signalCount, bullCount, bearCount,
       overallStatus, statusColor,
       skipReason,
       activePosition: null,
@@ -210,7 +227,10 @@ function computeTrigger(log: StrategyLog): TriggerInfo {
   return {
     pair, exchange, isFutures, hasData,
     rsi, volumeRatio, priceChangePct, currentPrice, bbUpper, bbLower,
-    trend, signalSide, indicators, signalCount, bullCount, bearCount,
+    trend, signalSide, indicators,
+    bullIndicators: longIndicators,
+    bearIndicators: shortIndicators,
+    signalCount, bullCount, bearCount,
     overallStatus, statusColor,
     skipReason: null,
     activePosition: null,
@@ -340,7 +360,7 @@ export function TriggerProximity() {
     <div className="bg-[#0d1117] border border-zinc-800 rounded-xl p-3 md:p-5">
       <div className="flex items-center justify-between mb-4">
         <h3 className="text-sm font-medium text-zinc-400 uppercase tracking-wider">
-          Entry Signals
+          Entry Signals — Futures
         </h3>
         <span className="text-[9px] text-zinc-600 font-mono">need 3/4</span>
       </div>
@@ -368,7 +388,7 @@ export function TriggerProximity() {
               {/* Header */}
               <div className="flex flex-wrap items-center justify-between gap-1 mb-3">
                 <div className="flex items-center gap-2">
-                  <span className="text-sm font-medium text-white">{t.pair}</span>
+                  <span className="text-sm font-medium text-white">{extractBaseAsset(t.pair)}</span>
                   {t.currentPrice != null && (
                     <span className="text-[10px] font-mono text-zinc-500">
                       ${t.currentPrice.toLocaleString()}
@@ -405,48 +425,56 @@ export function TriggerProximity() {
 
               {t.hasData ? (
                 <div className={cn('space-y-2.5', hasActivePos && 'opacity-40')}>
-                  {/* Dual signal rows: bull + bear */}
-                  <div className="space-y-1.5">
-                    {/* Bull row */}
-                    <div className="flex items-center gap-2">
-                      <span className={cn(
-                        'text-[10px] font-mono w-10 shrink-0',
-                        t.signalSide === 'long' ? 'text-[#00c853] font-bold' : 'text-zinc-600',
-                      )}>
-                        Bull
-                      </span>
-                      <SignalBar count={t.bullCount} />
-                      <span className={cn(
-                        'text-[10px] font-mono w-8 text-right',
-                        t.bullCount >= 3 ? 'text-[#00c853]' : t.bullCount >= 1 ? 'text-[#ffd600]' : 'text-zinc-600',
-                      )}>
-                        {t.bullCount}/4
-                      </span>
-                    </div>
-                    {/* Bear row (futures only) */}
-                    {t.isFutures && (
+                  {/* Dual signal rows: bull + bear, with inline dots */}
+                  <div className="space-y-2">
+                    {/* Bull row: bar + dots */}
+                    <div className="space-y-1">
                       <div className="flex items-center gap-2">
                         <span className={cn(
-                          'text-[10px] font-mono w-10 shrink-0',
-                          t.signalSide === 'short' ? 'text-[#ff1744] font-bold' : 'text-zinc-600',
+                          'text-[10px] font-mono w-8 shrink-0',
+                          t.signalSide === 'long' ? 'text-[#00c853] font-bold' : 'text-zinc-600',
                         )}>
-                          Bear
+                          Bull
                         </span>
-                        <SignalBar count={t.bearCount} variant="bear" />
+                        <SignalBar count={t.bullCount} />
                         <span className={cn(
                           'text-[10px] font-mono w-8 text-right',
-                          t.bearCount >= 3 ? 'text-[#ff1744]' : t.bearCount >= 1 ? 'text-[#ffd600]' : 'text-zinc-600',
+                          t.bullCount >= 3 ? 'text-[#00c853]' : t.bullCount >= 1 ? 'text-[#ffd600]' : 'text-zinc-600',
                         )}>
-                          {t.bearCount}/4
+                          {t.bullCount}/4
                         </span>
                       </div>
-                    )}
-                    {/* Active side indicator dots */}
-                    <div className="flex items-center gap-2 ml-12">
-                      {t.indicators.map((ind, i) => (
-                        <Dot key={i} active={ind.active} label={ind.label} direction={ind.direction} />
-                      ))}
+                      <div className="flex items-center gap-3 ml-8">
+                        {t.bullIndicators.map((ind, i) => (
+                          <Dot key={`bull-${i}`} active={ind.active} label={ind.label} direction="bull" />
+                        ))}
+                      </div>
                     </div>
+                    {/* Bear row: bar + dots (futures only) */}
+                    {t.isFutures && (
+                      <div className="space-y-1">
+                        <div className="flex items-center gap-2">
+                          <span className={cn(
+                            'text-[10px] font-mono w-8 shrink-0',
+                            t.signalSide === 'short' ? 'text-[#ff1744] font-bold' : 'text-zinc-600',
+                          )}>
+                            Bear
+                          </span>
+                          <SignalBar count={t.bearCount} variant="bear" />
+                          <span className={cn(
+                            'text-[10px] font-mono w-8 text-right',
+                            t.bearCount >= 3 ? 'text-[#ff1744]' : t.bearCount >= 1 ? 'text-[#ffd600]' : 'text-zinc-600',
+                          )}>
+                            {t.bearCount}/4
+                          </span>
+                        </div>
+                        <div className="flex items-center gap-3 ml-8">
+                          {t.bearIndicators.map((ind, i) => (
+                            <Dot key={`bear-${i}`} active={ind.active} label={ind.label} direction="bear" />
+                          ))}
+                        </div>
+                      </div>
+                    )}
                   </div>
                   {/* Compact values */}
                   <div className="flex gap-3 pt-1 border-t border-zinc-800/50">

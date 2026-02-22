@@ -459,29 +459,26 @@ class AlphaBot:
                     bull_count = sig.get("bull_count", 0) if sig else 0
                     bear_count = sig.get("bear_count", 0) if sig else 0
 
-                    # Directional core-4 booleans — only show signals matching the active side
+                    # Per-direction core-4 booleans (dashboard shows both bull + bear dots)
+                    bull_mom = sig.get("bull_mom", False) if sig else False
+                    bull_vol = sig.get("bull_vol", False) if sig else False
+                    bull_rsi = sig.get("bull_rsi", False) if sig else False
+                    bull_bb = sig.get("bull_bb", False) if sig else False
+                    bear_mom = sig.get("bear_mom", False) if sig else False
+                    bear_vol = sig.get("bear_vol", False) if sig else False
+                    bear_rsi = sig.get("bear_rsi", False) if sig else False
+                    bear_bb = sig.get("bear_bb", False) if sig else False
+
+                    # Legacy: active-side signals for backward compat
                     if sig_side == "long":
-                        sig_mom = sig.get("bull_mom", False) if sig else False
-                        sig_vol = sig.get("bull_vol", False) if sig else False
-                        sig_rsi = sig.get("bull_rsi", False) if sig else False
-                        sig_bb = sig.get("bull_bb", False) if sig else False
+                        sig_mom, sig_vol, sig_rsi, sig_bb = bull_mom, bull_vol, bull_rsi, bull_bb
                     elif sig_side == "short":
-                        sig_mom = sig.get("bear_mom", False) if sig else False
-                        sig_vol = sig.get("bear_vol", False) if sig else False
-                        sig_rsi = sig.get("bear_rsi", False) if sig else False
-                        sig_bb = sig.get("bear_bb", False) if sig else False
+                        sig_mom, sig_vol, sig_rsi, sig_bb = bear_mom, bear_vol, bear_rsi, bear_bb
                     else:
-                        # No signal — pick stronger side for display
                         if bull_count >= bear_count:
-                            sig_mom = sig.get("bull_mom", False) if sig else False
-                            sig_vol = sig.get("bull_vol", False) if sig else False
-                            sig_rsi = sig.get("bull_rsi", False) if sig else False
-                            sig_bb = sig.get("bull_bb", False) if sig else False
+                            sig_mom, sig_vol, sig_rsi, sig_bb = bull_mom, bull_vol, bull_rsi, bull_bb
                         else:
-                            sig_mom = sig.get("bear_mom", False) if sig else False
-                            sig_vol = sig.get("bear_vol", False) if sig else False
-                            sig_rsi = sig.get("bear_rsi", False) if sig else False
-                            sig_bb = sig.get("bear_bb", False) if sig else False
+                            sig_mom, sig_vol, sig_rsi, sig_bb = bear_mom, bear_vol, bear_rsi, bear_bb
 
                     await self.db.log_strategy_selection({
                         "timestamp": iso_now(),
@@ -518,6 +515,15 @@ class AlphaBot:
                         "signal_bb": sig_bb,
                         "bull_count": bull_count,
                         "bear_count": bear_count,
+                        # Per-direction indicator booleans (dashboard dual dots)
+                        "bull_mom": bull_mom,
+                        "bull_vol": bull_vol,
+                        "bull_rsi": bull_rsi,
+                        "bull_bb": bull_bb,
+                        "bear_mom": bear_mom,
+                        "bear_vol": bear_vol,
+                        "bear_rsi": bear_rsi,
+                        "bear_bb": bear_bb,
                         "skip_reason": sig.get("skip_reason", "") if sig else "",
                     })
                 except Exception:

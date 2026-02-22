@@ -79,6 +79,15 @@ export interface StrategyLog {
   signal_bb?: boolean;     // BB mean-reversion signal active (for active side)
   bull_count?: number;     // 0-11: how many signals fire bullish
   bear_count?: number;     // 0-11: how many signals fire bearish
+  // Per-direction indicator booleans (for dual bull/bear dot display)
+  bull_mom?: boolean;
+  bull_vol?: boolean;
+  bull_rsi?: boolean;
+  bull_bb?: boolean;
+  bear_mom?: boolean;
+  bear_vol?: boolean;
+  bear_rsi?: boolean;
+  bear_bb?: boolean;
   skip_reason?: string;    // Why bot isn't entering (e.g. "REGIME_CHOPPY", "STRENGTH_GATE")
 }
 
