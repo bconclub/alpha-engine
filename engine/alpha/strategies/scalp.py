@@ -182,13 +182,20 @@ class ScalpStrategy(BaseStrategy):
     check_interval_sec = 5  # 5 second ticks — patient, not frantic
 
     # ── Per-pair SL distances — FIXED on entry, locked for 3 min ─────
-    STOP_LOSS_PCT = 0.25              # default fallback (was 0.35)
+    STOP_LOSS_PCT = 0.30              # default fallback (was 0.25 — noise sweeps)
     MIN_TP_PCT = 1.50                 # default TP
     PAIR_SL_FLOOR: dict[str, float] = {
-        "BTC": 0.25,   # BTC: 0.25% price = 5% capital at 20x (was 0.40 = 8% capital)
-        "ETH": 0.25,   # ETH: 0.25% price = 5% capital at 20x (was 0.45 = 9% capital)
-        "XRP": 0.25,   # XRP: 0.25% price = 5% capital at 20x (was 0.50 = 10% capital)
-        "SOL": 0.25,
+        "BTC": 0.30,   # BTC: 0.30% price = 6% capital at 20x (was 0.25 — noise sweeps)
+        "ETH": 0.35,   # ETH: 0.35% price = 7% capital at 20x (was 0.25 — noise sweeps)
+        "XRP": 0.40,   # XRP: 0.40% price = 8% capital at 20x (was 0.25 — noise sweeps)
+        "SOL": 0.40,   # SOL: 0.40% price = 8% capital at 20x (was 0.25 — noise sweeps)
+    }
+    # Per-pair SL caps (normal conditions): wider for volatile pairs
+    PAIR_SL_CAP: dict[str, float] = {
+        "BTC": 0.50,   # BTC/ETH: tighter cap
+        "ETH": 0.50,
+        "XRP": 0.60,   # XRP/SOL: wider cap for volatile pairs
+        "SOL": 0.60,
     }
     PAIR_TP_FLOOR: dict[str, float] = {
         "BTC": 1.50,
@@ -239,12 +246,12 @@ class ScalpStrategy(BaseStrategy):
     # When peak crosses a tier, trail_stop_price = peak * (1 - trail_dist/100)
     # SL is max(hard_sl, trail_stop) for longs — only ever tightens.
     TRAIL_TIER_TABLE: list[tuple[float, float]] = [
-        (0.30, 0.15),   # peak +0.30% → trail 0.15% from peak
-        (0.35, 0.20),   # peak +0.35% → trail 0.20% from peak
-        (0.50, 0.25),   # peak +0.50% → trail 0.25% from peak
-        (1.00, 0.40),   # peak +1.00% → trail 0.40% from peak
-        (2.00, 0.70),   # peak +2.00% → trail 0.70% from peak
-        (3.00, 1.00),   # peak +3.00% → trail 1.00% from peak
+        (0.30, 0.15),   # peak +0.30% → trail 0.15% from peak (keep)
+        (0.35, 0.20),   # peak +0.35% → trail 0.20% from peak (keep)
+        (0.50, 0.25),   # peak +0.50% → trail 0.25% from peak (keep)
+        (1.00, 0.30),   # peak +1.00% → trail 0.30% from peak (was 0.40 — lock more)
+        (2.00, 0.50),   # peak +2.00% → trail 0.50% from peak (was 0.70 — keep +1.50%)
+        (3.00, 0.70),   # peak +3.00% → trail 0.70% from peak (was 1.00 — keep +2.30%)
     ]
 
     # ── Legacy trailing defaults (futures=0, spot overrides in __init__) ─
@@ -252,7 +259,7 @@ class ScalpStrategy(BaseStrategy):
     TRAILING_DISTANCE_PCT = 0.0       # futures: no trailing (ratchet floor instead)
 
     # ── DISABLED PAIRS — skip entirely ────────────────────────────────
-    DISABLED_PAIRS: set[str] = set()
+    DISABLED_PAIRS: set[str] = {"SOL"}  # SOL: 0% win rate, disabled
 
     # ── DISABLED SETUPS — controlled via dashboard setup_config only (no hardcoded blocks)
 
@@ -307,10 +314,10 @@ class ScalpStrategy(BaseStrategy):
 
     # Per-pair base allocation (% of exchange capital) — tuned by performance
     PAIR_ALLOC_PCT: dict[str, float] = {
-        "XRP": 30.0,   # CAPPED from 50 — SLs too costly at 100+ contracts
+        "XRP": 35.0,   # best performer — 15% from SOL redistributed (was 30)
         "ETH": 30.0,   # mixed but catches big moves
         "BTC": 20.0,   # low win rate but diversification
-        "SOL": 15.0,
+        "SOL": 0.0,    # DISABLED — 0% win rate, allocation moved to XRP
     }
     # Safety limits for dynamic position sizing
     MAX_COLLATERAL_PCT = 80.0         # never use more than 80% of balance on 1 position
@@ -590,17 +597,18 @@ class ScalpStrategy(BaseStrategy):
             self._sl_pct = max(sl_floor, atr_pct * self.ATR_SL_MULTIPLIER)
             self._tp_pct = max(tp_floor, atr_pct * self.ATR_TP_MULTIPLIER)
 
-            # Safety cap — widen during high volatility
+            # Safety cap — per-pair caps, widen during high volatility
             if not self.is_futures:
                 sl_cap = 3.00
             elif self._high_vol:
-                sl_cap = min(0.75, atr_pct * 2.0)
+                base_cap = self.PAIR_SL_CAP.get(self._base_asset, 0.50)
+                sl_cap = min(base_cap + 0.15, atr_pct * 2.0)
                 self.logger.info(
                     "[%s] HIGH VOL: ATR=%.3f%% (normal=%.3f%%), SL cap widened to %.2f%%",
                     self.pair, atr_pct, normal_atr, sl_cap,
                 )
             else:
-                sl_cap = 0.50
+                sl_cap = self.PAIR_SL_CAP.get(self._base_asset, 0.50)
             tp_cap = 6.00 if not self.is_futures else 5.00
             self._sl_pct = min(self._sl_pct, sl_cap)
             self._tp_pct = min(self._tp_pct, tp_cap)

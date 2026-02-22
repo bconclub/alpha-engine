@@ -148,6 +148,11 @@ class OptionsScalpStrategy(BaseStrategy):
         self._STATE_WRITE_INTERVAL = 30  # Write to DB every 30 seconds
         self._last_state_write: float = 0.0
 
+        # Ticker failure tracking — detect POSITION_GONE (expired/delisted)
+        self._consecutive_ticker_failures: int = 0
+        self._MAX_TICKER_FAILURES = 6   # 6 failures × 10s = 60s of no data → position gone
+        self._EXPIRY_CLOSE_MINUTES = 5  # Within 5 min of expiry, treat ticker fail as expired
+
     # ==================================================================
     # ACTIVITY LOGGING
     # ==================================================================
@@ -880,9 +885,33 @@ class OptionsScalpStrategy(BaseStrategy):
         try:
             ticker = await self.options_exchange.fetch_ticker(self.option_symbol)
             current_premium = ticker.get("last") or ticker.get("bid") or 0
+            self._consecutive_ticker_failures = 0  # reset on success
         except Exception as e:
+            self._consecutive_ticker_failures += 1
+            now_utc = datetime.now(timezone.utc)
+
+            # Near/past expiry + ticker fail → treat as expired (position gone)
+            if self.expiry_dt:
+                mins_to_expiry = (self.expiry_dt - now_utc).total_seconds() / 60
+                if mins_to_expiry <= self._EXPIRY_CLOSE_MINUTES:
+                    self.logger.warning(
+                        "[%s] Ticker failed near expiry (%.1f min) — marking POSITION_GONE",
+                        self.option_symbol, mins_to_expiry,
+                    )
+                    return await self._handle_position_gone("EXPIRED_TICKER_FAIL")
+
+            # Too many consecutive failures → position likely delisted/gone
+            if self._consecutive_ticker_failures >= self._MAX_TICKER_FAILURES:
+                self.logger.warning(
+                    "[%s] %d consecutive ticker failures — marking POSITION_GONE",
+                    self.option_symbol, self._consecutive_ticker_failures,
+                )
+                return await self._handle_position_gone("TICKER_FAIL_REPEATED")
+
             self.logger.warning(
-                "[%s] Failed to fetch option ticker: %s", self.option_symbol, e,
+                "[%s] Failed to fetch option ticker (%d/%d): %s",
+                self.option_symbol, self._consecutive_ticker_failures,
+                self._MAX_TICKER_FAILURES, e,
             )
             return []
 
@@ -1080,6 +1109,110 @@ class OptionsScalpStrategy(BaseStrategy):
             exchange_id="delta",
         )]
 
+    async def _handle_position_gone(self, reason: str) -> list[Signal]:
+        """Handle a position that no longer exists on exchange (expired/delisted).
+
+        Instead of generating an exit signal (which would fail on exchange),
+        we directly mark the trade closed in DB using last known state, clear
+        all position state, and move on. No retry, no Telegram spam.
+        """
+        self.logger.info(
+            "[%s] POSITION_GONE (%s) — marking closed in DB with last known state",
+            self.option_symbol, reason,
+        )
+
+        # Calculate P&L from last known state (assume worst case: premium → 0 for expired)
+        pnl_pct = -100.0  # default: total loss
+        pnl_usd = -self.entry_premium * self.CONTRACTS_PER_TRADE
+        exit_premium = 0.0
+
+        # If we have a highest_premium and this isn't a full expiry, estimate
+        if reason != "EXPIRED_TICKER_FAIL" and self.highest_premium > 0:
+            # Use last known premium (entry as fallback) — we lost the position
+            exit_premium = self.entry_premium * 0.5  # conservative estimate
+            pnl_pct = ((exit_premium - self.entry_premium) / self.entry_premium * 100
+                       if self.entry_premium > 0 else -100.0)
+            pnl_usd = (exit_premium - self.entry_premium) * self.CONTRACTS_PER_TRADE
+
+        # Mark trade closed in DB directly (no exchange order needed)
+        if self._db:
+            try:
+                from alpha.utils import iso_now
+                open_trade = await self._db.get_open_trade(
+                    pair=self.option_symbol or self.pair,
+                    exchange="delta",
+                    strategy="options_scalp",
+                )
+                if open_trade:
+                    from alpha.trade_executor import calc_pnl
+                    entry_price = float(open_trade.get("entry_price", self.entry_premium) or self.entry_premium)
+                    amount = open_trade.get("amount", self.CONTRACTS_PER_TRADE)
+                    leverage = open_trade.get("leverage", self.OPTIONS_LEVERAGE) or 1
+
+                    result = calc_pnl(
+                        entry_price, exit_premium, amount,
+                        "long", leverage,
+                        "delta", self.option_symbol or self.pair,
+                    )
+
+                    await self._db.update_trade(open_trade["id"], {
+                        "status": "closed",
+                        "exit_price": exit_premium,
+                        "closed_at": iso_now(),
+                        "pnl": round(result.net_pnl, 8),
+                        "pnl_pct": round(result.pnl_pct, 4),
+                        "reason": f"position_gone_{reason.lower()}",
+                        "exit_reason": "POSITION_GONE",
+                        "position_state": None,
+                    })
+                    pnl_pct = result.pnl_pct
+                    pnl_usd = result.net_pnl
+                    self.logger.info(
+                        "[%s] Trade %s closed as POSITION_GONE — P&L=$%.4f (%.2f%%)",
+                        self.option_symbol, open_trade["id"], result.net_pnl, result.pnl_pct,
+                    )
+                else:
+                    self.logger.info(
+                        "[%s] No open trade found in DB — already closed", self.option_symbol,
+                    )
+            except Exception:
+                self.logger.exception("[%s] Failed to close trade as POSITION_GONE", self.option_symbol)
+
+        # Log to activity feed
+        await self._log_activity(
+            "options_position_gone",
+            f"{self.pair} — OPTIONS POSITION_GONE: {reason} | "
+            f"{self.option_side} strike=${self.strike_price:.0f} | "
+            f"P&L={pnl_pct:+.1f}% ${pnl_usd:+.4f}",
+            {"reason": reason, "option_side": self.option_side,
+             "strike": self.strike_price, "symbol": self.option_symbol,
+             "pnl_pct": round(pnl_pct, 2), "pnl_usd": round(pnl_usd, 4)},
+        )
+
+        # Stats
+        if pnl_pct >= 0:
+            self.hourly_wins += 1
+        else:
+            self.hourly_losses += 1
+        self.hourly_pnl += pnl_usd
+
+        # Clear dashboard + position state
+        await self._clear_dashboard_position(f"POSITION_GONE_{reason}", pnl_pct, pnl_usd)
+
+        # Clear all position state — no retry, we're done
+        self.in_position = False
+        self.option_side = None
+        self.option_symbol = None
+        self.entry_premium = 0.0
+        self.highest_premium = 0.0
+        self._trailing_active = False
+        self.strike_price = 0.0
+        self.expiry_dt = None
+        self._consecutive_ticker_failures = 0
+        self._last_state_write = 0.0
+
+        return []  # No signal needed — handled directly in DB
+
     async def _clear_dashboard_position(
         self, exit_type: str = "", pnl_pct: float = 0.0, pnl_usd: float = 0.0,
     ) -> None:
@@ -1158,6 +1291,7 @@ class OptionsScalpStrategy(BaseStrategy):
             self.entry_time = time.monotonic()
             self.highest_premium = fill_price
             self._trailing_active = False
+            self._consecutive_ticker_failures = 0
             self.strike_price = signal.metadata.get("strike", 0)
             expiry_str = signal.metadata.get("expiry")
             if expiry_str:
