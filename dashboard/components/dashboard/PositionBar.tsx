@@ -54,6 +54,8 @@ export interface PositionDisplay {
   slPrice: number | null;
   tpPrice: number | null;
   exchange: string;
+  isOption?: boolean;             // options trade flag
+  optionSide?: 'CALL' | 'PUT' | null;  // CALL or PUT (null if not an option)
 }
 
 // ---------------------------------------------------------------------------
@@ -253,23 +255,20 @@ export function PositionRangeBar({ pos, compact = false }: { pos: PositionDispla
           )}
         </div>
       ) : (
-        <div className="relative h-4 mt-0.5">
-          <span className="absolute text-[10px] font-mono text-[#ff1744]/70" style={{ left: 0 }}>
+        <div className="flex justify-between mt-0.5">
+          <span className="text-[9px] font-mono text-[#ff1744]/70 leading-none truncate">
             SL ${fmtPrice(slPrice)}
           </span>
-          <span
-            className="absolute text-[10px] font-mono text-zinc-500 -translate-x-1/2"
-            style={{ left: `${entryPos}%` }}
-          >
+          <span className="text-[9px] font-mono text-zinc-500 leading-none shrink-0 mx-1">
             Entry
           </span>
           {pos.trailActive && pos.trailStopPrice != null ? (
-            <span className="absolute right-0 text-[10px] font-mono text-[#ffd600]/70">
+            <span className="text-[9px] font-mono text-[#ffd600]/70 leading-none truncate text-right">
               Trail ${fmtPrice(pos.trailStopPrice)}
             </span>
           ) : (
-            <span className="absolute right-0 text-[10px] font-mono text-zinc-600">
-              {peak > 0 ? `Peak +${peak.toFixed(2)}%` : `+${TRAIL_ACTIVATION_PCT}%`}
+            <span className="text-[9px] font-mono text-zinc-600 leading-none text-right">
+              {peak > 0 ? `+${peak.toFixed(2)}%` : `+${TRAIL_ACTIVATION_PCT}%`}
             </span>
           )}
         </div>

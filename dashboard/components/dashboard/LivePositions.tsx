@@ -29,6 +29,12 @@ function isOptionPosition(pos: { pair: string; strategy?: string }): boolean {
   return pos.strategy === 'options_scalp' || OPTION_SYMBOL_RE.test(pos.pair);
 }
 
+function getOptionSide(pair: string): 'CALL' | 'PUT' | null {
+  if (pair.endsWith('-C')) return 'CALL';
+  if (pair.endsWith('-P')) return 'PUT';
+  return null;
+}
+
 function extractBaseAsset(pair: string): string {
   if (pair.includes('/')) return pair.split('/')[0];
   return pair.replace(/USD.*$/, '');
@@ -205,6 +211,8 @@ export function LivePositions() {
         slPrice: pos.stop_loss ?? null,
         tpPrice: pos.take_profit ?? null,
         exchange: pos.exchange,
+        isOption,
+        optionSide: isOption ? getOptionSide(pos.pair) : null,
       };
     });
   }, [openPositions, livePrices.prices, fallbackPrices, optionsState]);
@@ -261,14 +269,30 @@ export function LivePositions() {
                   <Link href="/trades" className="text-sm font-bold text-white hover:underline">
                     {pos.pairShort}
                   </Link>
-                  <span className={cn(
-                    'text-xs font-semibold px-1.5 py-0.5 rounded',
-                    pos.positionType === 'short'
-                      ? 'bg-[#ff1744]/10 text-[#ff1744]'
-                      : 'bg-[#00c853]/10 text-[#00c853]',
-                  )}>
-                    {pos.positionType.toUpperCase()} {pos.leverage}x
-                  </span>
+                  {pos.isOption ? (
+                    <>
+                      <span className={cn(
+                        'text-xs font-semibold px-1.5 py-0.5 rounded',
+                        pos.optionSide === 'PUT'
+                          ? 'bg-[#ff1744]/10 text-[#ff1744]'
+                          : 'bg-[#00c853]/10 text-[#00c853]',
+                      )}>
+                        {pos.optionSide ?? 'OPT'}
+                      </span>
+                      <span className="text-[10px] font-mono text-pink-400/70 px-1 py-0.5 rounded bg-pink-400/5">
+                        {pos.leverage}x<span className="text-[8px] ml-0.5">OPT</span>
+                      </span>
+                    </>
+                  ) : (
+                    <span className={cn(
+                      'text-xs font-semibold px-1.5 py-0.5 rounded',
+                      pos.positionType === 'short'
+                        ? 'bg-[#ff1744]/10 text-[#ff1744]'
+                        : 'bg-[#00c853]/10 text-[#00c853]',
+                    )}>
+                      {pos.positionType.toUpperCase()} {pos.leverage}x
+                    </span>
+                  )}
                 </div>
                 <div className="flex items-center gap-2 shrink-0">
                   <StateBadge
