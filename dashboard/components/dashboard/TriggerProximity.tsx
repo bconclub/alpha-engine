@@ -109,18 +109,53 @@ function computeTrigger(log: StrategyLog): TriggerInfo {
     ];
 
     // Per-direction indicators from bot breakdown fields
-    const bullIndicators: IndicatorStatus[] = [
-      { active: log.bull_mom === true, label: 'MOM', direction: 'bull' },
-      { active: log.bull_vol === true, label: 'VOL', direction: 'bull' },
-      { active: log.bull_rsi === true, label: 'RSI', direction: 'bull' },
-      { active: log.bull_bb === true,  label: 'BB',  direction: 'bull' },
-    ];
-    const bearIndicators: IndicatorStatus[] = [
-      { active: log.bear_mom === true, label: 'MOM', direction: 'bear' },
-      { active: log.bear_vol === true, label: 'VOL', direction: 'bear' },
-      { active: log.bear_rsi === true, label: 'RSI', direction: 'bear' },
-      { active: log.bear_bb === true,  label: 'BB',  direction: 'bear' },
-    ];
+    // If engine hasn't written bull_mom/etc yet (all null), compute from indicator values
+    const hasDirectionalBooleans = log.bull_mom != null || log.bear_mom != null;
+
+    let bullIndicators: IndicatorStatus[];
+    let bearIndicators: IndicatorStatus[];
+
+    if (hasDirectionalBooleans) {
+      bullIndicators = [
+        { active: log.bull_mom === true, label: 'MOM', direction: 'bull' },
+        { active: log.bull_vol === true, label: 'VOL', direction: 'bull' },
+        { active: log.bull_rsi === true, label: 'RSI', direction: 'bull' },
+        { active: log.bull_bb === true,  label: 'BB',  direction: 'bull' },
+      ];
+      bearIndicators = [
+        { active: log.bear_mom === true, label: 'MOM', direction: 'bear' },
+        { active: log.bear_vol === true, label: 'VOL', direction: 'bear' },
+        { active: log.bear_rsi === true, label: 'RSI', direction: 'bear' },
+        { active: log.bear_bb === true,  label: 'BB',  direction: 'bear' },
+      ];
+    } else {
+      // Fallback: compute from indicator values (engine not yet writing per-direction booleans)
+      const momBull = priceChangePct != null && priceChangePct >= MOMENTUM_MIN_PCT;
+      const momBear = priceChangePct != null && priceChangePct <= -MOMENTUM_MIN_PCT;
+      const volHigh = volumeRatio != null && volumeRatio >= VOL_SPIKE_RATIO;
+      const volBull = volHigh && (priceChangePct == null || priceChangePct >= 0);
+      const volBear = volHigh && (priceChangePct == null || priceChangePct <= 0);
+      const rsiBull = rsi != null && rsi < RSI_LONG_THRESHOLD;
+      const rsiBear = rsi != null && rsi > RSI_SHORT_THRESHOLD;
+      const bbRange = (bbUpper ?? 0) - (bbLower ?? 0);
+      const bbPos = bbRange > 0 && currentPrice != null && bbLower != null
+        ? (currentPrice - bbLower) / bbRange : 0.5;
+      const bbBull = bbPos <= BB_TREND_LOWER;
+      const bbBear = isFutures && bbPos >= BB_TREND_UPPER;
+
+      bullIndicators = [
+        { active: momBull, label: 'MOM', direction: 'bull' },
+        { active: volBull, label: 'VOL', direction: 'bull' },
+        { active: rsiBull, label: 'RSI', direction: 'bull' },
+        { active: bbBull,  label: 'BB',  direction: 'bull' },
+      ];
+      bearIndicators = [
+        { active: momBear, label: 'MOM', direction: 'bear' },
+        { active: volBear, label: 'VOL', direction: 'bear' },
+        { active: rsiBear, label: 'RSI', direction: 'bear' },
+        { active: bbBear,  label: 'BB',  direction: 'bear' },
+      ];
+    }
 
     let overallStatus: string;
     let statusColor: string;
