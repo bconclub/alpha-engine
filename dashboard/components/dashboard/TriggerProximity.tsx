@@ -347,10 +347,15 @@ export function TriggerProximity() {
       results.push(trigger);
     }
 
+    // Priority: 1) in-trade pairs first, 2) highest signal count, 3) has data
     results.sort((a, b) => {
+      const aInTrade = a.activePosition != null ? 1 : 0;
+      const bInTrade = b.activePosition != null ? 1 : 0;
+      if (aInTrade !== bInTrade) return bInTrade - aInTrade;
+      if (a.signalCount !== b.signalCount) return b.signalCount - a.signalCount;
       if (a.hasData && !b.hasData) return -1;
       if (!a.hasData && b.hasData) return 1;
-      return b.signalCount - a.signalCount;
+      return 0;
     });
 
     return results;
