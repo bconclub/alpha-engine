@@ -243,6 +243,12 @@ class AlphaBot:
                 binance_pairs=[],  # Binance disabled for now
                 delta_testnet=config.delta.testnet,
             )
+
+            # Register momentum wake callbacks — WS detects sharp moves and
+            # wakes strategy check loop instantly instead of waiting for tick sleep
+            for pair, strategy in self._scalp_strategies.items():
+                self._price_feed.register_wake_callback(pair, strategy.wake)
+
             await self._price_feed.start()
         except Exception:
             logger.exception("PriceFeed failed to start — REST polling continues as fallback")

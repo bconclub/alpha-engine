@@ -533,8 +533,8 @@ class ScalpStrategy(BaseStrategy):
         self.logger.info("[%s] Soul: %s", self.pair, soul_msg)
 
     def get_tick_interval(self) -> int:
-        """Dynamic tick: 1s when holding a position, 5s when scanning."""
-        return 1 if self.in_position else 5
+        """Dynamic tick: 1s when holding a position, 3s when scanning."""
+        return 1 if self.in_position else 3
 
     async def on_stop(self) -> None:
         self.logger.info(

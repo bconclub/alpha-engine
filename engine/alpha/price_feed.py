@@ -16,6 +16,7 @@ from __future__ import annotations
 import asyncio
 import json
 import time
+from collections import deque
 from typing import TYPE_CHECKING, Any, Callable
 
 import aiohttp
@@ -35,6 +36,16 @@ DELTA_WS_URL_TESTNET = "wss://socket-ind.testnet.deltaex.org"
 RECONNECT_MIN_SEC = 2
 RECONNECT_MAX_SEC = 60
 STALE_WARN_SEC = 30
+
+# Momentum wake thresholds: (lookback_seconds, min_abs_pct_move)
+# If price moves this much in this window → wake strategy immediately
+WAKE_THRESHOLDS: list[tuple[int, float]] = [
+    (10, 0.10),   # 0.10% in 10 seconds — fast spike
+    (30, 0.15),   # 0.15% in 30 seconds — strong move
+    (60, 0.25),   # 0.25% in 60 seconds — sustained trend
+]
+WAKE_COOLDOWN_SEC = 60    # min seconds between wake alerts per pair
+PRICE_HISTORY_SEC = 90    # keep 90s of tick history (covers all lookback windows)
 
 
 def _ccxt_to_delta_symbol(pair: str) -> str:
@@ -91,6 +102,12 @@ class PriceFeed:
         self._tasks: list[asyncio.Task[None]] = []
         self._running = False
 
+        # Momentum wake system — detect sharp moves and wake strategies
+        self._price_history: dict[str, deque[tuple[float, float]]] = {}  # pair → deque of (mono_time, price)
+        self._wake_callbacks: dict[str, Callable[[], None]] = {}          # pair → strategy.wake()
+        self._wake_cooldowns: dict[str, float] = {}                       # pair → mono_time of last wake
+        self._wake_alerts = 0
+
         # Stats
         self._delta_updates = 0
         self._binance_updates = 0
@@ -137,13 +154,21 @@ class PriceFeed:
         """Get cached price for a pair."""
         return self.price_cache.get(pair)
 
+    def register_wake_callback(self, pair: str, callback: Callable[[], None]) -> None:
+        """Register a callback to wake a strategy when momentum spikes on this pair."""
+        self._wake_callbacks[pair] = callback
+        if pair not in self._price_history:
+            self._price_history[pair] = deque()
+        logger.info("[PriceFeed] Momentum wake registered for %s", pair)
+
     def _on_price_update(self, pair: str, price: float, source: str) -> None:
-        """Handle a price update — update cache and trigger exit check if in position."""
+        """Handle a price update — update cache, check exits, check momentum wake."""
         if price <= 0:
             return
 
+        now = time.monotonic()
         self.price_cache[pair] = price
-        self._last_update[pair] = time.monotonic()
+        self._last_update[pair] = now
 
         if source == "delta":
             self._delta_updates += 1
@@ -158,6 +183,68 @@ class PriceFeed:
                 strategy.check_exits_immediate(price)
             except Exception:
                 logger.exception("[%s] Error in check_exits_immediate", pair)
+
+        # ── Momentum wake: detect sharp moves and wake strategy for fast entry ──
+        if pair in self._wake_callbacks:
+            self._check_momentum_wake(pair, price, now)
+
+    # ══════════════════════════════════════════════════════════════════
+    # MOMENTUM WAKE — detect sharp moves from WS tick stream
+    # ══════════════════════════════════════════════════════════════════
+
+    def _check_momentum_wake(self, pair: str, price: float, now: float) -> None:
+        """Append tick to history, check momentum thresholds, wake strategy if needed."""
+        history = self._price_history.get(pair)
+        if history is None:
+            return
+
+        # Append current tick
+        history.append((now, price))
+
+        # Prune ticks older than PRICE_HISTORY_SEC
+        cutoff = now - PRICE_HISTORY_SEC
+        while history and history[0][0] < cutoff:
+            history.popleft()
+
+        # Don't check if we're in cooldown
+        last_wake = self._wake_cooldowns.get(pair, 0.0)
+        if now - last_wake < WAKE_COOLDOWN_SEC:
+            return
+
+        # Don't wake if strategy is already in position (exits handle that)
+        strategy = self._strategies.get(pair)
+        if strategy and strategy.in_position:
+            return
+
+        # Check each threshold window
+        for lookback_sec, min_pct in WAKE_THRESHOLDS:
+            window_start = now - lookback_sec
+            # Find the earliest tick in this window
+            old_price = None
+            for ts, p in history:
+                if ts >= window_start:
+                    old_price = p
+                    break
+
+            if old_price is None or old_price <= 0:
+                continue
+
+            move_pct = abs((price - old_price) / old_price) * 100
+            if move_pct >= min_pct:
+                # Momentum spike detected — wake strategy
+                self._wake_cooldowns[pair] = now
+                self._wake_alerts += 1
+                direction = "UP" if price > old_price else "DOWN"
+                logger.info(
+                    "[PriceFeed] MOMENTUM WAKE %s %s — %.3f%% in %ds (threshold: %.2f%%) | $%.2f → $%.2f",
+                    pair, direction, move_pct, lookback_sec, min_pct,
+                    old_price, price,
+                )
+                try:
+                    self._wake_callbacks[pair]()
+                except Exception:
+                    logger.exception("[PriceFeed] Error calling wake callback for %s", pair)
+                return  # one wake per tick is enough
 
     # ══════════════════════════════════════════════════════════════════
     # DELTA INDIA — Raw WebSocket via aiohttp
@@ -339,17 +426,19 @@ class PriceFeed:
                     parse_pct = (self._delta_messages_parsed / self._delta_messages_total) * 100
                     parse_tag = f" delta_parse={self._delta_messages_parsed}/{self._delta_messages_total}({parse_pct:.0f}%)"
 
+                wake_tag = f" wake_alerts={self._wake_alerts}" if self._wake_alerts > 0 else ""
                 logger.info(
                     "PriceFeed stats — Delta: %d updates, Binance: %d updates, "
-                    "exit_checks: %d, cached: %d pairs%s%s",
+                    "exit_checks: %d, cached: %d pairs%s%s%s",
                     self._delta_updates, self._binance_updates,
-                    self._exit_checks, cached, parse_tag, stale_tag,
+                    self._exit_checks, cached, parse_tag, wake_tag, stale_tag,
                 )
 
                 # Reset counters
                 self._delta_updates = 0
                 self._binance_updates = 0
                 self._exit_checks = 0
+                self._wake_alerts = 0
                 self._delta_messages_total = 0
                 self._delta_messages_parsed = 0
 

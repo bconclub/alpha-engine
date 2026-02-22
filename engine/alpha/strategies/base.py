@@ -62,6 +62,7 @@ class BaseStrategy(ABC):
         self.risk_manager = risk_manager
         self.is_active = False
         self._task: asyncio.Task[None] | None = None
+        self._wake_event = asyncio.Event()
         self.logger = setup_logger(f"strategy.{self.name.value}.{pair.replace('/', '')}")
 
     async def start(self) -> None:
@@ -128,7 +129,19 @@ class BaseStrategy(ABC):
                     "Error in %s check loop [%s]%s",
                     self.name.value, self.pair, pos_info,
                 )
-            await asyncio.sleep(self.get_tick_interval())
+            # Sleep until timeout OR wake event (momentum alert), whichever first
+            try:
+                await asyncio.wait_for(
+                    self._wake_event.wait(),
+                    timeout=self.get_tick_interval(),
+                )
+                self._wake_event.clear()
+            except asyncio.TimeoutError:
+                pass
+
+    def wake(self) -> None:
+        """Wake the check loop immediately (called by PriceFeed on momentum spike)."""
+        self._wake_event.set()
 
     def get_tick_interval(self) -> int:
         """Return the current tick interval in seconds.
