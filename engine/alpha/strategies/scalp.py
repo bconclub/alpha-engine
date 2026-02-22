@@ -259,7 +259,7 @@ class ScalpStrategy(BaseStrategy):
     TRAILING_DISTANCE_PCT = 0.0       # futures: no trailing (ratchet floor instead)
 
     # ── DISABLED PAIRS — skip entirely ────────────────────────────────
-    DISABLED_PAIRS: set[str] = {"SOL"}  # SOL: 0% win rate, disabled
+    DISABLED_PAIRS: set[str] = set()  # controlled via dashboard pair_config only
 
     # ── DISABLED SETUPS — controlled via dashboard setup_config only (no hardcoded blocks)
 
@@ -314,10 +314,10 @@ class ScalpStrategy(BaseStrategy):
 
     # Per-pair base allocation (% of exchange capital) — tuned by performance
     PAIR_ALLOC_PCT: dict[str, float] = {
-        "XRP": 35.0,   # best performer — 15% from SOL redistributed (was 30)
+        "XRP": 35.0,   # best performer (was 30)
         "ETH": 30.0,   # mixed but catches big moves
         "BTC": 20.0,   # low win rate but diversification
-        "SOL": 0.0,    # DISABLED — 0% win rate, allocation moved to XRP
+        "SOL": 15.0,   # enable/disable via dashboard pair_config
     }
     # Safety limits for dynamic position sizing
     MAX_COLLATERAL_PCT = 80.0         # never use more than 80% of balance on 1 position
