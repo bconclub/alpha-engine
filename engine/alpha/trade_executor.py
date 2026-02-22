@@ -15,7 +15,7 @@ from typing import Any
 import ccxt.async_support as ccxt
 
 from alpha.config import config
-from alpha.strategies.base import Signal
+from alpha.strategies.base import Signal, StrategyName
 from alpha.utils import iso_now, setup_logger
 
 logger = setup_logger("trade_executor")
@@ -319,8 +319,9 @@ class TradeExecutor:
         """Mark a trade as closed in DB when the position no longer exists on exchange.
 
         Calculates real P&L using entry price from DB and signal price as exit.
-        Sends a clean info alert instead of an error.
+        Sends a clean info alert ONLY when a trade was actually found and closed.
         """
+        actually_closed = False
         if self.db is not None:
             try:
                 open_trade = await self.db.get_open_trade(
@@ -357,11 +358,14 @@ class TradeExecutor:
                         signal.pair, open_trade["id"],
                         entry_price, exit_price, pnl, pnl_pct,
                     )
+                    actually_closed = True
+                else:
+                    logger.debug("[%s] position_gone: no open trade found in DB — already closed", signal.pair)
             except Exception:
                 logger.exception("[%s] Failed to mark trade as position_gone", signal.pair)
 
-        # Send clean info alert (not error)
-        if self.alerts is not None:
+        # Send clean info alert ONLY when we actually closed something (avoid spam)
+        if actually_closed and self.alerts is not None:
             try:
                 pair_short = signal.pair.split("/")[0] if "/" in signal.pair else signal.pair
                 await self.alerts.send_text(
@@ -584,7 +588,10 @@ class TradeExecutor:
         # ── DELTA FUTURES EXIT: verify actual position on exchange ────────
         # Fetch real position size to avoid amount mismatch errors.
         # If position is already gone on exchange, mark closed in DB.
-        if is_exit and signal.exchange_id == "delta" and signal.reduce_only:
+        # Skip for options_scalp — options positions are on a separate exchange,
+        # fetch_positions (futures) won't find them.
+        is_options = signal.strategy == StrategyName.OPTIONS_SCALP
+        if is_exit and signal.exchange_id == "delta" and signal.reduce_only and not is_options:
             actual_contracts = await self._get_delta_position_size(signal)
             if actual_contracts is None:
                 # Position already gone on exchange — mark closed in DB

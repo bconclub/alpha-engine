@@ -1186,12 +1186,33 @@ class OptionsScalpStrategy(BaseStrategy):
             self._last_state_write = 0.0
 
     def on_rejected(self, signal: Signal) -> None:
-        """Handle rejected option orders."""
+        """Handle rejected option orders.
+
+        For entry: just log (no state to clear).
+        For exit: clear in_position so we don't keep generating exit signals
+        for a position the exchange no longer has. The trade was already
+        marked closed in DB by _mark_position_gone.
+        """
         pending_side = signal.metadata.get("pending_side")
         if pending_side:
             self.logger.warning(
                 "[%s] Option entry REJECTED — not tracking", signal.pair,
             )
+        elif signal.reduce_only and self.in_position:
+            # Exit was rejected (position likely already gone on exchange)
+            self.logger.warning(
+                "[%s] Option EXIT rejected — clearing in_position (position likely closed externally)",
+                self.option_symbol or signal.pair,
+            )
+            self.in_position = False
+            self.option_side = None
+            self.option_symbol = None
+            self.entry_premium = 0.0
+            self.highest_premium = 0.0
+            self._trailing_active = False
+            self.strike_price = 0.0
+            self.expiry_dt = None
+            self._last_state_write = 0.0  # Force dashboard state clear on next tick
 
     # ==================================================================
     # STATS
