@@ -83,10 +83,11 @@ class OptionsScalpStrategy(BaseStrategy):
 
     # ── Exit thresholds (tuned for momentum scalps) ────────────────
     TP_PREMIUM_GAIN_PCT = 30.0           # Take profit at +30% premium gain
-    SL_PREMIUM_LOSS_PCT = 20.0           # Stop loss at -20% premium drop
+    SL_PREMIUM_LOSS_PCT = 30.0           # Stop loss at -30% premium drop (was 20 — noise clips at 50x)
     TRAILING_ACTIVATE_PCT = 10.0         # Trail activates at +10% gain
     TRAILING_DISTANCE_PCT = 5.0          # Trail 5% below peak premium
-    PULLBACK_EXIT_PCT = 50.0             # Exit if lost 50% of peak gain
+    PULLBACK_EXIT_PCT = 40.0             # Exit if lost 40% of peak gain (was 50 — too aggressive)
+    PULLBACK_ACTIVATE_PCT = 8.0          # Pullback only fires after +8% peak (was 5 — let winners breathe)
     DECAY_THRESHOLD_PCT = 3.0            # Exit if was +10%+ and faded to +3%
     TIMEOUT_MINUTES = 15                 # Options timeout (theta kills you)
     PHASE1_HANDS_OFF_SEC = 30            # Only SL fires in first 30s after fill
@@ -152,6 +153,13 @@ class OptionsScalpStrategy(BaseStrategy):
         self._consecutive_ticker_failures: int = 0
         self._MAX_TICKER_FAILURES = 6   # 6 failures × 10s = 60s of no data → position gone
         self._EXPIRY_CLOSE_MINUTES = 5  # Within 5 min of expiry, treat ticker fail as expired
+
+        # Last known premium — used as exit price when position disappears
+        self._last_known_premium: float = 0.0
+
+        # Cooldown after POSITION_GONE — no new options entry for 60s
+        self._position_gone_cooldown_until: float = 0.0
+        self._POSITION_GONE_COOLDOWN_SEC = 60
 
     # ==================================================================
     # ACTIVITY LOGGING
@@ -620,6 +628,16 @@ class OptionsScalpStrategy(BaseStrategy):
 
     async def _check_option_entry(self) -> list[Signal]:
         """Check scalp's signal state for 3/4+ momentum, buy option."""
+        # 0. POSITION_GONE cooldown — no new entries for 60s after position disappeared
+        if time.monotonic() < self._position_gone_cooldown_until:
+            remaining = self._position_gone_cooldown_until - time.monotonic()
+            if self._tick_count % 6 == 0:
+                self.logger.info(
+                    "[%s] OPTIONS COOLDOWN after POSITION_GONE — %.0fs remaining",
+                    self.pair, remaining,
+                )
+            return []
+
         # 1. Read scalp strategy's latest signal
         if not self._scalp or not hasattr(self._scalp, "last_signal_state"):
             if self._tick_count % 30 == 0:
@@ -886,6 +904,8 @@ class OptionsScalpStrategy(BaseStrategy):
             ticker = await self.options_exchange.fetch_ticker(self.option_symbol)
             current_premium = ticker.get("last") or ticker.get("bid") or 0
             self._consecutive_ticker_failures = 0  # reset on success
+            if current_premium > 0:
+                self._last_known_premium = current_premium  # track for POSITION_GONE exit
         except Exception as e:
             self._consecutive_ticker_failures += 1
             now_utc = datetime.now(timezone.utc)
@@ -1003,8 +1023,8 @@ class OptionsScalpStrategy(BaseStrategy):
                 )
                 return await self._do_option_exit(current_premium, final_pct, "TRAIL")
 
-        # ── 6. PULLBACK: exit if lost 50% of peak gain (peak was 5%+)
-        if peak_pnl_pct >= 5.0 and premium_change_pct > 0:
+        # ── 6. PULLBACK: exit if lost 40% of peak gain (peak was 8%+)
+        if peak_pnl_pct >= self.PULLBACK_ACTIVATE_PCT and premium_change_pct > 0:
             pct_of_peak_lost = ((peak_pnl_pct - premium_change_pct) / peak_pnl_pct) * 100
             if pct_of_peak_lost >= self.PULLBACK_EXIT_PCT:
                 self.logger.info(
@@ -1110,28 +1130,41 @@ class OptionsScalpStrategy(BaseStrategy):
         )]
 
     async def _handle_position_gone(self, reason: str) -> list[Signal]:
-        """Handle a position that no longer exists on exchange (expired/delisted).
+        """Handle a position that no longer exists on exchange.
 
-        Instead of generating an exit signal (which would fail on exchange),
-        we directly mark the trade closed in DB using last known state, clear
-        all position state, and move on. No retry, no Telegram spam.
+        Determines if the contract expired or vanished unexpectedly.
+        Uses last known premium as exit price, marks trade closed in DB,
+        sends Telegram alert, applies 60s cooldown. No retry.
         """
+        # Determine if this is an expiry or unexpected disappearance
+        is_expiry = False
+        if self.expiry_dt:
+            time_past_expiry = (datetime.now(timezone.utc) - self.expiry_dt).total_seconds()
+            is_expiry = time_past_expiry >= 0  # at or past expiry time
+
+        exit_reason = "EXPIRY" if is_expiry else "POSITION_GONE"
+        exit_reason_detail = f"{exit_reason}_{reason}" if reason else exit_reason
+
+        # Use last known premium as exit price (tracked every tick)
+        exit_premium = self._last_known_premium
+        if exit_premium <= 0:
+            exit_premium = self.entry_premium * 0.5 if self.entry_premium > 0 else 0.0
+
+        # For expired contracts that went to zero, use 0
+        if is_expiry and reason == "EXPIRED_TICKER_FAIL":
+            exit_premium = 0.0
+
         self.logger.info(
-            "[%s] POSITION_GONE (%s) — marking closed in DB with last known state",
-            self.option_symbol, reason,
+            "[%s] %s (%s) — exit_premium=$%.4f (last_known=$%.4f entry=$%.4f)",
+            self.option_symbol, exit_reason, reason,
+            exit_premium, self._last_known_premium, self.entry_premium,
         )
 
-        # Calculate P&L from last known state (assume worst case: premium → 0 for expired)
-        pnl_pct = -100.0  # default: total loss
-        pnl_usd = -self.entry_premium * self.CONTRACTS_PER_TRADE
-        exit_premium = 0.0
-
-        # If we have a highest_premium and this isn't a full expiry, estimate
-        if reason != "EXPIRED_TICKER_FAIL" and self.highest_premium > 0:
-            # Use last known premium (entry as fallback) — we lost the position
-            exit_premium = self.entry_premium * 0.5  # conservative estimate
-            pnl_pct = ((exit_premium - self.entry_premium) / self.entry_premium * 100
-                       if self.entry_premium > 0 else -100.0)
+        # Calculate P&L
+        pnl_pct = 0.0
+        pnl_usd = 0.0
+        if self.entry_premium > 0:
+            pnl_pct = (exit_premium - self.entry_premium) / self.entry_premium * 100
             pnl_usd = (exit_premium - self.entry_premium) * self.CONTRACTS_PER_TRADE
 
         # Mark trade closed in DB directly (no exchange order needed)
@@ -1161,31 +1194,59 @@ class OptionsScalpStrategy(BaseStrategy):
                         "closed_at": iso_now(),
                         "pnl": round(result.net_pnl, 8),
                         "pnl_pct": round(result.pnl_pct, 4),
-                        "reason": f"position_gone_{reason.lower()}",
-                        "exit_reason": "POSITION_GONE",
+                        "reason": exit_reason_detail.lower(),
+                        "exit_reason": exit_reason,
                         "position_state": None,
                     })
                     pnl_pct = result.pnl_pct
                     pnl_usd = result.net_pnl
                     self.logger.info(
-                        "[%s] Trade %s closed as POSITION_GONE — P&L=$%.4f (%.2f%%)",
-                        self.option_symbol, open_trade["id"], result.net_pnl, result.pnl_pct,
+                        "[%s] Trade %s closed as %s — exit=$%.4f P&L=$%.4f (%.2f%%)",
+                        self.option_symbol, open_trade["id"], exit_reason,
+                        exit_premium, result.net_pnl, result.pnl_pct,
                     )
                 else:
                     self.logger.info(
                         "[%s] No open trade found in DB — already closed", self.option_symbol,
                     )
             except Exception:
-                self.logger.exception("[%s] Failed to close trade as POSITION_GONE", self.option_symbol)
+                self.logger.exception("[%s] Failed to close trade as %s", self.option_symbol, exit_reason)
+
+        # Send Telegram alert
+        try:
+            alerts = getattr(self.executor, "alerts", None)
+            if alerts is not None:
+                pair_short = self._base_asset
+                pnl_tag = f"+${pnl_usd:.4f}" if pnl_usd >= 0 else f"-${abs(pnl_usd):.4f}"
+                if is_expiry:
+                    msg = (
+                        f"\u23f0 {pair_short} option expired\n"
+                        f"{self.option_side} ${self.strike_price:.0f} | "
+                        f"${self.entry_premium:.4f} \u2192 ${exit_premium:.4f} "
+                        f"({pnl_pct:+.1f}%) {pnl_tag}"
+                    )
+                else:
+                    msg = (
+                        f"\u2139\ufe0f {pair_short} option position gone\n"
+                        f"{self.option_side} ${self.strike_price:.0f} | "
+                        f"${self.entry_premium:.4f} \u2192 ${exit_premium:.4f} "
+                        f"({pnl_pct:+.1f}%) {pnl_tag}\n"
+                        f"Closed in DB, no action needed."
+                    )
+                await alerts.send_text(msg)
+        except Exception:
+            self.logger.debug("[%s] Failed to send %s Telegram alert", self.option_symbol, exit_reason)
 
         # Log to activity feed
         await self._log_activity(
-            "options_position_gone",
-            f"{self.pair} — OPTIONS POSITION_GONE: {reason} | "
+            f"options_{exit_reason.lower()}",
+            f"{self.pair} — OPTIONS {exit_reason}: {reason} | "
             f"{self.option_side} strike=${self.strike_price:.0f} | "
-            f"P&L={pnl_pct:+.1f}% ${pnl_usd:+.4f}",
-            {"reason": reason, "option_side": self.option_side,
+            f"exit=${exit_premium:.4f} P&L={pnl_pct:+.1f}% ${pnl_usd:+.4f}",
+            {"reason": reason, "exit_reason": exit_reason,
+             "option_side": self.option_side,
              "strike": self.strike_price, "symbol": self.option_symbol,
+             "exit_premium": exit_premium,
              "pnl_pct": round(pnl_pct, 2), "pnl_usd": round(pnl_usd, 4)},
         )
 
@@ -1197,7 +1258,14 @@ class OptionsScalpStrategy(BaseStrategy):
         self.hourly_pnl += pnl_usd
 
         # Clear dashboard + position state
-        await self._clear_dashboard_position(f"POSITION_GONE_{reason}", pnl_pct, pnl_usd)
+        await self._clear_dashboard_position(exit_reason_detail, pnl_pct, pnl_usd)
+
+        # Apply 60s cooldown before next options entry
+        self._position_gone_cooldown_until = time.monotonic() + self._POSITION_GONE_COOLDOWN_SEC
+        self.logger.info(
+            "[%s] %s cooldown: no new options entries for %ds",
+            self.pair, exit_reason, self._POSITION_GONE_COOLDOWN_SEC,
+        )
 
         # Clear all position state — no retry, we're done
         self.in_position = False
@@ -1205,6 +1273,7 @@ class OptionsScalpStrategy(BaseStrategy):
         self.option_symbol = None
         self.entry_premium = 0.0
         self.highest_premium = 0.0
+        self._last_known_premium = 0.0
         self._trailing_active = False
         self.strike_price = 0.0
         self.expiry_dt = None
@@ -1290,6 +1359,7 @@ class OptionsScalpStrategy(BaseStrategy):
             self.entry_premium = fill_price
             self.entry_time = time.monotonic()
             self.highest_premium = fill_price
+            self._last_known_premium = fill_price
             self._trailing_active = False
             self._consecutive_ticker_failures = 0
             self.strike_price = signal.metadata.get("strike", 0)
