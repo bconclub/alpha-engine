@@ -371,18 +371,30 @@ export function TriggerProximity() {
         <div className="space-y-3 max-h-none md:max-h-[600px] overflow-y-auto overflow-x-hidden pr-1">
           {triggers.map((t) => {
             const hasActivePos = t.activePosition != null;
-            const posState = t.activePosition?.position_state;
-            const posPnl = t.activePosition?.current_pnl;
-            const isTrailing = posState === 'trailing';
+            const posPnl = t.activePosition?.current_pnl ?? null;
+            const peakPnl = t.activePosition?.peak_pnl ?? 0;
+            // Only trust trailing if peak P&L confirms it (match LivePositions logic)
+            const isTrailing = (
+              t.activePosition?.position_state === 'trailing'
+              && peakPnl >= 0.30
+            );
+            const isNegative = posPnl != null && posPnl < 0;
+            const posLabel = isTrailing ? 'TRAILING'
+              : isNegative ? 'AT RISK'
+              : 'HOLDING';
+            const posColor = isTrailing ? 'bg-[#00c853]/10 text-[#00c853]'
+              : isNegative ? 'bg-[#ff1744]/10 text-[#ff1744]'
+              : 'bg-amber-400/10 text-amber-400';
+            const borderClr = isTrailing ? 'border-[#00c853]/30'
+              : isNegative ? 'border-[#ff1744]/20'
+              : 'border-amber-400/30';
 
             return (
             <div
               key={`${t.pair}-${t.exchange}`}
               className={cn(
                 'bg-zinc-900/40 border rounded-lg p-3',
-                hasActivePos
-                  ? isTrailing ? 'border-[#00c853]/30' : 'border-amber-400/30'
-                  : 'border-zinc-800/50',
+                hasActivePos ? borderClr : 'border-zinc-800/50',
               )}
             >
               {/* Header */}
@@ -400,12 +412,10 @@ export function TriggerProximity() {
                   {hasActivePos ? (
                     <span className={cn(
                       'inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-medium',
-                      isTrailing
-                        ? 'bg-[#00c853]/10 text-[#00c853]'
-                        : 'bg-amber-400/10 text-amber-400',
+                      posColor,
                     )}>
                       {isTrailing && <span className="w-1.5 h-1.5 rounded-full bg-[#00c853] animate-pulse" />}
-                      IN TRADE — {isTrailing ? 'TRAILING' : 'HOLDING'}
+                      IN TRADE — {posLabel}
                       {posPnl != null && ` ${posPnl >= 0 ? '+' : ''}${posPnl.toFixed(2)}%`}
                     </span>
                   ) : (
