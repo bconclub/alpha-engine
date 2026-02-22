@@ -318,7 +318,8 @@ class TradeExecutor:
     async def _mark_position_gone(self, signal: Signal) -> None:
         """Mark a trade as closed in DB when the position no longer exists on exchange.
 
-        Calculates real P&L using entry price from DB and signal price as exit.
+        Tries to fetch the ACTUAL fill price from exchange trade history first.
+        Falls back to signal.price (current market) if trade history unavailable.
         Sends a clean info alert ONLY when a trade was actually found and closed.
         """
         actually_closed = False
@@ -331,12 +332,20 @@ class TradeExecutor:
                 )
                 if open_trade:
                     entry_price = float(open_trade.get("entry_price", 0) or 0)
-                    exit_price = signal.price
                     amount = open_trade.get("amount", signal.amount)
                     position_type = open_trade.get("position_type", signal.position_type)
                     trade_leverage = open_trade.get("leverage", signal.leverage) or 1
 
-                    # Calculate real P&L (not 0.0!)
+                    # ── Try to get the REAL exit price from exchange trade history ──
+                    # When position_gone fires, the position was closed externally
+                    # (exchange SL, liquidation, manual close). The actual fill price
+                    # is in the exchange's trade history, NOT signal.price.
+                    exit_price = await self._fetch_actual_exit_price(
+                        signal, position_type, entry_price,
+                    )
+                    exit_source = "trade_history" if exit_price != signal.price else "signal"
+
+                    # Calculate real P&L
                     pnl, pnl_pct = calc_pnl(
                         entry_price, exit_price, amount,
                         position_type, trade_leverage,
@@ -354,9 +363,9 @@ class TradeExecutor:
                     })
                     logger.info(
                         "[%s] Trade %s marked closed (position_gone) "
-                        "entry=$%.2f exit=$%.2f pnl=$%.4f (%.2f%%)",
+                        "entry=$%.4f exit=$%.4f pnl=$%.4f (%.2f%%) [exit_src=%s]",
                         signal.pair, open_trade["id"],
-                        entry_price, exit_price, pnl, pnl_pct,
+                        entry_price, exit_price, pnl, pnl_pct, exit_source,
                     )
                     actually_closed = True
                 else:
@@ -374,6 +383,57 @@ class TradeExecutor:
                 )
             except Exception:
                 pass
+
+    async def _fetch_actual_exit_price(
+        self, signal: Signal, position_type: str, entry_price: float,
+    ) -> float:
+        """Try to fetch the actual exit fill price from exchange trade history.
+
+        When a position is closed externally (exchange SL, liquidation, manual),
+        the real fill price is in the exchange's recent trades — not signal.price
+        (which is just the current market price when the bot noticed).
+
+        Returns the actual fill price if found, otherwise falls back to signal.price.
+        """
+        try:
+            exchange = self._get_exchange(signal)
+            # Fetch recent fills for this pair
+            recent_trades = await exchange.fetch_my_trades(signal.pair, limit=20)
+            if recent_trades:
+                # The closing trade is the opposite side of our position
+                close_side = "sell" if position_type in ("long", "spot") else "buy"
+                closing_fills = [
+                    t for t in recent_trades
+                    if t.get("side") == close_side
+                ]
+                if closing_fills:
+                    # Most recent closing fill is our exit
+                    last_fill = closing_fills[-1]
+                    fill_price = float(last_fill.get("price", 0) or 0)
+                    if fill_price > 0:
+                        logger.info(
+                            "[%s] Found actual exit fill: $%.4f (vs signal price $%.4f)",
+                            signal.pair, fill_price, signal.price,
+                        )
+                        return fill_price
+
+            # No closing fills found — try ticker as second fallback
+            ticker = await exchange.fetch_ticker(signal.pair)
+            last_price = float(ticker.get("last", 0) or 0)
+            if last_price > 0:
+                logger.info(
+                    "[%s] No fill found, using ticker last=$%.4f (vs signal $%.4f)",
+                    signal.pair, last_price, signal.price,
+                )
+                return last_price
+
+        except Exception as e:
+            logger.warning(
+                "[%s] Could not fetch actual exit price: %s — using signal price $%.4f",
+                signal.pair, e, signal.price,
+            )
+
+        return signal.price
 
     async def load_market_limits(
         self, pairs: list[str], delta_pairs: list[str] | None = None,
