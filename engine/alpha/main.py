@@ -1236,13 +1236,17 @@ class AlphaBot:
     async def _handle_close_trade(self, params: dict) -> str:
         """Force-close an open trade via dashboard command.
 
-        Finds the scalp strategy for the given pair, builds a market exit
-        signal, and executes it immediately.
+        Supports both scalp (futures) and options_scalp positions.
+        If position is no longer on exchange (ghost), closes DB record directly.
         """
         pair_str = params.get("pair", "")
         trade_id = params.get("trade_id")
         if not pair_str:
             return "Error: missing 'pair' param"
+
+        # ── Options trades: handle separately ──
+        if is_option_symbol(pair_str) or (trade_id and await self._is_options_trade(trade_id)):
+            return await self._close_options_trade(pair_str, trade_id)
 
         # Find the matching scalp strategy
         scalp: ScalpStrategy | None = None
@@ -1252,9 +1256,15 @@ class AlphaBot:
                 break
 
         if not scalp:
+            # No strategy found — try to close as ghost position in DB
+            if trade_id:
+                return await self._close_ghost_trade(trade_id, pair_str)
             return f"Error: no strategy found for pair {pair_str}"
 
         if not scalp.in_position:
+            # Strategy exists but not in position — close ghost DB record
+            if trade_id:
+                return await self._close_ghost_trade(trade_id, pair_str)
             return f"No open position for {pair_str}"
 
         # Build exit signal at current price
@@ -1273,6 +1283,118 @@ class AlphaBot:
         except Exception as e:
             logger.exception("Failed to manual close %s", pair_str)
             return f"Error closing {pair_str}: {e}"
+
+    async def _is_options_trade(self, trade_id: int) -> bool:
+        """Check if a trade ID belongs to an options_scalp trade."""
+        try:
+            trades = await self.db.get_all_open_trades()
+            for t in trades:
+                if t.get("id") == trade_id:
+                    return t.get("strategy") == "options_scalp" or is_option_symbol(t.get("pair", ""))
+        except Exception:
+            pass
+        return False
+
+    async def _close_options_trade(self, pair_str: str, trade_id: int | None) -> str:
+        """Close an options trade — try market exit via executor, then DB-only if ghost."""
+        # Check if options strategy has an active position on exchange
+        for strat in self._options_strategies.values():
+            if strat.in_position and (strat.option_symbol == pair_str or strat.pair == pair_str):
+                # Build a market exit signal and execute
+                try:
+                    from alpha.strategies.base import Signal, StrategyName
+                    exit_side = "sell"  # options are always long, close by selling
+                    exit_signal = Signal(
+                        side=exit_side,
+                        price=strat.entry_premium or 0,
+                        amount=strat.CONTRACTS_PER_TRADE,
+                        order_type="market",
+                        reason=f"MANUAL_CLOSE (dashboard cmd, trade_id={trade_id})",
+                        strategy=StrategyName.OPTIONS_SCALP,
+                        pair=strat.option_symbol or pair_str,
+                        leverage=strat.OPTIONS_LEVERAGE,
+                        position_type="long",
+                        reduce_only=True,
+                        exchange_id="delta",
+                    )
+                    result = await self.executor.execute(exit_signal)
+                    if result:
+                        strat.in_position = False
+                        strat.option_symbol = None
+                        return f"Closed options position {pair_str} via market order"
+                    else:
+                        return f"Execute returned None for options {pair_str} — trying ghost close"
+                except Exception as e:
+                    logger.exception("Failed to close options %s via executor", pair_str)
+
+        # No active strategy position — close as ghost trade in DB
+        if trade_id:
+            return await self._close_ghost_trade(trade_id, pair_str)
+        return f"No active options position found for {pair_str}"
+
+    async def _close_ghost_trade(self, trade_id: int, pair_str: str) -> str:
+        """Close a ghost trade (in DB but not on exchange) with best available price."""
+        try:
+            open_trade = None
+            trades = await self.db.get_all_open_trades()
+            for t in trades:
+                if t.get("id") == trade_id:
+                    open_trade = t
+                    break
+
+            if not open_trade:
+                return f"Trade {trade_id} not found or already closed"
+
+            entry_price = float(open_trade.get("entry_price", 0) or 0)
+            position_type = open_trade.get("position_type", "long")
+            leverage = int(open_trade.get("leverage", 1) or 1)
+            amount = float(open_trade.get("amount", 0) or 0)
+            exchange_id = open_trade.get("exchange", "delta")
+
+            # Try to get exit price from exchange trade history
+            exit_price = entry_price  # fallback
+            try:
+                exchange = self.delta_options if is_option_symbol(pair_str) else (
+                    self.delta if exchange_id == "delta" else self.binance
+                )
+                if exchange:
+                    recent = await exchange.fetch_my_trades(pair_str, limit=20)
+                    close_side = "sell" if position_type in ("long", "spot") else "buy"
+                    fills = [t for t in (recent or []) if t.get("side") == close_side]
+                    if fills:
+                        exit_price = float(fills[-1].get("price", 0) or 0) or entry_price
+                    elif not fills:
+                        ticker = await exchange.fetch_ticker(pair_str)
+                        exit_price = float(ticker.get("last", 0) or 0) or entry_price
+            except Exception as e:
+                logger.warning("Ghost trade %s: could not fetch exit price: %s", pair_str, e)
+
+            pnl, pnl_pct = calc_pnl(
+                entry_price, exit_price, amount,
+                position_type, leverage,
+                exchange_id, pair_str,
+            )
+
+            await self.db.update_trade(trade_id, {
+                "status": "closed",
+                "exit_price": exit_price,
+                "closed_at": iso_now(),
+                "pnl": round(pnl, 8),
+                "pnl_pct": round(pnl_pct, 4),
+                "reason": "ghost_manual_close",
+                "exit_reason": "MANUAL",
+                "position_state": None,
+            })
+
+            logger.info(
+                "GHOST TRADE CLOSED: %s (trade_id=%s) exit=$%.4f pnl=$%.4f (%.2f%%)",
+                pair_str, trade_id, exit_price, pnl, pnl_pct,
+            )
+            return f"Ghost trade closed: {pair_str} exit=${exit_price:.4f} P&L={pnl_pct:+.2f}%"
+
+        except Exception as e:
+            logger.exception("Failed to close ghost trade %s", pair_str)
+            return f"Error closing ghost trade {pair_str}: {e}"
 
     async def _close_binance_dust_trades(self) -> None:
         """Mark Binance trades below $6 as closed dust (too small to sell).
@@ -1424,6 +1546,30 @@ class AlphaBot:
         except Exception as e:
             logger.error("Failed to fetch Delta positions on startup: %s", e)
 
+        # Fetch options positions from delta_options exchange (separate from futures)
+        options_positions: dict[str, dict[str, Any]] = {}
+        try:
+            if self.delta_options:
+                opt_positions = await self.delta_options.fetch_positions()
+                for pos in opt_positions:
+                    contracts = float(pos.get("contracts", 0) or 0)
+                    if contracts != 0:
+                        symbol = pos.get("symbol", "")
+                        entry_px = float(pos.get("entryPrice", 0) or 0)
+                        options_positions[symbol] = {
+                            "side": "long" if contracts > 0 else "short",
+                            "contracts": abs(contracts),
+                            "entry_price": entry_px,
+                        }
+                        logger.info(
+                            "Found open options position: %s %.0f contracts @ $%.4f",
+                            symbol, abs(contracts), entry_px,
+                        )
+                if not options_positions:
+                    logger.info("No open options positions on exchange")
+        except Exception as e:
+            logger.warning("Could not fetch options positions on startup: %s", e)
+
         restored = 0
         closed = 0
 
@@ -1458,33 +1604,49 @@ class AlphaBot:
                 elif held > 0:
                     position_exists = True
             elif exchange_id == "delta":
-                # Verify against actual Delta positions from fetch_positions()
-                delta_pos = delta_positions.get(pair)
-                if delta_pos:
-                    position_exists = True
-                    # Use EXCHANGE for size/side (truth), DB for entry_price (truth)
-                    # Exchange entryPrice can be average/current — DB has our real entry
-                    db_entry_price = float(trade.get("entry_price", 0) or 0)
-                    exchange_entry_price = delta_pos["entry_price"]
-                    amount = delta_pos["contracts"]
-                    position_type = delta_pos["side"]
-                    # Keep DB entry_price — only fall back to exchange if DB is 0
-                    if db_entry_price > 0:
-                        entry_price = db_entry_price
-                    elif exchange_entry_price > 0:
-                        entry_price = exchange_entry_price
-                    logger.info(
-                        "Delta position %s verified: %s %.0f contracts | "
-                        "entry=$%.2f (DB) vs $%.2f (exchange) — using DB",
-                        pair, position_type, amount, db_entry_price, exchange_entry_price,
-                    )
+                # Options trades: check options_positions (separate exchange)
+                if is_option_symbol(pair):
+                    opt_pos = options_positions.get(pair)
+                    if opt_pos:
+                        position_exists = True
+                        logger.info(
+                            "Options position %s verified on exchange: %.0f contracts",
+                            pair, opt_pos["contracts"],
+                        )
+                    else:
+                        logger.info(
+                            "Options position %s NOT found on exchange — closed/expired",
+                            pair,
+                        )
+                        position_exists = False
                 else:
-                    # Position not found on Delta — it was closed externally
-                    logger.info(
-                        "Delta position %s NOT found on exchange — was closed externally",
-                        pair,
-                    )
-                    position_exists = False
+                    # Futures: verify against actual Delta positions from fetch_positions()
+                    delta_pos = delta_positions.get(pair)
+                    if delta_pos:
+                        position_exists = True
+                        # Use EXCHANGE for size/side (truth), DB for entry_price (truth)
+                        # Exchange entryPrice can be average/current — DB has our real entry
+                        db_entry_price = float(trade.get("entry_price", 0) or 0)
+                        exchange_entry_price = delta_pos["entry_price"]
+                        amount = delta_pos["contracts"]
+                        position_type = delta_pos["side"]
+                        # Keep DB entry_price — only fall back to exchange if DB is 0
+                        if db_entry_price > 0:
+                            entry_price = db_entry_price
+                        elif exchange_entry_price > 0:
+                            entry_price = exchange_entry_price
+                        logger.info(
+                            "Delta position %s verified: %s %.0f contracts | "
+                            "entry=$%.2f (DB) vs $%.2f (exchange) — using DB",
+                            pair, position_type, amount, db_entry_price, exchange_entry_price,
+                        )
+                    else:
+                        # Position not found on Delta — it was closed externally
+                        logger.info(
+                            "Delta position %s NOT found on exchange — was closed externally",
+                            pair,
+                        )
+                        position_exists = False
 
             if position_exists:
                 # Register with risk manager using a synthetic Signal
