@@ -1,23 +1,26 @@
 """Alpha Options Scalp — Buy CALLs/PUTs on strong momentum signals.
 
 PHILOSOPHY: Options are the safest momentum play. Max loss = premium paid.
-No leverage, no liquidation. When scalp sees 3/4+ momentum, buy the option.
+No leverage, no liquidation. When scalp sees 4/4 momentum, buy the option.
 
-Entry: 3-of-4 or 4-of-4 momentum signals from scalp strategy
+Entry: 4-of-4 momentum signals from scalp strategy (trending regime only)
        Bullish → buy CALL, Bearish → buy PUT
+       Pullback entry: wait up to 30s for 5% premium dip before buying
        1 contract per trade, nearest affordable strike (ATM or up to 3 OTM)
+       Minimum 0.25% momentum required
 
 Exit:
   - TP: 30% premium gain
-  - SL: 20% premium loss (always active, even in Phase 1)
-  - Trailing: activates at +10%, trails 5% behind peak
-  - Pullback: exit if lost 50% of peak gain (when peak was 5%+)
+  - SL: 30% premium loss (always active, even in Phase 1)
+  - Trailing: activates at +15%, trails 5% behind peak
+  - Pullback: exit if lost 40% of peak gain (when peak was 8%+)
   - Decay: exit if was +10%+ and faded to +3%
-  - Timeout: close after 15 minutes (theta kills options)
+  - Timeout: close after 10 minutes (theta kills options)
   - Time: close 2 hours before expiry
   - Signal reversal: close if opposite momentum fires
   - Phase 1 (first 30s): only SL fires — no TP/trail/pullback/decay
   - Check every 10 seconds
+  - Position verified against exchange every 30s
 
 Position Sizing:
   - Max 20% of capital on options ($2 max)
@@ -37,7 +40,7 @@ import ccxt.async_support as ccxt
 
 from alpha.config import config
 from alpha.db import Database
-from alpha.strategies.base import BaseStrategy, Signal, StrategyName
+from alpha.strategies.base import BaseStrategy, MarketCondition, Signal, StrategyName
 from alpha.utils import setup_logger
 
 if TYPE_CHECKING:
@@ -77,19 +80,26 @@ class OptionsScalpStrategy(BaseStrategy):
     MIN_PREMIUM_USD = 0.01               # Skip illiquid < $0.01
 
     # ── Entry ─────────────────────────────────────────────────────
-    MIN_SIGNAL_STRENGTH = 3              # 3-of-4 or 4-of-4 required
-    SIGNAL_STALENESS_SEC = 30            # Signal must be < 30s old
+    MIN_SIGNAL_STRENGTH = 4              # 4-of-4 required (was 3 — too many weak entries)
+    SIGNAL_STALENESS_SEC = 15            # Signal must be < 15s old (was 30 — stale entries)
     CONTRACTS_PER_TRADE = 1              # 1 contract per trade
+    MIN_MOMENTUM_PCT = 0.25             # Skip if |momentum_60s| < 0.25%
+
+    # ── Pullback entry ───────────────────────────────────────────
+    PULLBACK_WAIT_SEC = 30              # Wait up to 30s for premium dip
+    PULLBACK_DIP_PCT = 5.0             # Min dip to trigger entry
+    PULLBACK_SKIP_RISE_PCT = 5.0       # Skip if premium rose this much
+    PULLBACK_POLL_SEC = 2              # Check every 2s during pullback wait
 
     # ── Exit thresholds (tuned for momentum scalps) ────────────────
     TP_PREMIUM_GAIN_PCT = 30.0           # Take profit at +30% premium gain
     SL_PREMIUM_LOSS_PCT = 30.0           # Stop loss at -30% premium drop (was 20 — noise clips at 50x)
-    TRAILING_ACTIVATE_PCT = 10.0         # Trail activates at +10% gain
+    TRAILING_ACTIVATE_PCT = 15.0         # Trail activates at +15% gain (was 10 — too early)
     TRAILING_DISTANCE_PCT = 5.0          # Trail 5% below peak premium
     PULLBACK_EXIT_PCT = 40.0             # Exit if lost 40% of peak gain (was 50 — too aggressive)
     PULLBACK_ACTIVATE_PCT = 8.0          # Pullback only fires after +8% peak (was 5 — let winners breathe)
     DECAY_THRESHOLD_PCT = 3.0            # Exit if was +10%+ and faded to +3%
-    TIMEOUT_MINUTES = 15                 # Options timeout (theta kills you)
+    TIMEOUT_MINUTES = 10                 # Options timeout (was 15 — too long, theta bleeds)
     PHASE1_HANDS_OFF_SEC = 30            # Only SL fires in first 30s after fill
 
     # ── Position limits ───────────────────────────────────────────
@@ -160,6 +170,12 @@ class OptionsScalpStrategy(BaseStrategy):
         # Cooldown after POSITION_GONE — no new options entry for 60s
         self._position_gone_cooldown_until: float = 0.0
         self._POSITION_GONE_COOLDOWN_SEC = 60
+
+        # Regime skip logging throttle (log once per 60s to avoid spam)
+        self._last_regime_log: float = 0.0
+
+        # Position verification ticker (every 3rd tick = ~30s)
+        self._position_verify_tick: int = 0
 
     # ==================================================================
     # ACTIVITY LOGGING
@@ -638,7 +654,20 @@ class OptionsScalpStrategy(BaseStrategy):
                 )
             return []
 
-        # 1. Read scalp strategy's latest signal
+        # 1. Market regime gate — only trade in TRENDING
+        if self._market_analyzer:
+            analysis = self._market_analyzer.last_analysis_for(self.pair)
+            if analysis and analysis.condition != MarketCondition.TRENDING:
+                now = time.monotonic()
+                if now - self._last_regime_log >= 60:
+                    self._last_regime_log = now
+                    self.logger.info(
+                        "[%s] OPTIONS REGIME SKIP: %s (need TRENDING)",
+                        self.pair, analysis.condition.value,
+                    )
+                return []
+
+        # 2. Read scalp strategy's latest signal
         if not self._scalp or not hasattr(self._scalp, "last_signal_state"):
             if self._tick_count % 30 == 0:
                 self.logger.info("[%s] OPTIONS: no scalp ref (scalp=%s)", self.pair, bool(self._scalp))
@@ -673,7 +702,7 @@ class OptionsScalpStrategy(BaseStrategy):
                 )
             return []
 
-        # 3. Check signal strength (3-of-4 minimum)
+        # 3. Check signal strength (4-of-4 required)
         if strength < self.MIN_SIGNAL_STRENGTH:
             # Log WEAK every ~60s (6 ticks × 10s = 60s), not every 10s
             if strength >= 1 and self._tick_count % 6 == 0:
@@ -681,6 +710,15 @@ class OptionsScalpStrategy(BaseStrategy):
                     "[%s] OPTIONS WEAK: strength=%d < %d — waiting",
                     self.pair, strength, self.MIN_SIGNAL_STRENGTH,
                 )
+            return []
+
+        # 3b. Minimum momentum gate — skip weak moves
+        momentum_60s = abs(signal_state.get("momentum_60s", 0) or 0)
+        if momentum_60s < self.MIN_MOMENTUM_PCT:
+            self.logger.info(
+                "[%s] OPTIONS WEAK MOM: |momentum|=%.3f%% < %.2f%% — skipping",
+                self.pair, momentum_60s, self.MIN_MOMENTUM_PCT,
+            )
             return []
 
         side = signal_state.get("side")
@@ -829,9 +867,168 @@ class OptionsScalpStrategy(BaseStrategy):
             except Exception:
                 pass
 
-        # 11. Build entry signal
+        # 11. Pullback entry — wait up to 30s for premium dip before buying
         expiry_str = self._selected_expiry.strftime('%b %d %H:%M')
         strike_label = "ATM" if selected_strike == atm_strike else "OTM"
+
+        return await self._attempt_pullback_entry(
+            option_type=option_type,
+            selected_symbol=selected_symbol,
+            selected_strike=selected_strike,
+            atm_strike=atm_strike,
+            signal_premium=premium,
+            strength=strength,
+            signals_str=signals_str,
+            current_price=current_price,
+            setup_type=setup_type,
+            expiry_str=expiry_str,
+            strike_label=strike_label,
+        )
+
+    # ==================================================================
+    # PULLBACK ENTRY
+    # ==================================================================
+
+    async def _attempt_pullback_entry(
+        self,
+        option_type: str,
+        selected_symbol: str,
+        selected_strike: float,
+        atm_strike: float,
+        signal_premium: float,
+        strength: int,
+        signals_str: str,
+        current_price: float,
+        setup_type: str,
+        expiry_str: str,
+        strike_label: str,
+    ) -> list[Signal]:
+        """Wait up to PULLBACK_WAIT_SEC for premium to dip before entering.
+
+        1. Poll option ticker every PULLBACK_POLL_SEC (2s)
+        2. If premium dips 5-10% below signal → enter at market (dipped price)
+        3. If premium rises 5%+ above signal → skip (move already priced in)
+        4. After 30s no dip → enter at market only if within +5% of signal price
+        """
+        import asyncio
+
+        self.logger.info(
+            "[%s] PULLBACK WAIT: %s $%.0f premium=$%.4f — waiting up to %ds for dip",
+            self.pair, option_type.upper(), selected_strike,
+            signal_premium, self.PULLBACK_WAIT_SEC,
+        )
+
+        elapsed = 0.0
+        entry_premium = signal_premium  # default: use signal-time price
+
+        while elapsed < self.PULLBACK_WAIT_SEC:
+            await asyncio.sleep(self.PULLBACK_POLL_SEC)
+            elapsed += self.PULLBACK_POLL_SEC
+
+            try:
+                ticker = await self.options_exchange.fetch_ticker(selected_symbol)
+                now_premium = ticker.get("last") or ticker.get("ask") or 0
+            except Exception as e:
+                self.logger.debug("[%s] Pullback ticker fail: %s", self.pair, e)
+                continue
+
+            if now_premium <= 0:
+                continue
+
+            change_pct = (now_premium - signal_premium) / signal_premium * 100
+
+            # Premium rose too much — move already priced in, skip entry
+            if change_pct >= self.PULLBACK_SKIP_RISE_PCT:
+                self.logger.info(
+                    "[%s] PULLBACK SKIP: premium rose +%.1f%% ($%.4f → $%.4f) — move priced in",
+                    self.pair, change_pct, signal_premium, now_premium,
+                )
+                await self._log_skip(
+                    f"{self.pair} — OPTIONS PULLBACK SKIP: premium rose +{change_pct:.1f}%",
+                    {"signal_premium": signal_premium, "now_premium": now_premium},
+                )
+                return []
+
+            # Premium dipped enough — enter now
+            if change_pct <= -self.PULLBACK_DIP_PCT:
+                entry_premium = now_premium
+                self.logger.info(
+                    "[%s] PULLBACK DIP: premium dipped %.1f%% ($%.4f → $%.4f) — entering",
+                    self.pair, change_pct, signal_premium, now_premium,
+                )
+                break
+
+            self.logger.debug(
+                "[%s] PULLBACK polling: %.0fs premium=$%.4f (%+.1f%%)",
+                self.pair, elapsed, now_premium, change_pct,
+            )
+
+        else:
+            # 30s elapsed, no dip — check if still within +5% of signal price
+            try:
+                ticker = await self.options_exchange.fetch_ticker(selected_symbol)
+                final_premium = ticker.get("last") or ticker.get("ask") or 0
+            except Exception:
+                final_premium = 0
+
+            if final_premium <= 0:
+                self.logger.info("[%s] PULLBACK TIMEOUT: no valid premium — skipping", self.pair)
+                return []
+
+            final_change = (final_premium - signal_premium) / signal_premium * 100
+            if final_change > self.PULLBACK_SKIP_RISE_PCT:
+                self.logger.info(
+                    "[%s] PULLBACK TIMEOUT: premium +%.1f%% above signal — skipping",
+                    self.pair, final_change,
+                )
+                return []
+
+            entry_premium = final_premium
+            self.logger.info(
+                "[%s] PULLBACK TIMEOUT: no dip but within range (%+.1f%%) — entering at $%.4f",
+                self.pair, final_change, entry_premium,
+            )
+
+        # Log to activity_log for dashboard
+        await self._log_activity(
+            "options_entry",
+            f"{self.pair} — OPTIONS: {option_type.upper()} {strike_label} ${selected_strike:.0f} | "
+            f"premium=${entry_premium:.4f} | expiry={expiry_str} | signals={strength}/4 {signals_str}",
+            {"option_type": option_type, "strike": selected_strike, "premium": entry_premium,
+             "strike_label": strike_label,
+             "expiry": self._selected_expiry.isoformat() if self._selected_expiry else "",
+             "strength": strength, "underlying_price": current_price,
+             "symbol": selected_symbol, "setup_type": setup_type},
+        )
+
+        # Build and return entry signal
+        return self._build_entry_signal(
+            option_type=option_type,
+            selected_symbol=selected_symbol,
+            selected_strike=selected_strike,
+            premium=entry_premium,
+            strength=strength,
+            signals_str=signals_str,
+            current_price=current_price,
+            setup_type=setup_type,
+            expiry_str=expiry_str,
+            strike_label=strike_label,
+        )
+
+    def _build_entry_signal(
+        self,
+        option_type: str,
+        selected_symbol: str,
+        selected_strike: float,
+        premium: float,
+        strength: int,
+        signals_str: str,
+        current_price: float,
+        setup_type: str,
+        expiry_str: str,
+        strike_label: str,
+    ) -> list[Signal]:
+        """Build the entry Signal for an option trade."""
         reason = (
             f"OPTIONS {option_type.upper()} | {strength}/4 signals "
             f"({signals_str}) | "
@@ -840,17 +1037,6 @@ class OptionsScalpStrategy(BaseStrategy):
             f"Premium=${premium:.4f}"
         )
         self.logger.info("[%s] OPTIONS ENTRY — %s (setup=%s)", self.pair, reason, setup_type)
-
-        # Log to activity_log for dashboard
-        await self._log_activity(
-            "options_entry",
-            f"{self.pair} — OPTIONS: {option_type.upper()} {strike_label} ${selected_strike:.0f} | "
-            f"premium=${premium:.4f} | expiry={expiry_str} | signals={strength}/4 {signals_str}",
-            {"option_type": option_type, "strike": selected_strike, "premium": premium,
-             "strike_label": strike_label, "expiry": self._selected_expiry.isoformat(),
-             "strength": strength, "underlying_price": current_price,
-             "symbol": selected_symbol, "setup_type": setup_type},
-        )
 
         return [Signal(
             side="buy",
@@ -869,7 +1055,7 @@ class OptionsScalpStrategy(BaseStrategy):
                 "option_type": option_type,
                 "strike": selected_strike,
                 "strike_label": strike_label,
-                "expiry": self._selected_expiry.isoformat(),
+                "expiry": self._selected_expiry.isoformat() if self._selected_expiry else "",
                 "underlying_price": current_price,
                 "underlying_pair": self.pair,
                 "tp_price": premium * (1 + self.TP_PREMIUM_GAIN_PCT / 100),
@@ -888,16 +1074,24 @@ class OptionsScalpStrategy(BaseStrategy):
         Phase 1 (first 30s after fill): only SL fires — no TP/trail/pullback/decay.
         After Phase 1:
         1. Expiry: Close 2 hours before expiry
-        2. SL: -20% premium drop (always active)
+        2. SL: -30% premium drop (always active)
         3. TP: +30% premium gain
-        4. Trailing: activates at +10%, trails 5% behind peak
-        5. Pullback: exit if lost 50% of peak gain (when peak was 5%+)
+        4. Trailing: activates at +15%, trails 5% behind peak
+        5. Pullback: exit if lost 40% of peak gain (when peak was 8%+)
         6. Decay: exit if was +10%+ and faded to +3%
-        7. Timeout: close after 15 minutes
-        8. Signal reversal: opposite 3/4+ momentum
+        7. Timeout: close after 10 minutes
+        8. Signal reversal: opposite 4/4 momentum
+        9. Position verification every ~30s via fetch_positions
         """
         if not self.in_position or not self.option_symbol:
             return []
+
+        # Position verification every 3rd tick (~30s)
+        self._position_verify_tick += 1
+        if self._position_verify_tick % 3 == 0:
+            gone = await self._verify_option_position()
+            if gone:
+                return gone
 
         # Fetch current premium
         try:
@@ -1128,6 +1322,47 @@ class OptionsScalpStrategy(BaseStrategy):
             reduce_only=True,
             exchange_id="delta",
         )]
+
+    async def _verify_option_position(self) -> list[Signal] | None:
+        """Check exchange positions to detect if option is still open.
+
+        Called every 3rd tick (~30s). Returns _handle_position_gone result
+        if position no longer exists, or None to continue normal exit checks.
+        """
+        if not self.options_exchange or not self.option_symbol:
+            return None
+
+        try:
+            positions = await self.options_exchange.fetch_positions()
+            for pos in positions:
+                symbol = pos.get("symbol", "")
+                contracts = float(pos.get("contracts", 0) or 0)
+                if symbol == self.option_symbol and contracts != 0:
+                    return None  # Position still exists — all good
+
+            # Position not found on exchange
+            now_utc = datetime.now(timezone.utc)
+            if self.expiry_dt:
+                mins_to_expiry = (self.expiry_dt - now_utc).total_seconds() / 60
+                if mins_to_expiry <= self._EXPIRY_CLOSE_MINUTES:
+                    self.logger.warning(
+                        "[%s] POSITION VERIFY: not found, near expiry (%.1f min) — EXPIRY",
+                        self.option_symbol, mins_to_expiry,
+                    )
+                    return await self._handle_position_gone("VERIFY_EXPIRY")
+
+            self.logger.warning(
+                "[%s] POSITION VERIFY: not found on exchange — POSITION_GONE",
+                self.option_symbol,
+            )
+            return await self._handle_position_gone("VERIFY_GONE")
+
+        except Exception as e:
+            # fetch_positions failed — don't flag as gone, just log
+            self.logger.debug(
+                "[%s] Position verify fetch_positions failed: %s", self.option_symbol, e,
+            )
+            return None
 
     async def _handle_position_gone(self, reason: str) -> list[Signal]:
         """Handle a position that no longer exists on exchange.
