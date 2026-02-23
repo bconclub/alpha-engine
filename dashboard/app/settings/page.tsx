@@ -1,16 +1,9 @@
 'use client';
 
-import { useState, useCallback } from 'react';
+import { useState, useCallback, useMemo } from 'react';
 import { useSupabase } from '@/components/providers/SupabaseProvider';
 import { getSupabase } from '@/lib/supabase';
 import { formatCurrency, formatPercentage, cn } from '@/lib/utils';
-import type { Strategy } from '@/lib/types';
-
-// ---------------------------------------------------------------------------
-// Constants
-// ---------------------------------------------------------------------------
-
-const STRATEGIES: Strategy[] = ['Grid', 'Momentum', 'Arbitrage'];
 
 // ---------------------------------------------------------------------------
 // Component
@@ -19,13 +12,9 @@ const STRATEGIES: Strategy[] = ['Grid', 'Momentum', 'Arbitrage'];
 export default function SettingsPage() {
   const { botStatus } = useSupabase();
 
-  // Force-strategy select state
-  const [selectedStrategy, setSelectedStrategy] = useState<Strategy>('Grid');
-
-  // Loading & feedback state for each action
+  // Loading & feedback state
   const [pauseLoading, setPauseLoading] = useState(false);
   const [resumeLoading, setResumeLoading] = useState(false);
-  const [forceLoading, setForceLoading] = useState(false);
   const [feedback, setFeedback] = useState<{
     type: 'success' | 'error';
     message: string;
@@ -33,15 +22,24 @@ export default function SettingsPage() {
 
   // Confirmation state
   const [confirmAction, setConfirmAction] = useState<
-    'pause' | 'force' | null
+    'pause' | 'force_resume' | null
   >(null);
+
+  // Derived bot state
+  const isPaused = useMemo(() => {
+    return botStatus?.is_paused === true || botStatus?.bot_state === 'paused';
+  }, [botStatus]);
+
+  const pauseReason = useMemo(() => {
+    return botStatus?.pause_reason ?? null;
+  }, [botStatus]);
 
   // -- Helpers ---------------------------------------------------------------
 
   const showFeedback = useCallback(
     (type: 'success' | 'error', message: string) => {
       setFeedback({ type, message });
-      setTimeout(() => setFeedback(null), 3000);
+      setTimeout(() => setFeedback(null), 4000);
     },
     [],
   );
@@ -62,7 +60,7 @@ export default function SettingsPage() {
         params: {},
       });
       if (error) throw error;
-      showFeedback('success', 'Pause command sent successfully');
+      showFeedback('success', 'Pause command sent');
     } catch (err: unknown) {
       const message =
         err instanceof Error ? err.message : 'Failed to send pause command';
@@ -80,7 +78,7 @@ export default function SettingsPage() {
         params: {},
       });
       if (error) throw error;
-      showFeedback('success', 'Resume command sent successfully');
+      showFeedback('success', 'Resume command sent');
     } catch (err: unknown) {
       const message =
         err instanceof Error ? err.message : 'Failed to send resume command';
@@ -90,34 +88,29 @@ export default function SettingsPage() {
     }
   }, [showFeedback]);
 
-  const handleForceStrategy = useCallback(async () => {
-    if (confirmAction !== 'force') {
-      setConfirmAction('force');
+  const handleForceResume = useCallback(async () => {
+    if (confirmAction !== 'force_resume') {
+      setConfirmAction('force_resume');
       return;
     }
 
     setConfirmAction(null);
-    setForceLoading(true);
+    setResumeLoading(true);
     try {
       const { error } = await getSupabase()!.from('bot_commands').insert({
-        command: 'force_strategy',
-        params: { strategy: selectedStrategy },
+        command: 'resume',
+        params: { force: true },
       });
       if (error) throw error;
-      showFeedback(
-        'success',
-        `Force strategy "${selectedStrategy}" command sent`,
-      );
+      showFeedback('success', 'Force resume sent — win-rate bypass active');
     } catch (err: unknown) {
       const message =
-        err instanceof Error
-          ? err.message
-          : 'Failed to send force strategy command';
+        err instanceof Error ? err.message : 'Failed to send force resume';
       showFeedback('error', message);
     } finally {
-      setForceLoading(false);
+      setResumeLoading(false);
     }
-  }, [confirmAction, selectedStrategy, showFeedback]);
+  }, [confirmAction, showFeedback]);
 
   const cancelConfirm = useCallback(() => {
     setConfirmAction(null);
@@ -145,142 +138,147 @@ export default function SettingsPage() {
       )}
 
       {/* ----------------------------------------------------------------- */}
-      {/* Section 1: Bot Configuration (read-only)                          */}
+      {/* Paused Banner — shown when bot is paused                          */}
+      {/* ----------------------------------------------------------------- */}
+      {isPaused && (
+        <div className="bg-[#ff1744]/5 border border-[#ff1744]/20 rounded-xl p-4 md:p-5">
+          <div className="flex items-start gap-3">
+            <div className="w-2.5 h-2.5 rounded-full bg-[#ff1744] mt-1 shrink-0 animate-pulse" />
+            <div className="flex-1 min-w-0">
+              <h3 className="text-sm font-semibold text-[#ff1744] mb-1">Bot Paused</h3>
+              {pauseReason && (
+                <p className="text-xs text-zinc-400 font-mono mb-3">{pauseReason}</p>
+              )}
+              <div className="flex flex-wrap items-center gap-2">
+                {/* Force Resume — bypasses win-rate check */}
+                {confirmAction === 'force_resume' ? (
+                  <div className="flex items-center gap-2">
+                    <span className="text-xs text-zinc-400">Override safety check?</span>
+                    <button
+                      onClick={handleForceResume}
+                      disabled={resumeLoading}
+                      className="rounded-lg bg-emerald-500 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-emerald-600 disabled:opacity-50 disabled:cursor-not-allowed"
+                    >
+                      {resumeLoading ? 'Sending...' : 'Confirm Force Resume'}
+                    </button>
+                    <button
+                      onClick={cancelConfirm}
+                      className="rounded-lg border border-zinc-700 bg-zinc-800 px-3 py-2 text-sm font-medium text-zinc-300 transition-colors hover:bg-zinc-700"
+                    >
+                      Cancel
+                    </button>
+                  </div>
+                ) : (
+                  <button
+                    onClick={handleForceResume}
+                    disabled={resumeLoading}
+                    className="rounded-lg bg-emerald-500/20 px-4 py-2 text-sm font-semibold text-emerald-400 border border-emerald-500/30 transition-colors hover:bg-emerald-500/30 hover:text-emerald-300 disabled:opacity-50 disabled:cursor-not-allowed"
+                  >
+                    {resumeLoading ? 'Sending...' : 'Force Resume'}
+                  </button>
+                )}
+                <span className="text-[10px] text-zinc-600 font-mono">
+                  Bypasses win-rate check until next winning trade
+                </span>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ----------------------------------------------------------------- */}
+      {/* Section 1: Bot Status                                             */}
       {/* ----------------------------------------------------------------- */}
       <div className="bg-card border border-zinc-800 rounded-xl p-4 md:p-6">
         <h2 className="text-sm font-medium text-zinc-400 uppercase tracking-wider mb-4 md:mb-6">
-          Bot Configuration
+          Bot Status
         </h2>
 
-        <dl className="grid grid-cols-1 sm:grid-cols-2 gap-x-4 md:gap-x-8 gap-y-4 md:gap-y-5">
+        <dl className="grid grid-cols-2 sm:grid-cols-4 gap-x-4 md:gap-x-8 gap-y-4 md:gap-y-5">
           <div>
-            <dt className="text-sm text-zinc-500">Trading Pair</dt>
-            <dd className="mt-1 text-base font-medium text-zinc-100">
-              BTC/USDT
+            <dt className="text-xs text-zinc-500">State</dt>
+            <dd className="mt-1 text-sm font-semibold">
+              {isPaused ? (
+                <span className="text-[#ff1744]">PAUSED</span>
+              ) : (
+                <span className="text-[#00c853]">RUNNING</span>
+              )}
             </dd>
           </div>
           <div>
-            <dt className="text-sm text-zinc-500">Current Capital</dt>
-            <dd className="mt-1 text-base font-medium font-mono text-zinc-100">
+            <dt className="text-xs text-zinc-500">Capital</dt>
+            <dd className="mt-1 text-sm font-medium font-mono text-zinc-100">
               {formatCurrency(botStatus?.capital ?? 0)}
             </dd>
           </div>
           <div>
-            <dt className="text-sm text-zinc-500">Active Strategy</dt>
-            <dd className="mt-1 text-base font-medium text-zinc-100">
-              {botStatus?.active_strategy ?? '--'}
+            <dt className="text-xs text-zinc-500">Win Rate</dt>
+            <dd className={cn(
+              'mt-1 text-sm font-medium font-mono',
+              (botStatus?.win_rate ?? 0) < 40 ? 'text-[#ff1744]' : 'text-zinc-100',
+            )}>
+              {botStatus ? formatPercentage(botStatus.win_rate) : '--'}
             </dd>
           </div>
           <div>
-            <dt className="text-sm text-zinc-500">Win Rate</dt>
-            <dd className="mt-1 text-base font-medium text-zinc-100">
-              {botStatus ? formatPercentage(botStatus.win_rate) : '--'}
+            <dt className="text-xs text-zinc-500">Daily P&L</dt>
+            <dd className={cn(
+              'mt-1 text-sm font-medium font-mono',
+              (botStatus?.daily_pnl ?? 0) >= 0 ? 'text-[#00c853]' : 'text-[#ff1744]',
+            )}>
+              {botStatus?.daily_pnl != null
+                ? `${botStatus.daily_pnl >= 0 ? '+' : ''}${formatCurrency(botStatus.daily_pnl)}`
+                : '--'}
             </dd>
           </div>
         </dl>
       </div>
 
       {/* ----------------------------------------------------------------- */}
-      {/* Section 2: Manual Overrides                                       */}
+      {/* Section 2: Manual Controls                                        */}
       {/* ----------------------------------------------------------------- */}
-      <div className="bg-card border border-zinc-800 rounded-xl p-6">
+      <div className="bg-card border border-zinc-800 rounded-xl p-4 md:p-6">
         <h2 className="text-sm font-medium text-zinc-400 uppercase tracking-wider mb-6">
           Manual Controls
         </h2>
 
-        <div className="space-y-6">
-          {/* Pause / Resume row */}
-          <div className="flex flex-wrap items-center gap-3">
-            {/* Pause button */}
-            {confirmAction === 'pause' ? (
-              <div className="flex items-center gap-2">
-                <span className="text-sm text-zinc-400">Are you sure?</span>
-                <button
-                  onClick={handlePause}
-                  disabled={pauseLoading}
-                  className="rounded-lg bg-red-500 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-red-600 disabled:opacity-50 disabled:cursor-not-allowed"
-                >
-                  {pauseLoading ? 'Sending...' : 'Confirm Pause'}
-                </button>
-                <button
-                  onClick={cancelConfirm}
-                  className="rounded-lg border border-zinc-700 bg-zinc-800 px-4 py-2 text-sm font-medium text-zinc-300 transition-colors hover:bg-zinc-700"
-                >
-                  Cancel
-                </button>
-              </div>
-            ) : (
+        <div className="flex flex-wrap items-center gap-3">
+          {/* Pause button */}
+          {confirmAction === 'pause' ? (
+            <div className="flex items-center gap-2">
+              <span className="text-sm text-zinc-400">Are you sure?</span>
               <button
                 onClick={handlePause}
                 disabled={pauseLoading}
-                className="rounded-lg bg-red-500/20 px-4 py-2 text-sm font-medium text-red-400 border border-red-500/30 transition-colors hover:bg-red-500/30 hover:text-red-300 disabled:opacity-50 disabled:cursor-not-allowed"
+                className="rounded-lg bg-red-500 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-red-600 disabled:opacity-50 disabled:cursor-not-allowed"
               >
-                {pauseLoading ? 'Sending...' : 'Pause Bot'}
+                {pauseLoading ? 'Sending...' : 'Confirm Pause'}
               </button>
-            )}
-
-            {/* Resume button */}
-            <button
-              onClick={handleResume}
-              disabled={resumeLoading}
-              className="rounded-lg bg-emerald-500/20 px-4 py-2 text-sm font-medium text-emerald-400 border border-emerald-500/30 transition-colors hover:bg-emerald-500/30 hover:text-emerald-300 disabled:opacity-50 disabled:cursor-not-allowed"
-            >
-              {resumeLoading ? 'Sending...' : 'Resume Bot'}
-            </button>
-          </div>
-
-          {/* Divider */}
-          <hr className="border-zinc-800" />
-
-          {/* Force strategy section */}
-          <div>
-            <h3 className="text-sm font-medium text-zinc-300 mb-3">
-              Force Strategy
-            </h3>
-
-            <div className="flex flex-wrap items-center gap-3">
-              <select
-                value={selectedStrategy}
-                onChange={(e) =>
-                  setSelectedStrategy(e.target.value as Strategy)
-                }
-                className="h-10 rounded-lg border border-zinc-700 bg-zinc-800 px-3 text-sm text-zinc-200 outline-none focus:border-zinc-500"
+              <button
+                onClick={cancelConfirm}
+                className="rounded-lg border border-zinc-700 bg-zinc-800 px-4 py-2 text-sm font-medium text-zinc-300 transition-colors hover:bg-zinc-700"
               >
-                {STRATEGIES.map((s) => (
-                  <option key={s} value={s}>
-                    {s}
-                  </option>
-                ))}
-              </select>
-
-              {confirmAction === 'force' ? (
-                <div className="flex items-center gap-2">
-                  <span className="text-sm text-zinc-400">Are you sure?</span>
-                  <button
-                    onClick={handleForceStrategy}
-                    disabled={forceLoading}
-                    className="rounded-lg bg-amber-500 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-amber-600 disabled:opacity-50 disabled:cursor-not-allowed"
-                  >
-                    {forceLoading ? 'Sending...' : 'Confirm Force'}
-                  </button>
-                  <button
-                    onClick={cancelConfirm}
-                    className="rounded-lg border border-zinc-700 bg-zinc-800 px-4 py-2 text-sm font-medium text-zinc-300 transition-colors hover:bg-zinc-700"
-                  >
-                    Cancel
-                  </button>
-                </div>
-              ) : (
-                <button
-                  onClick={handleForceStrategy}
-                  disabled={forceLoading}
-                  className="rounded-lg bg-amber-500/20 px-4 py-2 text-sm font-medium text-amber-400 border border-amber-500/30 transition-colors hover:bg-amber-500/30 hover:text-amber-300 disabled:opacity-50 disabled:cursor-not-allowed"
-                >
-                  {forceLoading ? 'Sending...' : 'Force'}
-                </button>
-              )}
+                Cancel
+              </button>
             </div>
-          </div>
+          ) : (
+            <button
+              onClick={handlePause}
+              disabled={pauseLoading || isPaused}
+              className="rounded-lg bg-red-500/20 px-4 py-2 text-sm font-medium text-red-400 border border-red-500/30 transition-colors hover:bg-red-500/30 hover:text-red-300 disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              {pauseLoading ? 'Sending...' : 'Pause Bot'}
+            </button>
+          )}
+
+          {/* Resume button (normal — no force) */}
+          <button
+            onClick={handleResume}
+            disabled={resumeLoading || !isPaused}
+            className="rounded-lg bg-emerald-500/20 px-4 py-2 text-sm font-medium text-emerald-400 border border-emerald-500/30 transition-colors hover:bg-emerald-500/30 hover:text-emerald-300 disabled:opacity-50 disabled:cursor-not-allowed"
+          >
+            {resumeLoading ? 'Sending...' : 'Resume Bot'}
+          </button>
         </div>
       </div>
     </div>

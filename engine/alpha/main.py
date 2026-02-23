@@ -1039,7 +1039,8 @@ class AlphaBot:
                 result_msg = "Bot paused"
 
             elif command == "resume":
-                self.risk_manager.unpause()
+                force = bool(params.get("force", False))
+                self.risk_manager.unpause(force=force)
                 await self._analysis_cycle()  # re-evaluate and start strategies
                 # Restart scalp + options overlays
                 for pair, scalp in self._scalp_strategies.items():
@@ -1048,8 +1049,9 @@ class AlphaBot:
                 for pair, opts in self._options_strategies.items():
                     if not opts.is_active:
                         await opts.start()
-                await self.alerts.send_command_confirmation("resume")
-                result_msg = "Bot resumed"
+                label = "force_resume" if force else "resume"
+                await self.alerts.send_command_confirmation(label)
+                result_msg = "Bot force-resumed (win-rate bypass active)" if force else "Bot resumed"
 
             elif command == "force_strategy":
                 # Only scalp and options_scalp are active — force_strategy is a no-op

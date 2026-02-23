@@ -66,6 +66,7 @@ class RiskManager:
         self.trade_results: list[bool] = []  # True=win, False=loss (last N)
         self.is_paused = False
         self._pause_reason: str = ""
+        self._force_resumed = False  # bypass win-rate breaker until next win
 
     def update_exchange_balances(self, binance: float | None, delta: float | None) -> None:
         """Update per-exchange capital from live balance fetches."""
@@ -236,8 +237,8 @@ class RiskManager:
             self._pause("daily loss limit reached (%.1f%%)" % self.daily_loss_pct)
             return False
 
-        # 2. Win-rate circuit breaker
-        if len(self.trade_results) >= 20 and self.win_rate < 40:
+        # 2. Win-rate circuit breaker (skipped after force resume)
+        if len(self.trade_results) >= 20 and self.win_rate < 40 and not self._force_resumed:
             self._pause("win rate too low (%.1f%% over last 20 trades)" % self.win_rate)
             return False
 
@@ -345,7 +346,12 @@ class RiskManager:
         else:
             self.daily_pnl_scalp += pnl
         self.daily_pnl_by_pair[pair] = self.daily_pnl_by_pair.get(pair, 0.0) + pnl
-        self.trade_results.append(pnl >= 0)
+        is_win = pnl >= 0
+        self.trade_results.append(is_win)
+        # Clear force-resume bypass after a winning trade
+        if is_win and self._force_resumed:
+            self._force_resumed = False
+            logger.info("Force-resume bypass cleared after winning trade (win_rate=%.1f%%)", self.win_rate)
         # Remove first matching position for this pair
         new_positions: list[Position] = []
         removed = False
@@ -400,11 +406,20 @@ class RiskManager:
 
     # -- Pause control ---------------------------------------------------------
 
-    def unpause(self) -> None:
-        """Manually unpause the bot."""
+    def unpause(self, force: bool = False) -> None:
+        """Manually unpause the bot.
+
+        If force=True, also bypass the win-rate circuit breaker so the bot
+        doesn't immediately re-pause on the next entry check. The bypass
+        auto-clears after a winning trade proves conditions have improved.
+        """
         self.is_paused = False
         self._pause_reason = ""
-        logger.info("Bot manually unpaused")
+        if force:
+            self._force_resumed = True
+            logger.info("Bot FORCE resumed — win-rate breaker bypassed until next win")
+        else:
+            logger.info("Bot manually unpaused")
 
     def _pause(self, reason: str) -> None:
         self.is_paused = True
