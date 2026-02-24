@@ -65,8 +65,8 @@ ENTRY — TWO-TIER SIGNAL SYSTEM:
     - 30s timeout → T1_TIMEOUT (zero cost)
   DYNAMIC LEVERAGE (per-trade based on conviction):
     - ULTRA 50x: 4/4 signals + momentum >= 0.40% + RSI extreme (<30 or >70)
-    - HIGH 20x: 4/4 + momentum >= 0.30% OR 3/4 + RSI override
-    - STANDARD 10x: all other valid entries
+    - HIGH 30x: 4/4 + momentum >= 0.30% OR 3/4 + RSI override
+    - STANDARD 20x: all other valid entries (minimum)
   OVERRIDE: RSI < 30 or > 70 → enter immediately (strong extreme)
   SETUP: Each entry classified by dominant signal pattern
 
@@ -1943,9 +1943,9 @@ class ScalpStrategy(BaseStrategy):
         """Dynamic leverage based on signal conviction.
 
         ULTRA (50x): 4/4 signals + momentum >= 0.40% + RSI extreme (<30 or >70)
-        HIGH  (20x): 4/4 signals + momentum >= 0.30%
+        HIGH  (30x): 4/4 signals + momentum >= 0.30%
                       OR 3/4 signals + RSI override (<30 or >70)
-        STANDARD (10x): everything else that passes entry gate
+        STANDARD (20x): everything else that passes entry gate (minimum)
         """
         if not self.is_futures:
             return 1
@@ -1954,9 +1954,9 @@ class ScalpStrategy(BaseStrategy):
         if signal_count >= 4 and abs_mom >= 0.40 and rsi_extreme:
             return 50
         elif (signal_count >= 4 and abs_mom >= 0.30) or (signal_count >= 3 and rsi_extreme):
-            return 20
+            return 30
         else:
-            return 10
+            return 20
 
     # ======================================================================
     # EXIT LOGIC — RIDE WINNERS, CUT LOSERS

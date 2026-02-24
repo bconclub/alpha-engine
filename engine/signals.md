@@ -147,11 +147,11 @@ Leverage is calculated **per-trade** based on signal conviction, not hardcoded. 
 | Tier | Leverage | Conditions | Capital Risk at 0.30% SL |
 |------|----------|------------|--------------------------|
 | **ULTRA** | **50x** | 4/4 signals + momentum >= 0.40% + RSI extreme (<30 or >70) | 15.0% |
-| **HIGH** | **20x** | 4/4 signals + momentum >= 0.30% **OR** 3/4 signals + RSI override | 6.0% |
-| **STANDARD** | **10x** | All other valid entries (3/4 signals, moderate momentum) | 3.0% |
+| **HIGH** | **30x** | 4/4 signals + momentum >= 0.30% **OR** 3/4 signals + RSI override | 9.0% |
+| **STANDARD** | **20x** | All other valid entries (minimum leverage) | 6.0% |
 
 - Same dollar allocation, different leverage = different notional exposure
-- Leverage tag appended to reason string: `LEV:50x`, `LEV:20x`, `LEV:10x`
+- Leverage tag appended to reason string: `LEV:50x`, `LEV:30x`, `LEV:20x`
 - Stored in metadata (`leverage_tier`) for dashboard analysis
 - SL distances unchanged — same per-pair floors/caps regardless of leverage
 
@@ -549,7 +549,7 @@ When the bot decides NOT to enter, the reason is tracked and shown on the dashbo
 | T1 pending timeout | 30s (no order placed, zero cost) | same |
 | Momentum direction | must match signal direction (momentum path) | same |
 | Tier1 direction | from order flow (BB + EMA + RSI approach) | same |
-| Leverage | Dynamic: 10x/20x/50x by conviction (cap 50x) | 1x |
+| Leverage | Dynamic: 20x/30x/50x by conviction (min 20x, cap 50x) | 1x |
 | SL distance (BTC) | 0.30% floor, 0.50% cap | 2.0% floor, 3.0% cap |
 | SL distance (ETH) | 0.35% floor, 0.50% cap | — |
 | SL distance (XRP/SOL) | 0.40% floor, 0.60% cap | — |
