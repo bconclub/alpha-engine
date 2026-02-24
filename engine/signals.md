@@ -1,4 +1,4 @@
-**Last updated: v3.21.1 — 2026-02-24**
+**Last updated: v3.21.2 — 2026-02-24**
 
 # Alpha Trade Signals — Complete Reference
 
@@ -127,6 +127,11 @@ MOMENTUM PATH:
   Weak mom:    4/4 signals required (momentum 0.08-0.12%)
   2nd pos:     3/4+ signal strength, 60% reduced allocation
   Post-streak: 3/4 signal strength (first trade after 3 consecutive losses)
+  Dir low WR:  4/4 signals required if direction win rate < 30% over last 5
+
+ALL ENTRIES (momentum + tier1):
+  Stale momentum: 10s real-time momentum must be >= 0.05% in entry direction
+    (prevents entering after the move is already over — 60s mom is lagging)
 
 TIER 1 PATH (no momentum needed):
   2+ T1 signals:     enter with confirmation window (needs momentum confirm in 30s)
@@ -433,6 +438,8 @@ SCANNING (every 5s)
   |
   +-- Entry signal? (from momentum path OR confirmed T1)
   |     |
+  |     +-- Stale momentum check: 10s momentum >= 0.05% in direction?
+  |     |     +-- NO -> STALE_MOMENTUM skip (move is over)
   |     +-- Dynamic leverage: ULTRA 50x / HIGH 20x / STANDARD 10x
   |     +-- Setup type classification (first-match priority, no fallthrough)
   |     +-- Setup disabled via dashboard? -> skip
@@ -522,6 +529,7 @@ When the bot decides NOT to enter, the reason is tracked and shown on the dashbo
 | `SPREAD_TOO_WIDE` | Bid-ask spread exceeds max |
 | `PHANTOM_COOLDOWN` | Within 60s after phantom position cleared |
 | `SURVIVAL_MODE` | Balance < $20, allocation capped at 30% |
+| `STALE_MOMENTUM` | 60s momentum passed but 10s momentum < 0.05% — move already over |
 | `T1_PENDING` | Tier 1 signals detected, waiting for momentum confirmation (no order placed) |
 | `T1_TIMEOUT` | Pending T1 not confirmed within 30s (zero cost, no order was placed) |
 | `T1_REJECTED` | Pending T1 rejected — counter-momentum 0.15%+ against direction (zero cost) |
@@ -576,4 +584,5 @@ When the bot decides NOT to enter, the reason is tracked and shown on the dashbo
 | RSI approach | 32-38 long / 62-68 short (tier1 path) | same |
 | Volume min (T2) | 0.8x average | same |
 | Volume anticipation (T1) | 1.5x with mom < 0.10% | same |
+| Stale momentum (10s check) | 0.05% in entry direction over last 10s | same |
 | Mixed RT fee | 0.083% | ~0.20% |

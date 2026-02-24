@@ -309,6 +309,10 @@ class ScalpStrategy(BaseStrategy):
     SURVIVAL_MAX_ALLOC = 30.0         # max alloc % in survival mode
     MAX_SL_LOSS_PCT = 5.0             # max SL loss = 5% of TOTAL balance (not collateral)
 
+    # ── STALE MOMENTUM FILTER ────────────────────────────────────
+    STALE_MOM_LOOKBACK_S = 10         # look back 10 seconds for recent momentum
+    STALE_MOM_MIN_PCT = 0.05          # need 0.05% move in last 10s in our direction
+
     # ── Binance SPOT overrides — wider SL/TP/trail for no-leverage spot ──
     SPOT_SL_PCT = 2.0                 # 2% SL for spot (no leverage, needs room)
     SPOT_TP_PCT = 3.0                 # 3% TP for spot
@@ -431,6 +435,7 @@ class ScalpStrategy(BaseStrategy):
             self._tp_pct = self.PAIR_TP_FLOOR.get(base_asset, self.MIN_TP_PCT)
         self._last_atr_pct: float = 0.0  # last computed 1m ATR as % of price
         self._atr_history: deque[float] = deque(maxlen=60)  # rolling ~1hr of ATR samples
+        self._price_history: deque[tuple[float, float]] = deque(maxlen=120)  # (monotonic_time, price) for 10s momentum
         self._high_vol: bool = False  # True when ATR > 1.5x normal
 
         # ── Market regime detection ──────────────────────────────────────
@@ -957,6 +962,9 @@ class ScalpStrategy(BaseStrategy):
         self._prev_rsi = rsi_now
         self._skip_reason = ""  # reset each tick — set if we skip
 
+        # Record price for 10s stale momentum check
+        self._price_history.append((time.monotonic(), current_price))
+
         # Check position limits
         if self.risk_manager.has_position(self.pair):
             self._skip_reason = "ALREADY_IN_POSITION"
@@ -1160,6 +1168,42 @@ class ScalpStrategy(BaseStrategy):
                 "timestamp": time.monotonic(),
                 **self._last_signal_breakdown,
             }
+
+            # ── STALE MOMENTUM: 60s momentum OK but is the move still happening? ──
+            # Look back 10s in real-time price feed — if move has stalled, skip entry
+            momentum_10s = 0.0
+            if len(self._price_history) >= 2:
+                target_time = now - self.STALE_MOM_LOOKBACK_S
+                price_10s_ago = None
+                for ts, px in self._price_history:
+                    if ts <= target_time:
+                        price_10s_ago = px
+                    else:
+                        break  # deque is chronological, first entry past target = done
+                if price_10s_ago is not None and price_10s_ago > 0:
+                    momentum_10s = (current_price - price_10s_ago) / price_10s_ago * 100
+
+            stale = False
+            if side == "long" and momentum_10s < self.STALE_MOM_MIN_PCT:
+                stale = True
+            elif side == "short" and momentum_10s > -self.STALE_MOM_MIN_PCT:
+                stale = True
+
+            if stale:
+                self._skip_reason = f"STALE_MOMENTUM (10s={momentum_10s:+.3f}%, need {'+' if side == 'long' else '-'}{self.STALE_MOM_MIN_PCT:.2f}%)"
+                self.logger.info(
+                    "[%s] STALE_MOMENTUM — 60s mom=%+.3f%% OK but 10s=%+.3f%% (move is over), skipping %s",
+                    self.pair, momentum_60s, momentum_10s, side,
+                )
+                self.last_signal_state = {
+                    "side": side, "reason": reason,
+                    "strength": signal_strength, "trend_15m": trend_15m,
+                    "rsi": rsi_now, "momentum_60s": momentum_60s,
+                    "current_price": current_price, "timestamp": time.monotonic(),
+                    "skip_reason": self._skip_reason,
+                    **self._last_signal_breakdown,
+                }
+                return signals
 
             # ── REVERSAL COOLDOWN: block ALL directions on pair after reversal exit ──
             rev_time = ScalpStrategy._pair_last_reversal_time.get(self._base_asset, 0.0)
