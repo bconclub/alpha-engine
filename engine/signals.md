@@ -1,4 +1,4 @@
-**Last updated: v3.21.0 — 2026-02-24**
+**Last updated: v3.21.1 — 2026-02-24**
 
 # Alpha Trade Signals — Complete Reference
 
@@ -514,7 +514,9 @@ When the bot decides NOT to enter, the reason is tracked and shown on the dashbo
 | `POSITION_SIZE_ZERO` | Sizing returned zero |
 | `WEAK_COUNTER_TREND` | Weak momentum against 15m trend |
 | `REGIME_CHOPPY` | Choppy market regime blocks entries |
-| `REVERSAL_COOLDOWN` | Within 3m cooldown after reversal exit (same direction) |
+| `REVERSAL_COOLDOWN` | Within 2m cooldown after reversal exit (ALL directions on pair) |
+| `DIR_LOW_WR` | Per-direction win rate < 30% over last 5 trades → needs 4/4 signals |
+| `RISK_CAP` | Contracts capped so max SL loss doesn't exceed 5% of total balance |
 | `STREAK_PAUSE` | 3 consecutive losses on this pair |
 | `LOW_BALANCE` | Balance below minimum |
 | `SPREAD_TOO_WIDE` | Bid-ask spread exceeds max |
@@ -565,8 +567,11 @@ When the bot decides NOT to enter, the reason is tracked and shown on the dashbo
 | Tier1 sizing (2 T1) | 60% of base | same |
 | Tier1 sizing (1 T1+2 T2) | 40% of base | same |
 | Survival mode | balance < $20 → cap 30% | same |
+| Max SL loss (risk cap) | 5% of total balance → contracts capped accordingly | N/A |
 | Big size gate | >50 contracts → 4/4 signals | N/A |
 | Large pos gate | Per-pair threshold → 0.12% momentum | N/A |
+| Direction low WR gate | <30% WR over last 5 trades in direction → 4/4 required | same |
+| Reversal cooldown | 2 min ALL directions on pair after REVERSAL exit | same |
 | RSI override | < 30 or > 70 (momentum path only) | same |
 | RSI approach | 32-38 long / 62-68 short (tier1 path) | same |
 | Volume min (T2) | 0.8x average | same |

@@ -307,6 +307,7 @@ class ScalpStrategy(BaseStrategy):
     TIER1_SIZE_1_MULT = 0.40          # 1 T1 + 2 T2 → 40%
     SURVIVAL_BALANCE = 20.0           # below this, cap allocation
     SURVIVAL_MAX_ALLOC = 30.0         # max alloc % in survival mode
+    MAX_SL_LOSS_PCT = 5.0             # max SL loss = 5% of TOTAL balance (not collateral)
 
     # ── Binance SPOT overrides — wider SL/TP/trail for no-leverage spot ──
     SPOT_SL_PCT = 2.0                 # 2% SL for spot (no leverage, needs room)
@@ -370,11 +371,13 @@ class ScalpStrategy(BaseStrategy):
 
     # ── Cooldown / loss protection (PER-PAIR: BTC streak doesn't affect XRP) ─
     SL_COOLDOWN_SECONDS = 2 * 60       # 2 min pause after SL hit (per pair)
-    REVERSAL_COOLDOWN_SECONDS = 3 * 60 # 3 min pause after REVERSAL exit (same direction only)
+    REVERSAL_COOLDOWN_SECONDS = 2 * 60 # 2 min pause after REVERSAL exit (ALL directions on pair)
     CONSECUTIVE_LOSS_LIMIT = 3          # after 3 consecutive losses on same pair...
     STREAK_PAUSE_SECONDS = 5 * 60      # ...pause that pair for 5 min
     POST_STREAK_STRENGTH = 3            # first trade after streak pause needs 3/4
     MIN_STRENGTH_FOR_2ND = 3            # 2nd position needs 3/4+ signal strength
+    DIR_LOW_WR_THRESHOLD = 0.30         # <30% WR for direction on pair → require 4/4
+    DIR_LOW_WR_MIN_STRENGTH = 4         # signal strength required when direction is losing
 
     # ── Rate limiting / risk ──────────────────────────────────────────────
     MAX_TRADES_PER_HOUR = 10          # keep trading aggressively
@@ -383,6 +386,7 @@ class ScalpStrategy(BaseStrategy):
     # ── Class-level shared state ──────────────────────────────────────────
     _live_pnl: dict[str, float] = {}           # pair → current unrealized P&L % (updated every tick)
     _pair_trade_history: dict[str, list[bool]] = {}  # base_asset → list of win/loss booleans (last N)
+    _pair_dir_trade_history: dict[str, list[bool]] = {}  # "base_asset:long" → last N win/loss for that direction
     # ── Per-pair streak/cooldown (BTC losses don't pause XRP) ────────────
     _pair_last_sl_time: dict[str, float] = {}            # base_asset → monotonic time of last SL
     _pair_consecutive_losses: dict[str, int] = {}        # base_asset → streak count
@@ -1157,29 +1161,58 @@ class ScalpStrategy(BaseStrategy):
                 **self._last_signal_breakdown,
             }
 
-            # ── REVERSAL COOLDOWN: don't re-enter same direction after reversal exit ──
+            # ── REVERSAL COOLDOWN: block ALL directions on pair after reversal exit ──
             rev_time = ScalpStrategy._pair_last_reversal_time.get(self._base_asset, 0.0)
             rev_remaining = rev_time + self.REVERSAL_COOLDOWN_SECONDS - now
             if rev_remaining > 0:
                 rev_side = ScalpStrategy._pair_last_reversal_side.get(self._base_asset, "")
-                if side == rev_side:
-                    self._skip_reason = f"REVERSAL_COOLDOWN ({int(rev_remaining)}s, was {rev_side})"
-                    if self._tick_count % 12 == 0:
-                        self.logger.info(
-                            "[%s] REVERSAL COOLDOWN — exited %s %ds ago, blocking same-dir re-entry for %ds",
-                            self.pair, rev_side,
-                            int(self.REVERSAL_COOLDOWN_SECONDS - rev_remaining),
-                            int(rev_remaining),
+                self._skip_reason = f"REVERSAL_COOLDOWN ({int(rev_remaining)}s, was {rev_side})"
+                if self._tick_count % 12 == 0:
+                    self.logger.info(
+                        "[%s] REVERSAL COOLDOWN — exited %s %ds ago, blocking ALL re-entry for %ds",
+                        self.pair, rev_side,
+                        int(self.REVERSAL_COOLDOWN_SECONDS - rev_remaining),
+                        int(rev_remaining),
+                    )
+                self.last_signal_state = {
+                    "side": side, "reason": reason,
+                    "strength": signal_strength, "trend_15m": trend_15m,
+                    "rsi": rsi_now, "momentum_60s": momentum_60s,
+                    "current_price": current_price, "timestamp": time.monotonic(),
+                    "skip_reason": self._skip_reason,
+                    **self._last_signal_breakdown,
+                }
+                return signals
+
+            # ── PER-DIRECTION WIN RATE GATE: losing direction needs 4/4 ──
+            dir_key = f"{self._base_asset}:{side}"
+            dir_history = ScalpStrategy._pair_dir_trade_history.get(dir_key, [])
+            dir_losing = False
+            if len(dir_history) >= self.PERF_WINDOW:
+                dir_wr = sum(dir_history) / len(dir_history)
+                if dir_wr < self.DIR_LOW_WR_THRESHOLD:
+                    dir_losing = True
+                    if signal_strength < self.DIR_LOW_WR_MIN_STRENGTH:
+                        self._skip_reason = (
+                            f"DIR_LOW_WR ({side} WR={dir_wr:.0%} < {self.DIR_LOW_WR_THRESHOLD:.0%} "
+                            f"over last {len(dir_history)}, needs {self.DIR_LOW_WR_MIN_STRENGTH}/4 got {signal_strength}/4)"
                         )
-                    self.last_signal_state = {
-                        "side": side, "reason": reason,
-                        "strength": signal_strength, "trend_15m": trend_15m,
-                        "rsi": rsi_now, "momentum_60s": momentum_60s,
-                        "current_price": current_price, "timestamp": time.monotonic(),
-                        "skip_reason": self._skip_reason,
-                        **self._last_signal_breakdown,
-                    }
-                    return signals
+                        if self._tick_count % 12 == 0:
+                            self.logger.info(
+                                "[%s] DIR_LOW_WR — %s win rate %.0f%% < %.0f%% over last %d trades, "
+                                "needs %d/4 but got %d/4, skipping",
+                                self.pair, side, dir_wr * 100, self.DIR_LOW_WR_THRESHOLD * 100,
+                                len(dir_history), self.DIR_LOW_WR_MIN_STRENGTH, signal_strength,
+                            )
+                        self.last_signal_state = {
+                            "side": side, "reason": reason,
+                            "strength": signal_strength, "trend_15m": trend_15m,
+                            "rsi": rsi_now, "momentum_60s": momentum_60s,
+                            "current_price": current_price, "timestamp": time.monotonic(),
+                            "skip_reason": self._skip_reason,
+                            **self._last_signal_breakdown,
+                        }
+                        return signals
 
             # ── PER-PAIR STRENGTH GATE: weak pairs need stronger signals ──
             # During warmup (first 5 min), accept 2/4 for all pairs incl BTC
@@ -2661,6 +2694,20 @@ class ScalpStrategy(BaseStrategy):
                 )
                 return None
 
+            # 9. Risk cap: max SL loss must not exceed MAX_SL_LOSS_PCT of total balance
+            # Work backwards: max_notional = max_loss_usd / (sl_pct / 100)
+            max_loss_usd = exchange_capital * (self.MAX_SL_LOSS_PCT / 100)
+            if self._sl_pct > 0:
+                max_notional = max_loss_usd / (self._sl_pct / 100)
+                max_contracts = int(max_notional / contract_value)
+                if contracts > max_contracts >= 1:
+                    self.logger.info(
+                        "RISK_CAP: %s %d→%d contracts (max SL loss $%.2f = %.0f%% of $%.2f at %.2f%% SL, %dx)",
+                        self.pair, contracts, max_contracts, max_loss_usd,
+                        self.MAX_SL_LOSS_PCT, exchange_capital, self._sl_pct, self._trade_leverage,
+                    )
+                    contracts = max_contracts
+
             total_collateral = contracts * contract_value / self._trade_leverage
             amount = contracts * contract_size
 
@@ -3138,6 +3185,15 @@ class ScalpStrategy(BaseStrategy):
             ScalpStrategy._pair_trade_history[self._base_asset] = \
                 ScalpStrategy._pair_trade_history[self._base_asset][-self.PERF_WINDOW:]
 
+        # Track per-pair PER-DIRECTION win/loss history
+        dir_key = f"{self._base_asset}:{self.position_side or 'long'}"
+        if dir_key not in ScalpStrategy._pair_dir_trade_history:
+            ScalpStrategy._pair_dir_trade_history[dir_key] = []
+        ScalpStrategy._pair_dir_trade_history[dir_key].append(is_win)
+        if len(ScalpStrategy._pair_dir_trade_history[dir_key]) > self.PERF_WINDOW:
+            ScalpStrategy._pair_dir_trade_history[dir_key] = \
+                ScalpStrategy._pair_dir_trade_history[dir_key][-self.PERF_WINDOW:]
+
         if pnl_pct >= 0:
             self.hourly_wins += 1
             # Win resets consecutive loss streak for THIS PAIR
@@ -3168,14 +3224,14 @@ class ScalpStrategy(BaseStrategy):
                     self._base_asset, self.STREAK_PAUSE_SECONDS,
                 )
 
-        # Reversal cooldown: block same-direction re-entry for 3 min (move is dead)
+        # Reversal cooldown: block ALL re-entry on pair for 2 min (move is dead)
         if exit_type.upper() == "REVERSAL":
             exited_side = self.position_side or "long"
             ScalpStrategy._pair_last_reversal_time[self._base_asset] = now
             ScalpStrategy._pair_last_reversal_side[self._base_asset] = exited_side
             self.logger.info(
-                "[%s] REVERSAL COOLDOWN SET — no %s re-entry on %s for %ds",
-                self.pair, exited_side, self._base_asset, self.REVERSAL_COOLDOWN_SECONDS,
+                "[%s] REVERSAL COOLDOWN SET — no re-entry on %s for %ds (was %s)",
+                self.pair, self._base_asset, self.REVERSAL_COOLDOWN_SECONDS, exited_side,
             )
 
         hold_sec = int(now - self.entry_time)
