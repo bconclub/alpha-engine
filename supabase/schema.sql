@@ -55,7 +55,8 @@ create table if not exists public.trades (
     order_id      text,                                -- ccxt order id
 
     -- Setup tracking (v6.2)
-    setup_type    text,                                -- entry setup classification (VWAP_RECLAIM, MOMENTUM_BURST, etc.)
+    setup_type    text,                                -- PRIMARY setup classification (VWAP_RECLAIM, MOMENTUM_BURST, etc.)
+    signals_fired text,                                -- all signal tags that fired (e.g. "MOM:+0.35% VOL:2.3x RSI:28<40")
 
     -- Live position state (written by bot every ~10s while position is open)
     position_state  text,                              -- 'holding' or 'trailing'

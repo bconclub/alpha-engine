@@ -1063,6 +1063,7 @@ class TradeExecutor:
                 "leverage": signal.leverage,
                 "position_type": signal.position_type,
                 "setup_type": signal.metadata.get("setup_type", "unknown"),
+                "signals_fired": signal.metadata.get("signals_fired"),
                 "entry_fee": entry_fee,
             }
             # Store SL/TP prices (from signal or metadata) for dashboard display

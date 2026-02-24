@@ -81,6 +81,7 @@ EXIT — 3-PHASE SYSTEM (AGGRESSIVE PROFIT LOCK):
 from __future__ import annotations
 
 import asyncio
+import re
 import time
 from collections import deque
 from datetime import datetime, timezone, timedelta
@@ -2387,82 +2388,82 @@ class ScalpStrategy(BaseStrategy):
 
     @staticmethod
     def _classify_setups(reason: str) -> list[str]:
-        """Classify entry into ALL matching setup types, ordered by priority.
+        """Classify entry into its PRIMARY setup type.
 
-        Returns a list of setup names from highest to lowest priority.
-        The caller picks the first enabled one.  Priority order:
-          1. MULTI_SIGNAL  (4+ signals)
-          2. VWAP_RECLAIM  (VWAP tag present)
+        Returns a list with the primary setup type first.  The caller checks
+        ONLY the first entry against the dashboard toggle — no fallthrough.
+        Priority order (pick the FIRST match):
+          1. RSI_OVERRIDE   (RSI < 30 or > 70)
+          2. BB_SQUEEZE     (BBSQZ tag)
           3. MOMENTUM_BURST (MOM + VOL)
-          4. BB_SQUEEZE    (BBSQZ tag)
-          5. MEAN_REVERT   (BB + RSI)
-          6. LIQ_SWEEP     (LIQSWEEP tag)
-          7. FVG_FILL      (FVG tag)
-          8. VOL_DIVERGENCE (VOLDIV tag)
-          9. TREND_CONT    (TCONT tag)
-         10. RSI_OVERRIDE  (RSI-OVERRIDE tag)
-         11. MIXED         (always-present fallback)
+          4. MEAN_REVERT    (BB + RSI)
+          5. TREND_CONT     (TCONT tag)
+          6. VWAP_RECLAIM   (VWAP tag)
+          7. LIQ_SWEEP      (LIQSWEEP tag)
+          8. FVG_FILL       (FVG tag)
+          9. VOL_DIVERGENCE (VOLDIV tag)
+         10. MULTI_SIGNAL   (none of above matched — true catch-all)
+         11. MIXED          (final fallback)
         """
         r = reason.upper()
-        matches: list[str] = []
 
         has_mom = "MOM:" in r or "MOM5M:" in r
         has_vol = "VOL:" in r
         has_rsi = "RSI:" in r
         has_bb = "BB:" in r
 
-        # Count total distinct signal tags
+        # Priority 1: RSI_OVERRIDE — RSI extreme (< 30 or > 70)
+        if has_rsi:
+            rsi_match = re.search(r"RSI:(\d+)", r)
+            if rsi_match:
+                rsi_val = int(rsi_match.group(1))
+                if rsi_val < 30 or rsi_val > 70:
+                    return ["RSI_OVERRIDE"]
+
+        # Priority 2: BB_SQUEEZE
+        if "BBSQZ:" in r:
+            return ["BB_SQUEEZE"]
+
+        # Priority 3: MOMENTUM_BURST
+        if has_mom and has_vol:
+            return ["MOMENTUM_BURST"]
+
+        # Priority 4: MEAN_REVERT
+        if has_bb and has_rsi:
+            return ["MEAN_REVERT"]
+
+        # Priority 5: TREND_CONT
+        if "TCONT:" in r:
+            return ["TREND_CONT"]
+
+        # Priority 6: VWAP_RECLAIM
+        if "VWAP:" in r:
+            return ["VWAP_RECLAIM"]
+
+        # Priority 7: LIQ_SWEEP
+        if "LIQSWEEP:" in r:
+            return ["LIQ_SWEEP"]
+
+        # Priority 8: FVG_FILL
+        if "FVG:" in r:
+            return ["FVG_FILL"]
+
+        # Priority 9: VOL_DIVERGENCE
+        if "VOLDIV:" in r:
+            return ["VOL_DIVERGENCE"]
+
+        # Priority 10: MULTI_SIGNAL — none of the above matched
+        # Only when 4+ distinct signals fired but no recognized pattern
         signal_count = sum([
             has_mom, has_vol, has_rsi, has_bb,
             "VWAP:" in r, "TCONT:" in r, "BBSQZ:" in r,
             "LIQSWEEP:" in r, "FVG:" in r, "VOLDIV:" in r,
-            "MOM5M:" in r.replace("MOM:", ""),
         ])
-
-        # Priority 1: MULTI_SIGNAL — 4+ distinct signal tags
         if signal_count >= 4:
-            matches.append("MULTI_SIGNAL")
+            return ["MULTI_SIGNAL"]
 
-        # Priority 2: VWAP_RECLAIM
-        if "VWAP:" in r:
-            matches.append("VWAP_RECLAIM")
-
-        # Priority 3: MOMENTUM_BURST
-        if has_mom and has_vol:
-            matches.append("MOMENTUM_BURST")
-
-        # Priority 4: BB_SQUEEZE
-        if "BBSQZ:" in r:
-            matches.append("BB_SQUEEZE")
-
-        # Priority 5: MEAN_REVERT
-        if has_bb and has_rsi:
-            matches.append("MEAN_REVERT")
-
-        # Priority 6: LIQ_SWEEP
-        if "LIQSWEEP:" in r:
-            matches.append("LIQ_SWEEP")
-
-        # Priority 7: FVG_FILL
-        if "FVG:" in r:
-            matches.append("FVG_FILL")
-
-        # Priority 8: VOL_DIVERGENCE
-        if "VOLDIV:" in r:
-            matches.append("VOL_DIVERGENCE")
-
-        # Priority 9: TREND_CONT
-        if "TCONT:" in r:
-            matches.append("TREND_CONT")
-
-        # Priority 10: RSI_OVERRIDE
-        if "RSI-OVERRIDE" in r:
-            matches.append("RSI_OVERRIDE")
-
-        # Priority 11: MIXED (always present as fallback)
-        matches.append("MIXED")
-
-        return matches
+        # Priority 11: MIXED — final fallback
+        return ["MIXED"]
 
     # ======================================================================
     # SIGNAL STATE WRITE (for dashboard Signal Monitor)
@@ -2607,36 +2608,24 @@ class ScalpStrategy(BaseStrategy):
     ) -> Signal | None:
         """Build an entry signal with ATR-dynamic SL. Trail handles the TP."""
         candidates = self._classify_setups(reason)
+        setup_type = candidates[0]  # primary classification — no fallthrough
 
-        # ── Pick the highest-priority ENABLED setup ──────
-        # Walk the priority list; skip any setup disabled via dashboard toggle.
-        # Only block if ALL matching setups are disabled.
-        setup_type: str | None = None
-        disabled_list: list[str] = []
-        for candidate in candidates:
-            if self._setup_config.get(candidate, True):
-                setup_type = candidate
-                break
-            disabled_list.append(candidate)
-
-        if setup_type is None:
+        # ── Check if primary setup is enabled via dashboard toggle ──────
+        if not self._setup_config.get(setup_type, True):
             self.logger.info(
-                "[%s] SETUP_DISABLED: all candidates %s — skipping entry",
-                self.pair, disabled_list,
+                "[%s] SETUP_DISABLED: %s — skipping entry",
+                self.pair, setup_type,
             )
             return None
-
-        if disabled_list:
-            self.logger.info(
-                "[%s] SETUP_FALLBACK: skipped %s → using %s",
-                self.pair, disabled_list, setup_type,
-            )
 
         self.logger.info(
             "[%s] %s -> %s entry (%s) SL=%.2f%% TP=%.2f%% ATR=%.3f%% setup=%s",
             self.pair, reason, side.upper(), order_type,
             self._sl_pct, self._tp_pct, self._last_atr_pct, setup_type,
         )
+
+        # signals_fired = raw reason string (all signal tags for analysis)
+        signals_fired = reason
 
         if side == "long":
             sl = price * (1 - self._sl_pct / 100)
@@ -2658,7 +2647,8 @@ class ScalpStrategy(BaseStrategy):
                           "tp_price": tp, "sl_price": sl,
                           "sl_pct": self._sl_pct, "tp_pct": self._tp_pct,
                           "atr_pct": self._last_atr_pct,
-                          "setup_type": setup_type},
+                          "setup_type": setup_type,
+                          "signals_fired": signals_fired},
             )
         else:  # short
             sl = price * (1 + self._sl_pct / 100)
@@ -2680,7 +2670,8 @@ class ScalpStrategy(BaseStrategy):
                           "tp_price": tp, "sl_price": sl,
                           "sl_pct": self._sl_pct, "tp_pct": self._tp_pct,
                           "atr_pct": self._last_atr_pct,
-                          "setup_type": setup_type},
+                          "setup_type": setup_type,
+                          "signals_fired": signals_fired},
             )
 
     def _exit_signal(self, price: float, side: str, reason: str, peak_pnl: float = 0.0) -> Signal:
