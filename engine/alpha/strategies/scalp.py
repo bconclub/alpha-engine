@@ -45,28 +45,25 @@ CHANGES FROM v5.6 (in v5.7):
   - Signal scan logging: every tick shows pass/fail per condition
   - Binance spot: custom SL/TP/trail (wider for no-leverage spot)
 
-ENTRY — 3-of-4 STRICT GATE with 11-signal arsenal:
-  Signals (up to 11, counted against N/4 threshold):
-  1. Momentum 60s: 0.08%+ move
-  2. Volume: 0.8x average spike
-  3. RSI: < 35 (long) or > 65 (short)
-  4. BB mean-reversion: price near band edge
-  5. Momentum 5m: 0.30%+ slow bleed
-  6. Trend continuation: new 15-candle extreme + volume
-  7. VWAP Reclaim: price above VWAP + 9 EMA > 21 EMA
-  8. BB Squeeze: BB inside Keltner Channel → breakout + volume
-  9. Liquidity Sweep: sweep swing H/L, reclaim + RSI divergence
-  10. FVG Fill: 3-candle imbalance gap + price retracing into gap
-  11. Volume Divergence: price vs volume trend divergence (hollow moves)
+ENTRY — TWO-TIER SIGNAL SYSTEM:
+  MOMENTUM PATH (existing): 3-of-4 signals + momentum gate → enter immediately
+  TIER 1 PATH (new): leading signals without momentum → enter early, confirm after
+  TIER 1 (leading/anticipatory — enter on these):
+    - Volume Anticipation: vol >= 1.5x with <0.10% momentum (institutions loading)
+    - BB Squeeze: BB inside Keltner Channel (volatility compression)
+    - RSI Approach: 32-38 or 62-68 (approaching reversal, not yet extreme)
+  TIER 2 (confirming — validate after entry):
+    - Momentum, Volume, RSI extreme, BB, Mom5m, Trend Cont, VWAP
+  Direction from order flow (not past momentum):
+    - Volume + BB position, Squeeze + EMA ribbon, RSI approach zones
   OVERRIDE: RSI < 30 or > 70 → enter immediately (strong extreme)
-  GATE: ALL pairs require 3/4+ signals (no 2/4 coin flips)
   SETUP: Each entry classified by dominant signal pattern
 
 EXIT — 3-PHASE SYSTEM (AGGRESSIVE PROFIT LOCK):
-  PHASE 1 (0-30s): HANDS OFF
-    - ONLY exit on hard SL (-0.35% for ETH, -0.40% for XRP, -0.30% for BTC)
+  PHASE 1 (0-30s): CONFIRMATION WINDOW (tier1) / HANDS OFF (momentum)
+    - Tier1: actively check momentum confirmation, exit UNCONFIRMED if none
+    - Momentum: standard hands-off, only hard SL
     - EXCEPTION: if peak PnL >= +0.5%, skip to Phase 2 immediately
-    - 30s is enough for fill bounce to settle, SL still protects us
   PHASE 2 (30s-10 min): WATCH + TRAIL
     - If PnL > +0.30% → breakeven at entry+fees (net breakeven protection)
     - If PnL > +0.15% → activate trailing (0.15% tight distance)
@@ -282,6 +279,25 @@ class ScalpStrategy(BaseStrategy):
     RSI_OVERRIDE_LONG = 30            # RSI < 30 = strong oversold → long immediately
     RSI_OVERRIDE_SHORT = 70           # RSI > 70 = strong overbought → short immediately
 
+    # ── TIER 1 ANTICIPATORY ENTRY ──────────────────────────────────
+    # Leading signals: enter BEFORE momentum confirms, exit if unconfirmed
+    TIER1_VOL_RATIO = 1.5             # volume anticipation: 1.5x+ with <0.10% momentum
+    TIER1_VOL_MAX_MOM = 0.10          # max momentum for "volume without move" pattern
+    TIER1_RSI_APPROACH_LONG = (32, 38)  # approaching oversold (not yet extreme)
+    TIER1_RSI_APPROACH_SHORT = (62, 68) # approaching overbought (not yet extreme)
+    TIER1_MIN_SIGNALS = 2             # need 2+ T1 signals for anticipatory entry
+
+    # ── TIER 1 CONFIRMATION WINDOW ─────────────────────────────────
+    CONFIRM_MOM_PCT = 0.10            # momentum threshold for tier1 confirmation
+    CONFIRM_COUNTER_PCT = 0.15        # counter-momentum → immediate unconfirmed exit
+
+    # ── TIER-BASED POSITION SIZING ─────────────────────────────────
+    TIER1_SIZE_3_MULT = 1.0           # 3+ T1 signals → full size
+    TIER1_SIZE_2_MULT = 0.60          # 2 T1 signals → 60%
+    TIER1_SIZE_1_MULT = 0.40          # 1 T1 + 2 T2 → 40%
+    SURVIVAL_BALANCE = 20.0           # below this, cap allocation
+    SURVIVAL_MAX_ALLOC = 30.0         # max alloc % in survival mode
+
     # ── Binance SPOT overrides — wider SL/TP/trail for no-leverage spot ──
     SPOT_SL_PCT = 2.0                 # 2% SL for spot (no leverage, needs room)
     SPOT_TP_PCT = 3.0                 # 3% TP for spot
@@ -480,6 +496,12 @@ class ScalpStrategy(BaseStrategy):
 
         # BB Squeeze tracking (signal #8)
         self._squeeze_tick_count: int = 0
+
+        # ── Tier 1 anticipatory entry state ──────────────────────────
+        self._entry_path: str = "momentum"     # "momentum" or "tier1"
+        self._entry_confirmed: bool = True     # tier1 needs confirmation during Phase 1
+        self._tier1_count: int = 0             # tier1 signals at entry
+        self._tier2_count: int = 0             # tier2 signals at entry
 
         # Load soul on init
         _load_soul()
@@ -1138,8 +1160,9 @@ class ScalpStrategy(BaseStrategy):
 
             soul_msg = _soul_check("quality entry")
             self.logger.info(
-                "[%s] SIGNAL ENTRY — %s | strength=%d/4 | Soul: %s",
-                self.pair, reason, signal_strength, soul_msg,
+                "[%s] SIGNAL ENTRY — %s | strength=%d/4 | path=%s t1=%d t2=%d | Soul: %s",
+                self.pair, reason, signal_strength,
+                self._entry_path, self._tier1_count, self._tier2_count, soul_msg,
             )
             order_type = "limit" if use_limit else "market"
             entry_signal = self._build_entry_signal(side, current_price, amount, reason, order_type)
@@ -1285,6 +1308,10 @@ class ScalpStrategy(BaseStrategy):
         threshold is still expressed as N-of-4 scale (3/4).
         """
         can_short = self.is_futures and config.delta.enable_shorting
+        self._entry_path = "momentum"  # default; overridden to "tier1" in gate 0 fallthrough
+        self._entry_confirmed = True   # momentum entries are pre-confirmed; tier1 sets False
+        self._tier1_count = 0
+        self._tier2_count = 0
 
         # ── Get effective thresholds (may be widened, but SAME for both dirs) ─
         eff_mom, eff_vol, eff_rsi_l, eff_rsi_s = self._effective_thresholds(widened)
@@ -1512,12 +1539,23 @@ class ScalpStrategy(BaseStrategy):
             }
 
         # ══════════════════════════════════════════════════════════════
-        # GATE 0: MOMENTUM MUST FIRE — no momentum = no trade, period
-        # Signal breakdown is already computed above so dashboard shows
-        # what WOULD fire, but we block the actual entry here.
+        # GATE 0: NO MOMENTUM → try TIER 1 anticipatory entry
+        # Instead of blocking, fall through to tier 1 leading signals.
+        # Momentum becomes a TIER 2 confirming signal only.
         # ══════════════════════════════════════════════════════════════
         if below_gate:
             self._last_signal_breakdown = _build_breakdown()
+            # Try tier 1 anticipatory entry (leading signals, no momentum needed)
+            tier1_result = self._detect_tier1_entry(
+                price, rsi_now, vol_ratio, momentum_60s,
+                bb_upper, bb_lower, ema_9, ema_21,
+                kc_upper, kc_lower,
+                bull_signals, bear_signals, widened,
+            )
+            if tier1_result is not None:
+                self._entry_path = "tier1"
+                self._entry_confirmed = False  # needs confirmation during Phase 1
+                return tier1_result
             self._skip_reason = f"NO_MOMENTUM ({abs(momentum_60s):.3f}% < {eff_mom:.3f}%)"
             return None
 
@@ -1585,6 +1623,137 @@ class ScalpStrategy(BaseStrategy):
             )
 
         self._last_signal_breakdown = _build_breakdown()
+        return None
+
+    # ======================================================================
+    # TIER 1 ANTICIPATORY ENTRY — leading signals, direction from order flow
+    # ======================================================================
+
+    def _detect_tier1_entry(
+        self,
+        price: float,
+        rsi_now: float,
+        vol_ratio: float,
+        momentum_60s: float,
+        bb_upper: float,
+        bb_lower: float,
+        ema_9: float,
+        ema_21: float,
+        kc_upper: float,
+        kc_lower: float,
+        bull_signals: list[str],
+        bear_signals: list[str],
+        widened: bool = False,
+    ) -> tuple[str, str, bool, int] | None:
+        """Detect anticipatory entry from TIER 1 leading signals.
+
+        Called when GATE 0 blocks (no momentum) — looks for institutional
+        loading patterns that precede the move.
+
+        TIER 1 signals:
+        1. Volume Anticipation: vol >= 1.5x with |mom| < 0.10% (loading before move)
+        2. BB Squeeze: BB inside Keltner Channel (volatility compression)
+        3. RSI Approach: 32-38 (approaching oversold) or 62-68 (approaching overbought)
+
+        Direction from order flow (not past momentum):
+        - Volume + lower BB → LONG, Volume + upper BB → SHORT
+        - Squeeze + EMA9 > EMA21 → LONG, Squeeze + EMA9 < EMA21 → SHORT
+        - RSI 32-38 → LONG, RSI 62-68 → SHORT
+
+        Returns (side, reason, use_limit, signal_count) or None.
+        """
+        can_short = self.is_futures and config.delta.enable_shorting
+        mom_abs = abs(momentum_60s)
+
+        # BB position for direction inference
+        bb_range = bb_upper - bb_lower if bb_upper > bb_lower else 1.0
+        bb_position = (price - bb_lower) / bb_range  # 0.0 = lower, 1.0 = upper
+
+        # Squeeze state (already tracked on self)
+        bb_inside_kc = (
+            kc_upper > 0 and kc_lower > 0
+            and bb_upper < kc_upper and bb_lower > kc_lower
+        )
+        in_squeeze = bb_inside_kc or self._squeeze_tick_count > 0
+
+        # ── Compute TIER 1 signals with direction ──────────────────────
+        t1_long: list[str] = []
+        t1_short: list[str] = []
+
+        # T1-1: Volume Anticipation — high volume, no momentum yet
+        if vol_ratio >= self.TIER1_VOL_RATIO and mom_abs < self.TIER1_VOL_MAX_MOM:
+            if bb_position <= 0.30:
+                t1_long.append(f"T1:VOL_ANTIC:{vol_ratio:.1f}x+BBlow")
+            elif bb_position >= 0.70 and can_short:
+                t1_short.append(f"T1:VOL_ANTIC:{vol_ratio:.1f}x+BBhigh")
+            else:
+                # Volume loading but BB mid — use EMA for direction
+                if ema_9 > 0 and ema_21 > 0:
+                    if ema_9 > ema_21:
+                        t1_long.append(f"T1:VOL_ANTIC:{vol_ratio:.1f}x+EMA↑")
+                    elif ema_9 < ema_21 and can_short:
+                        t1_short.append(f"T1:VOL_ANTIC:{vol_ratio:.1f}x+EMA↓")
+
+        # T1-2: BB Squeeze — volatility compression before breakout
+        if in_squeeze:
+            if ema_9 > 0 and ema_21 > 0:
+                if ema_9 > ema_21:
+                    t1_long.append(f"T1:BBSQZ+EMA↑")
+                elif ema_9 < ema_21 and can_short:
+                    t1_short.append(f"T1:BBSQZ+EMA↓")
+
+        # T1-3: RSI Approach Zones — not yet extreme, approaching reversal
+        rsi_l_low, rsi_l_high = self.TIER1_RSI_APPROACH_LONG
+        rsi_s_low, rsi_s_high = self.TIER1_RSI_APPROACH_SHORT
+        if rsi_l_low <= rsi_now <= rsi_l_high:
+            t1_long.append(f"T1:RSI_APPROACH:{rsi_now:.0f}")
+        if rsi_s_low <= rsi_now <= rsi_s_high and can_short:
+            t1_short.append(f"T1:RSI_APPROACH:{rsi_now:.0f}")
+
+        # ── Count existing tier 2 signals (from _detect_quality_entry) ──
+        t2_long_count = len(bull_signals)
+        t2_short_count = len(bear_signals)
+
+        # ── Decide entry: 2+ T1, or 1 T1 + 2 T2 ──────────────────────
+        long_ok = (
+            len(t1_long) >= self.TIER1_MIN_SIGNALS
+            or (len(t1_long) >= 1 and t2_long_count >= 2)
+        )
+        short_ok = (
+            len(t1_short) >= self.TIER1_MIN_SIGNALS
+            or (len(t1_short) >= 1 and t2_short_count >= 2)
+        ) and can_short
+
+        # If signals disagree on direction → skip (conflicting order flow)
+        if long_ok and short_ok:
+            self.logger.debug(
+                "[%s] TIER1 CONFLICT: both long (%s) and short (%s) — skipping",
+                self.pair, t1_long, t1_short,
+            )
+            return None
+
+        if long_ok:
+            t1_tags = " + ".join(t1_long)
+            t2_tags = " + ".join(bull_signals) if bull_signals else ""
+            reason = f"LONG TIER1 {len(t1_long)}T1+{t2_long_count}T2: {t1_tags}"
+            if t2_tags:
+                reason += f" [{t2_tags}]"
+            total = len(t1_long) + t2_long_count
+            self._tier1_count = len(t1_long)
+            self._tier2_count = t2_long_count
+            return ("long", reason, True, total)  # limit order for anticipatory
+
+        if short_ok:
+            t1_tags = " + ".join(t1_short)
+            t2_tags = " + ".join(bear_signals) if bear_signals else ""
+            reason = f"SHORT TIER1 {len(t1_short)}T1+{t2_short_count}T2: {t1_tags}"
+            if t2_tags:
+                reason += f" [{t2_tags}]"
+            total = len(t1_short) + t2_short_count
+            self._tier1_count = len(t1_short)
+            self._tier2_count = t2_short_count
+            return ("short", reason, True, total)
+
         return None
 
     # ======================================================================
@@ -1762,7 +1931,9 @@ class ScalpStrategy(BaseStrategy):
             return self._do_exit(current_price, pnl_pct, side, "RATCHET", hold_seconds)
 
         # ══════════════════════════════════════════════════════════════
-        # PHASE 1 (0-30s): HANDS OFF — only SL/TP/floor above
+        # PHASE 1 (0-30s): CONFIRMATION WINDOW for tier1 / HANDS OFF for momentum
+        # Tier1 entries: actively check if momentum confirms direction
+        # Momentum entries: hands off (already confirmed by momentum)
         # EXCEPTION: if peak PnL >= +0.5%, skip to Phase 2 immediately
         # ══════════════════════════════════════════════════════════════
         if hold_seconds < self.PHASE1_SECONDS:
@@ -1772,7 +1943,49 @@ class ScalpStrategy(BaseStrategy):
                     self.pair, self._peak_unrealized_pnl,
                     self.PHASE1_SKIP_AT_PEAK_PCT, int(hold_seconds),
                 )
+                if self._entry_path == "tier1":
+                    self._entry_confirmed = True  # price action confirmed
+            elif self._entry_path == "tier1" and not self._entry_confirmed:
+                # ── TIER1 CONFIRMATION WINDOW: check momentum each tick ──
+                mom_confirms = (
+                    (side == "long" and momentum_60s >= self.CONFIRM_MOM_PCT)
+                    or (side == "short" and momentum_60s <= -self.CONFIRM_MOM_PCT)
+                )
+                counter_mom = (
+                    (side == "long" and momentum_60s <= -self.CONFIRM_COUNTER_PCT)
+                    or (side == "short" and momentum_60s >= self.CONFIRM_COUNTER_PCT)
+                )
+
+                if mom_confirms:
+                    self._entry_confirmed = True
+                    self.logger.info(
+                        "[%s] TIER1 CONFIRMED at %ds — mom=%+.3f%% in direction",
+                        self.pair, int(hold_seconds), momentum_60s,
+                    )
+                elif counter_mom:
+                    # Momentum against us → immediate UNCONFIRMED exit
+                    self.logger.info(
+                        "[%s] TIER1 UNCONFIRMED — counter-momentum %+.3f%% at %ds, exiting",
+                        self.pair, momentum_60s, int(hold_seconds),
+                    )
+                    return self._do_exit(current_price, pnl_pct, side, "UNCONFIRMED", hold_seconds)
+                elif hold_seconds >= self.PHASE1_SECONDS - 2:
+                    # 30s up, no confirmation → UNCONFIRMED exit
+                    self.logger.info(
+                        "[%s] TIER1 UNCONFIRMED — no momentum confirmation after %ds, exiting",
+                        self.pair, int(hold_seconds),
+                    )
+                    return self._do_exit(current_price, pnl_pct, side, "UNCONFIRMED", hold_seconds)
+                else:
+                    if self._tick_count % 10 == 0:
+                        self.logger.info(
+                            "[%s] TIER1 WAITING %ds/%ds | mom=%+.3f%% need %+.2f%% | PnL=%+.2f%%",
+                            self.pair, int(hold_seconds), self.PHASE1_SECONDS,
+                            momentum_60s, self.CONFIRM_MOM_PCT, pnl_pct,
+                        )
+                    return signals
             else:
+                # Momentum entry: standard Phase 1 hands-off
                 if self._tick_count % 30 == 0:
                     self.logger.info(
                         "[%s] PHASE1 %ds/%ds | %s $%.2f | PnL=%+.2f%% | peak=%+.2f%%",
@@ -2283,6 +2496,28 @@ class ScalpStrategy(BaseStrategy):
             return None
 
         alloc_pct = self._get_adaptive_alloc_pct(signal_strength, total_open)
+
+        # ── Tier-based sizing multiplier ────────────────────────────────
+        tier1_mult = 1.0
+        if self._entry_path == "tier1":
+            if self._tier1_count >= 3:
+                tier1_mult = self.TIER1_SIZE_3_MULT
+            elif self._tier1_count >= 2:
+                tier1_mult = self.TIER1_SIZE_2_MULT
+            else:
+                tier1_mult = self.TIER1_SIZE_1_MULT
+            alloc_pct *= tier1_mult
+
+        # ── Survival mode: low balance → cap allocation ─────────────────
+        if exchange_capital < self.SURVIVAL_BALANCE:
+            old_alloc = alloc_pct
+            alloc_pct = min(alloc_pct, self.SURVIVAL_MAX_ALLOC)
+            if old_alloc != alloc_pct:
+                self.logger.info(
+                    "[%s] SURVIVAL_MODE: balance=$%.2f < $%.0f — capping alloc %.0f%% → %.0f%%",
+                    self.pair, exchange_capital, self.SURVIVAL_BALANCE, old_alloc, alloc_pct,
+                )
+
         win_rate, n_trades = self._get_pair_win_rate()
 
         if self.is_futures:
@@ -2347,11 +2582,12 @@ class ScalpStrategy(BaseStrategy):
 
             self.logger.info(
                 "SIZING: %s balance=$%.2f alloc=%.0f%% collateral=$%.2f "
-                "notional=$%.2f contracts=%d (%.4f %s) WR=%.0f%%/%d str=%d/4",
+                "notional=$%.2f contracts=%d (%.4f %s) WR=%.0f%%/%d str=%d/4 path=%s t1_mult=%.2f",
                 self.pair, exchange_capital, alloc_pct, total_collateral,
                 contracts * contract_value, contracts,
                 amount, self._base_asset,
                 win_rate * 100, n_trades, signal_strength,
+                self._entry_path, tier1_mult,
             )
         else:
             # Spot: same performance-based allocation
@@ -2374,10 +2610,11 @@ class ScalpStrategy(BaseStrategy):
             amount = capital / current_price
             self.logger.info(
                 "SIZING: %s balance=$%.2f alloc=%.0f%% collateral=$%.2f "
-                "notional=$%.2f contracts=spot (%.8f %s) WR=%.0f%%/%d str=%d/4",
+                "notional=$%.2f contracts=spot (%.8f %s) WR=%.0f%%/%d str=%d/4 path=%s t1_mult=%.2f",
                 self.pair, exchange_capital, alloc_pct, capital,
                 capital, amount, self._base_asset,
                 win_rate * 100, n_trades, signal_strength,
+                self._entry_path, tier1_mult,
             )
 
         return amount
@@ -2393,17 +2630,18 @@ class ScalpStrategy(BaseStrategy):
         Returns a list with the primary setup type first.  The caller checks
         ONLY the first entry against the dashboard toggle — no fallthrough.
         Priority order (pick the FIRST match):
-          1. RSI_OVERRIDE   (RSI < 30 or > 70)
-          2. BB_SQUEEZE     (BBSQZ tag)
-          3. MOMENTUM_BURST (MOM + VOL)
-          4. MEAN_REVERT    (BB + RSI)
-          5. TREND_CONT     (TCONT tag)
-          6. VWAP_RECLAIM   (VWAP tag)
-          7. LIQ_SWEEP      (LIQSWEEP tag)
-          8. FVG_FILL       (FVG tag)
-          9. VOL_DIVERGENCE (VOLDIV tag)
-         10. MULTI_SIGNAL   (none of above matched — true catch-all)
-         11. MIXED          (final fallback)
+          1. RSI_OVERRIDE        (RSI < 30 or > 70)
+          2. TIER1_ANTICIPATORY  (T1: tag — anticipatory leading signals)
+          3. BB_SQUEEZE          (BBSQZ tag)
+          4. MOMENTUM_BURST      (MOM + VOL)
+          5. MEAN_REVERT         (BB + RSI)
+          6. TREND_CONT          (TCONT tag)
+          7. VWAP_RECLAIM        (VWAP tag)
+          8. LIQ_SWEEP           (LIQSWEEP tag)
+          9. FVG_FILL            (FVG tag)
+         10. VOL_DIVERGENCE      (VOLDIV tag)
+         11. MULTI_SIGNAL        (none of above matched — true catch-all)
+         12. MIXED               (final fallback)
         """
         r = reason.upper()
 
@@ -2420,39 +2658,43 @@ class ScalpStrategy(BaseStrategy):
                 if rsi_val < 30 or rsi_val > 70:
                     return ["RSI_OVERRIDE"]
 
-        # Priority 2: BB_SQUEEZE
+        # Priority 2: TIER1_ANTICIPATORY — leading signals (T1: prefix)
+        if "T1:" in r:
+            return ["TIER1_ANTICIPATORY"]
+
+        # Priority 3: BB_SQUEEZE
         if "BBSQZ:" in r:
             return ["BB_SQUEEZE"]
 
-        # Priority 3: MOMENTUM_BURST
+        # Priority 4: MOMENTUM_BURST
         if has_mom and has_vol:
             return ["MOMENTUM_BURST"]
 
-        # Priority 4: MEAN_REVERT
+        # Priority 5: MEAN_REVERT
         if has_bb and has_rsi:
             return ["MEAN_REVERT"]
 
-        # Priority 5: TREND_CONT
+        # Priority 6: TREND_CONT
         if "TCONT:" in r:
             return ["TREND_CONT"]
 
-        # Priority 6: VWAP_RECLAIM
+        # Priority 7: VWAP_RECLAIM
         if "VWAP:" in r:
             return ["VWAP_RECLAIM"]
 
-        # Priority 7: LIQ_SWEEP
+        # Priority 8: LIQ_SWEEP
         if "LIQSWEEP:" in r:
             return ["LIQ_SWEEP"]
 
-        # Priority 8: FVG_FILL
+        # Priority 9: FVG_FILL
         if "FVG:" in r:
             return ["FVG_FILL"]
 
-        # Priority 9: VOL_DIVERGENCE
+        # Priority 10: VOL_DIVERGENCE
         if "VOLDIV:" in r:
             return ["VOL_DIVERGENCE"]
 
-        # Priority 10: MULTI_SIGNAL — none of the above matched
+        # Priority 11: MULTI_SIGNAL — none of the above matched
         # Only when 4+ distinct signals fired but no recognized pattern
         signal_count = sum([
             has_mom, has_vol, has_rsi, has_bb,
@@ -2462,7 +2704,7 @@ class ScalpStrategy(BaseStrategy):
         if signal_count >= 4:
             return ["MULTI_SIGNAL"]
 
-        # Priority 11: MIXED — final fallback
+        # Priority 12: MIXED — final fallback
         return ["MIXED"]
 
     # ======================================================================
@@ -2648,7 +2890,8 @@ class ScalpStrategy(BaseStrategy):
                           "sl_pct": self._sl_pct, "tp_pct": self._tp_pct,
                           "atr_pct": self._last_atr_pct,
                           "setup_type": setup_type,
-                          "signals_fired": signals_fired},
+                          "signals_fired": signals_fired,
+                          "entry_path": self._entry_path},
             )
         else:  # short
             sl = price * (1 + self._sl_pct / 100)
@@ -2671,7 +2914,8 @@ class ScalpStrategy(BaseStrategy):
                           "sl_pct": self._sl_pct, "tp_pct": self._tp_pct,
                           "atr_pct": self._last_atr_pct,
                           "setup_type": setup_type,
-                          "signals_fired": signals_fired},
+                          "signals_fired": signals_fired,
+                          "entry_path": self._entry_path},
             )
 
     def _exit_signal(self, price: float, side: str, reason: str, peak_pnl: float = 0.0) -> Signal:
@@ -2797,45 +3041,53 @@ class ScalpStrategy(BaseStrategy):
 
         now = time.monotonic()
 
+        # UNCONFIRMED exits (tier1 entries that didn't confirm) —
+        # don't count toward streaks/cooldowns, just record P&L
+        is_unconfirmed = exit_type.upper() == "UNCONFIRMED"
+
         # Track per-pair win/loss history (for adaptive allocation)
+        # Skip UNCONFIRMED — not a signal quality failure
         is_win = pnl_pct >= 0
-        if self._base_asset not in ScalpStrategy._pair_trade_history:
-            ScalpStrategy._pair_trade_history[self._base_asset] = []
-        ScalpStrategy._pair_trade_history[self._base_asset].append(is_win)
-        # Keep only last PERF_WINDOW trades
-        if len(ScalpStrategy._pair_trade_history[self._base_asset]) > self.PERF_WINDOW:
-            ScalpStrategy._pair_trade_history[self._base_asset] = \
-                ScalpStrategy._pair_trade_history[self._base_asset][-self.PERF_WINDOW:]
+        if not is_unconfirmed:
+            if self._base_asset not in ScalpStrategy._pair_trade_history:
+                ScalpStrategy._pair_trade_history[self._base_asset] = []
+            ScalpStrategy._pair_trade_history[self._base_asset].append(is_win)
+            # Keep only last PERF_WINDOW trades
+            if len(ScalpStrategy._pair_trade_history[self._base_asset]) > self.PERF_WINDOW:
+                ScalpStrategy._pair_trade_history[self._base_asset] = \
+                    ScalpStrategy._pair_trade_history[self._base_asset][-self.PERF_WINDOW:]
 
         if pnl_pct >= 0:
             self.hourly_wins += 1
-            # Win resets consecutive loss streak for THIS PAIR
-            ScalpStrategy._pair_consecutive_losses[self._base_asset] = 0
-            ScalpStrategy._pair_post_streak[self._base_asset] = False
+            if not is_unconfirmed:
+                # Win resets consecutive loss streak for THIS PAIR
+                ScalpStrategy._pair_consecutive_losses[self._base_asset] = 0
+                ScalpStrategy._pair_post_streak[self._base_asset] = False
         else:
             self.hourly_losses += 1
-            # Track consecutive losses PER PAIR (BTC losses don't pause XRP)
-            prev = ScalpStrategy._pair_consecutive_losses.get(self._base_asset, 0)
-            ScalpStrategy._pair_consecutive_losses[self._base_asset] = prev + 1
+            if not is_unconfirmed:
+                # Track consecutive losses PER PAIR (BTC losses don't pause XRP)
+                prev = ScalpStrategy._pair_consecutive_losses.get(self._base_asset, 0)
+                ScalpStrategy._pair_consecutive_losses[self._base_asset] = prev + 1
 
-            # SL cooldown: pause THIS PAIR for 2 min after SL
-            if exit_type.lower() in ("sl", "ws-sl"):
-                ScalpStrategy._pair_last_sl_time[self._base_asset] = now
-                self.logger.info(
-                    "[%s] SL COOLDOWN SET — no new %s entries for %ds",
-                    self.pair, self._base_asset, self.SL_COOLDOWN_SECONDS,
-                )
+                # SL cooldown: pause THIS PAIR for 2 min after SL
+                if exit_type.lower() in ("sl", "ws-sl"):
+                    ScalpStrategy._pair_last_sl_time[self._base_asset] = now
+                    self.logger.info(
+                        "[%s] SL COOLDOWN SET — no new %s entries for %ds",
+                        self.pair, self._base_asset, self.SL_COOLDOWN_SECONDS,
+                    )
 
-            # Streak pause: after N consecutive losses on THIS PAIR
-            pair_losses = ScalpStrategy._pair_consecutive_losses[self._base_asset]
-            if pair_losses >= self.CONSECUTIVE_LOSS_LIMIT:
-                ScalpStrategy._pair_streak_pause_until[self._base_asset] = now + self.STREAK_PAUSE_SECONDS
-                ScalpStrategy._pair_post_streak[self._base_asset] = True  # first trade back needs 3/4
-                self.logger.warning(
-                    "[%s] STREAK PAUSE — %d consecutive %s losses! Pausing %s for %ds",
-                    self.pair, pair_losses, self._base_asset,
-                    self._base_asset, self.STREAK_PAUSE_SECONDS,
-                )
+                # Streak pause: after N consecutive losses on THIS PAIR
+                pair_losses = ScalpStrategy._pair_consecutive_losses[self._base_asset]
+                if pair_losses >= self.CONSECUTIVE_LOSS_LIMIT:
+                    ScalpStrategy._pair_streak_pause_until[self._base_asset] = now + self.STREAK_PAUSE_SECONDS
+                    ScalpStrategy._pair_post_streak[self._base_asset] = True  # first trade back needs 3/4
+                    self.logger.warning(
+                        "[%s] STREAK PAUSE — %d consecutive %s losses! Pausing %s for %ds",
+                        self.pair, pair_losses, self._base_asset,
+                        self._base_asset, self.STREAK_PAUSE_SECONDS,
+                    )
 
         # Reversal cooldown: block same-direction re-entry for 3 min (move is dead)
         if exit_type.upper() == "REVERSAL":
