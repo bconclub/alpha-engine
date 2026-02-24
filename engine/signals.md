@@ -1,4 +1,4 @@
-**Last updated: v3.20.1 — 2026-02-24**
+**Last updated: v3.21.0 — 2026-02-24**
 
 # Alpha Trade Signals — Complete Reference
 
@@ -134,6 +134,21 @@ TIER 1 PATH (no momentum needed):
   Direction:          from order flow (BB position, EMA ribbon, RSI approach)
   Sizing:             reduced (40-60% of base allocation, see below)
 ```
+
+### Dynamic Leverage (v3.21.0)
+
+Leverage is calculated **per-trade** based on signal conviction, not hardcoded. Stronger signals get more leverage to amplify P&L; weaker signals get less leverage to reduce risk.
+
+| Tier | Leverage | Conditions | Capital Risk at 0.30% SL |
+|------|----------|------------|--------------------------|
+| **ULTRA** | **50x** | 4/4 signals + momentum >= 0.40% + RSI extreme (<30 or >70) | 15.0% |
+| **HIGH** | **20x** | 4/4 signals + momentum >= 0.30% **OR** 3/4 signals + RSI override | 6.0% |
+| **STANDARD** | **10x** | All other valid entries (3/4 signals, moderate momentum) | 3.0% |
+
+- Same dollar allocation, different leverage = different notional exposure
+- Leverage tag appended to reason string: `LEV:50x`, `LEV:20x`, `LEV:10x`
+- Stored in metadata (`leverage_tier`) for dashboard analysis
+- SL distances unchanged — same per-pair floors/caps regardless of leverage
 
 ### Idle Threshold Widening
 
@@ -418,10 +433,11 @@ SCANNING (every 5s)
   |
   +-- Entry signal? (from momentum path OR confirmed T1)
   |     |
+  |     +-- Dynamic leverage: ULTRA 50x / HIGH 20x / STANDARD 10x
   |     +-- Setup type classification (first-match priority, no fallthrough)
   |     +-- Setup disabled via dashboard? -> skip
   |     +-- Per-pair strength gate (3/4 for all)
-  |     +-- Dynamic position sizing (tier-aware + survival mode)
+  |     +-- Dynamic position sizing (tier-aware + survival mode, uses dynamic leverage)
   |     +-- Big size gate: >50 contracts -> 4/4?
   |     +-- Large pos gate: threshold + 0.12% momentum?
   |     +-- Risk manager: daily loss? balance? cooldowns?
@@ -523,7 +539,7 @@ When the bot decides NOT to enter, the reason is tracked and shown on the dashbo
 | T1 pending timeout | 30s (no order placed, zero cost) | same |
 | Momentum direction | must match signal direction (momentum path) | same |
 | Tier1 direction | from order flow (BB + EMA + RSI approach) | same |
-| Leverage | 20x (capped) | 1x |
+| Leverage | Dynamic: 10x/20x/50x by conviction (cap 50x) | 1x |
 | SL distance (BTC) | 0.30% floor, 0.50% cap | 2.0% floor, 3.0% cap |
 | SL distance (ETH) | 0.35% floor, 0.50% cap | — |
 | SL distance (XRP/SOL) | 0.40% floor, 0.60% cap | — |

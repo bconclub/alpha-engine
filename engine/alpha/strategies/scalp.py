@@ -63,6 +63,10 @@ ENTRY — TWO-TIER SIGNAL SYSTEM:
     - Counter-momentum (0.15%+) → T1_REJECTED (zero cost)
     - T1 signals fade → T1_EXPIRED (zero cost)
     - 30s timeout → T1_TIMEOUT (zero cost)
+  DYNAMIC LEVERAGE (per-trade based on conviction):
+    - ULTRA 50x: 4/4 signals + momentum >= 0.40% + RSI extreme (<30 or >70)
+    - HIGH 20x: 4/4 + momentum >= 0.30% OR 3/4 + RSI override
+    - STANDARD 10x: all other valid entries
   OVERRIDE: RSI < 30 or > 70 → enter immediately (strong extreme)
   SETUP: Each entry classified by dominant signal pattern
 
@@ -405,7 +409,7 @@ class ScalpStrategy(BaseStrategy):
         super().__init__(pair, executor, risk_manager)
         self.trade_exchange: ccxt.Exchange | None = exchange
         self.is_futures = is_futures
-        self.leverage: int = min(config.delta.leverage, 20) if is_futures else 1  # CAP at 20x
+        self.leverage: int = min(config.delta.leverage, 50) if is_futures else 1  # CAP at 50x
         self.capital_pct: float = self.CAPITAL_PCT_FUTURES if is_futures else self.SPOT_CAPITAL_PCT
         self._exchange_id: str = "delta" if is_futures else "binance"
         self._market_analyzer = market_analyzer  # for 15m trend direction
@@ -511,6 +515,7 @@ class ScalpStrategy(BaseStrategy):
         # before placing any order. Dict with keys: side, reason, strength,
         # tier1_count, tier2_count, timestamp, price.  None = no pending.
         self._pending_tier1: dict[str, Any] | None = None
+        self._trade_leverage: int = self.leverage  # per-trade dynamic leverage
 
         # Load soul on init
         _load_soul()
@@ -1077,8 +1082,11 @@ class ScalpStrategy(BaseStrategy):
                 self._entry_path = "tier1"
                 self._tier1_count = pt1["tier1_count"]
                 self._tier2_count = pt1["tier2_count"]
+                self._trade_leverage = self._calculate_leverage(
+                    pt1["tier1_count"] + pt1["tier2_count"], momentum_60s, rsi_now,
+                )
                 # Set entry — flows into the normal entry processing below
-                entry = (pt1_side, pt1["reason"], True, pt1["strength"])
+                entry = (pt1_side, pt1["reason"] + f" | LEV:{self._trade_leverage}x", True, pt1["strength"])
                 self._pending_tier1 = None
 
             elif (pt1_side == "long" and momentum_60s <= -self.CONFIRM_COUNTER_PCT) or \
@@ -1197,6 +1205,12 @@ class ScalpStrategy(BaseStrategy):
                     **self._last_signal_breakdown,
                 }
                 return signals
+
+            # ── Dynamic leverage based on conviction ──────────────────
+            self._trade_leverage = self._calculate_leverage(
+                signal_strength, momentum_60s, rsi_now,
+            )
+            reason += f" | LEV:{self._trade_leverage}x"
 
             # ── Refresh balance from exchange API (picks up new deposits) ─
             await self._refresh_balance_if_stale()
@@ -1848,6 +1862,25 @@ class ScalpStrategy(BaseStrategy):
 
         return None
 
+    def _calculate_leverage(self, signal_count: int, momentum_60s: float, rsi_now: float) -> int:
+        """Dynamic leverage based on signal conviction.
+
+        ULTRA (50x): 4/4 signals + momentum >= 0.40% + RSI extreme (<30 or >70)
+        HIGH  (20x): 4/4 signals + momentum >= 0.30%
+                      OR 3/4 signals + RSI override (<30 or >70)
+        STANDARD (10x): everything else that passes entry gate
+        """
+        if not self.is_futures:
+            return 1
+        abs_mom = abs(momentum_60s)
+        rsi_extreme = rsi_now < 30 or rsi_now > 70
+        if signal_count >= 4 and abs_mom >= 0.40 and rsi_extreme:
+            return 50
+        elif (signal_count >= 4 and abs_mom >= 0.30) or (signal_count >= 3 and rsi_extreme):
+            return 20
+        else:
+            return 10
+
     # ======================================================================
     # EXIT LOGIC — RIDE WINNERS, CUT LOSERS
     # ======================================================================
@@ -1869,7 +1902,7 @@ class ScalpStrategy(BaseStrategy):
                     "floor raised +%.2f%% → +%.2f%% (locks +%.0f%% capital at %dx)",
                     self.pair, peak, min_peak,
                     old_floor if old_floor > -999 else 0, floor,
-                    floor * self.leverage, self.leverage,
+                    floor * self._trade_leverage, self._trade_leverage,
                 )
                 break
         return self._profit_floor_pct
@@ -2002,11 +2035,11 @@ class ScalpStrategy(BaseStrategy):
         # ══════════════════════════════════════════════════════════════
         # ALWAYS: Hard TP — 10% capital safety net
         # ══════════════════════════════════════════════════════════════
-        capital_pnl = pnl_pct * self.leverage
+        capital_pnl = pnl_pct * self._trade_leverage
         if capital_pnl >= self.HARD_TP_CAPITAL_PCT:
             self.logger.info(
                 "[%s] HARD TP HIT — capital +%.1f%% (price +%.2f%% × %dx) — %ds in",
-                self.pair, capital_pnl, pnl_pct, self.leverage, int(hold_seconds),
+                self.pair, capital_pnl, pnl_pct, self._trade_leverage, int(hold_seconds),
             )
             return self._do_exit(current_price, pnl_pct, side, "HARD_TP_10PCT", hold_seconds)
 
@@ -2229,7 +2262,7 @@ class ScalpStrategy(BaseStrategy):
                 exit_type = "RATCHET"
 
         # ── ALWAYS: Hard TP ──────────────────────────────────────────
-        capital_pnl = pnl_pct * self.leverage
+        capital_pnl = pnl_pct * self._trade_leverage
         if not exit_type and capital_pnl >= self.HARD_TP_CAPITAL_PCT:
             exit_type = "HARD_TP_10PCT"
 
@@ -2297,7 +2330,7 @@ class ScalpStrategy(BaseStrategy):
             self.logger.info(
                 "[%s] WS EXIT %s — %s @ $%.2f PnL=%+.2f%% (%+.1f%% capital at %dx) hold=%ds",
                 self.pair, exit_type, side, current_price,
-                pnl_pct, pnl_pct * self.leverage, self.leverage,
+                pnl_pct, pnl_pct * self._trade_leverage, self._trade_leverage,
                 int(hold_seconds),
             )
             signals = self._do_exit(current_price, pnl_pct, side, f"WS-{exit_type}", hold_seconds)
@@ -2346,10 +2379,10 @@ class ScalpStrategy(BaseStrategy):
                 )
                 return []  # empty = no exit
 
-        cap_pct = pnl_pct * self.leverage
+        cap_pct = pnl_pct * self._trade_leverage
         reason = (
             f"Scalp {exit_type} {pnl_pct:+.2f}% price "
-            f"({cap_pct:+.1f}% capital at {self.leverage}x)"
+            f"({cap_pct:+.1f}% capital at {self._trade_leverage}x)"
         )
         # Compute peak P&L BEFORE _record_scalp_result resets entry_price/highest/lowest
         if side == "long" and self.entry_price > 0:
@@ -2592,7 +2625,7 @@ class ScalpStrategy(BaseStrategy):
             collateral = min(collateral, max_position_value)
 
             # 5. Calculate notional at leverage and convert to contracts
-            notional = collateral * self.leverage
+            notional = collateral * self._trade_leverage
             contract_value = contract_size * current_price
             contracts = int(notional / contract_value)
 
@@ -2604,7 +2637,7 @@ class ScalpStrategy(BaseStrategy):
                         "[%s] INSUFFICIENT_CAPITAL: $%.2f collateral → %d contracts "
                         "(need $%.2f for 1 contract at $%.0f)",
                         self.pair, collateral, contracts,
-                        contract_value / self.leverage, current_price,
+                        contract_value / self._trade_leverage, current_price,
                     )
                 return None
 
@@ -2628,7 +2661,7 @@ class ScalpStrategy(BaseStrategy):
                 )
                 return None
 
-            total_collateral = contracts * contract_value / self.leverage
+            total_collateral = contracts * contract_value / self._trade_leverage
             amount = contracts * contract_size
 
             self.logger.info(
@@ -2933,7 +2966,7 @@ class ScalpStrategy(BaseStrategy):
                 pair=self.pair,
                 stop_loss=sl,
                 take_profit=None,  # trailing stop handles exit
-                leverage=self.leverage if self.is_futures else 1,
+                leverage=self._trade_leverage if self.is_futures else 1,
                 position_type="long" if self.is_futures else "spot",
                 exchange_id="delta" if self.is_futures else "binance",
                 metadata={"pending_side": "long", "pending_amount": amount,
@@ -2942,7 +2975,8 @@ class ScalpStrategy(BaseStrategy):
                           "atr_pct": self._last_atr_pct,
                           "setup_type": setup_type,
                           "signals_fired": signals_fired,
-                          "entry_path": self._entry_path},
+                          "entry_path": self._entry_path,
+                          "leverage_tier": self._trade_leverage},
             )
         else:  # short
             sl = price * (1 + self._sl_pct / 100)
@@ -2957,7 +2991,7 @@ class ScalpStrategy(BaseStrategy):
                 pair=self.pair,
                 stop_loss=sl,
                 take_profit=None,  # trailing stop handles exit
-                leverage=self.leverage,
+                leverage=self._trade_leverage,
                 position_type="short",
                 exchange_id="delta",
                 metadata={"pending_side": "short", "pending_amount": amount,
@@ -2966,7 +3000,8 @@ class ScalpStrategy(BaseStrategy):
                           "atr_pct": self._last_atr_pct,
                           "setup_type": setup_type,
                           "signals_fired": signals_fired,
-                          "entry_path": self._entry_path},
+                          "entry_path": self._entry_path,
+                          "leverage_tier": self._trade_leverage},
             )
 
     def _exit_signal(self, price: float, side: str, reason: str, peak_pnl: float = 0.0) -> Signal:
@@ -2981,7 +3016,7 @@ class ScalpStrategy(BaseStrategy):
             capital = exchange_capital * (self.capital_pct / 100)
             amount = capital / price
             if self.is_futures:
-                amount *= self.leverage
+                amount *= self._trade_leverage
 
         exit_side = "sell" if side == "long" else "buy"
         return Signal(
@@ -2992,7 +3027,7 @@ class ScalpStrategy(BaseStrategy):
             reason=reason,
             strategy=self.name,
             pair=self.pair,
-            leverage=self.leverage if self.is_futures else 1,
+            leverage=self._trade_leverage if self.is_futures else 1,
             position_type=side if self.is_futures else "spot",
             reduce_only=self.is_futures,
             exchange_id="delta" if self.is_futures else "binance",
@@ -3015,7 +3050,7 @@ class ScalpStrategy(BaseStrategy):
             self.logger.info(
                 "[%s] FILLED — %s @ $%.2f, %.6f, %dx | Soul: %s",
                 self.pair, pending_side.upper(), fill_price, filled_amount,
-                self.leverage, soul_msg,
+                self._trade_leverage, soul_msg,
             )
 
     def on_rejected(self, signal: Signal) -> None:
@@ -3086,7 +3121,7 @@ class ScalpStrategy(BaseStrategy):
         est_fees = notional * (entry_fee_rate + exit_fee_rate)
         net_pnl = gross_pnl - est_fees
 
-        capital_pnl_pct = pnl_pct * self.leverage
+        capital_pnl_pct = pnl_pct * self._trade_leverage
 
         self.hourly_pnl += net_pnl
         self._daily_scalp_loss += net_pnl if net_pnl < 0 else 0
@@ -3153,7 +3188,7 @@ class ScalpStrategy(BaseStrategy):
         self.logger.info(
             "[%s] CLOSED %s %+.2f%% price (%+.1f%% capital at %dx) | "
             "Gross=$%.4f Net=$%.4f fees=$%.4f (%.1fx) | %s | W/L=%d/%d%s",
-            self.pair, exit_type.upper(), pnl_pct, capital_pnl_pct, self.leverage,
+            self.pair, exit_type.upper(), pnl_pct, capital_pnl_pct, self._trade_leverage,
             gross_pnl, net_pnl, est_fees, fee_ratio, duration,
             self.hourly_wins, self.hourly_losses, streak_tag,
         )
