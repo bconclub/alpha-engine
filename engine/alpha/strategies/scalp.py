@@ -47,22 +47,28 @@ CHANGES FROM v5.6 (in v5.7):
 
 ENTRY — TWO-TIER SIGNAL SYSTEM:
   MOMENTUM PATH (existing): 3-of-4 signals + momentum gate → enter immediately
-  TIER 1 PATH (new): leading signals without momentum → enter early, confirm after
-  TIER 1 (leading/anticipatory — enter on these):
+  TIER 1 PATH (new): leading signals detected → PENDING (no order) → wait for
+    momentum confirmation → CONFIRMED → order placed (pre-confirmed, no in-position risk)
+  TIER 1 (leading/anticipatory):
     - Volume Anticipation: vol >= 1.5x with <0.10% momentum (institutions loading)
     - BB Squeeze: BB inside Keltner Channel (volatility compression)
     - RSI Approach: 32-38 or 62-68 (approaching reversal, not yet extreme)
-  TIER 2 (confirming — validate after entry):
+  TIER 2 (confirming — momentum path or T1 confirmation):
     - Momentum, Volume, RSI extreme, BB, Mom5m, Trend Cont, VWAP
   Direction from order flow (not past momentum):
     - Volume + BB position, Squeeze + EMA ribbon, RSI approach zones
+  PENDING T1 lifecycle (no order placed until confirmed):
+    - T1 signals fire → store pending (side, reason, timestamp)
+    - Each 5s tick: check momentum confirms (0.10%+) → execute order
+    - Counter-momentum (0.15%+) → T1_REJECTED (zero cost)
+    - T1 signals fade → T1_EXPIRED (zero cost)
+    - 30s timeout → T1_TIMEOUT (zero cost)
   OVERRIDE: RSI < 30 or > 70 → enter immediately (strong extreme)
   SETUP: Each entry classified by dominant signal pattern
 
 EXIT — 3-PHASE SYSTEM (AGGRESSIVE PROFIT LOCK):
-  PHASE 1 (0-30s): CONFIRMATION WINDOW (tier1) / HANDS OFF (momentum)
-    - Tier1: actively check momentum confirmation, exit UNCONFIRMED if none
-    - Momentum: standard hands-off, only hard SL
+  PHASE 1 (0-30s): HANDS OFF — all entries arrive pre-confirmed
+    - ONLY exit on hard SL, ratchet floor, hard TP
     - EXCEPTION: if peak PnL >= +0.5%, skip to Phase 2 immediately
   PHASE 2 (30s-10 min): WATCH + TRAIL
     - If PnL > +0.30% → breakeven at entry+fees (net breakeven protection)
@@ -499,9 +505,12 @@ class ScalpStrategy(BaseStrategy):
 
         # ── Tier 1 anticipatory entry state ──────────────────────────
         self._entry_path: str = "momentum"     # "momentum" or "tier1"
-        self._entry_confirmed: bool = True     # tier1 needs confirmation during Phase 1
         self._tier1_count: int = 0             # tier1 signals at entry
         self._tier2_count: int = 0             # tier2 signals at entry
+        # Pending tier1: T1 signals fire → store here, wait for momentum confirmation
+        # before placing any order. Dict with keys: side, reason, strength,
+        # tier1_count, tier2_count, timestamp, price.  None = no pending.
+        self._pending_tier1: dict[str, Any] | None = None
 
         # Load soul on init
         _load_soul()
@@ -1040,8 +1049,76 @@ class ScalpStrategy(BaseStrategy):
         idle_seconds = now - self._last_position_exit
         is_widened = idle_seconds >= self.IDLE_WIDEN_SECONDS
 
+        # ══════════════════════════════════════════════════════════════
+        # PENDING TIER 1 CHECK — no order placed yet, waiting for confirm
+        # ══════════════════════════════════════════════════════════════
+        entry = None  # will be set by pending confirm OR _detect_quality_entry
+        if self._pending_tier1 is not None:
+            pt1 = self._pending_tier1
+            pt1_age = now - pt1["timestamp"]
+            pt1_side = pt1["side"]
+
+            if pt1_age >= self.PHASE1_SECONDS:
+                # ── T1_TIMEOUT: 30s with no confirmation ──────────────
+                self.logger.info(
+                    "[%s] T1_TIMEOUT — no momentum confirmation after %.0fs, clearing pending %s",
+                    self.pair, pt1_age, pt1_side,
+                )
+                self._pending_tier1 = None
+                # Zero fees, zero loss — just a skip
+
+            elif (pt1_side == "long" and momentum_60s >= self.CONFIRM_MOM_PCT) or \
+                 (pt1_side == "short" and momentum_60s <= -self.CONFIRM_MOM_PCT):
+                # ── CONFIRMED: momentum in pending direction ─────────
+                self.logger.info(
+                    "[%s] T1_CONFIRMED — mom=%+.3f%% confirms %s after %.0fs, executing entry",
+                    self.pair, momentum_60s, pt1_side, pt1_age,
+                )
+                self._entry_path = "tier1"
+                self._tier1_count = pt1["tier1_count"]
+                self._tier2_count = pt1["tier2_count"]
+                # Set entry — flows into the normal entry processing below
+                entry = (pt1_side, pt1["reason"], True, pt1["strength"])
+                self._pending_tier1 = None
+
+            elif (pt1_side == "long" and momentum_60s <= -self.CONFIRM_COUNTER_PCT) or \
+                 (pt1_side == "short" and momentum_60s >= self.CONFIRM_COUNTER_PCT):
+                # ── T1_REJECTED: momentum went AGAINST pending direction
+                self.logger.info(
+                    "[%s] T1_REJECTED — counter-momentum %+.3f%% against pending %s at %.0fs",
+                    self.pair, momentum_60s, pt1_side, pt1_age,
+                )
+                self._pending_tier1 = None
+
+            else:
+                # ── Still waiting — check if T1 signals still present ──
+                tier1_recheck = self._detect_tier1_entry(
+                    current_price, rsi_now, vol_ratio, momentum_60s,
+                    bb_upper, bb_lower, ema_9, ema_21,
+                    kc_upper, kc_lower,
+                    [], [],  # empty T2 — only checking T1 presence
+                    is_widened,
+                )
+                if tier1_recheck is None:
+                    self.logger.info(
+                        "[%s] T1_EXPIRED — tier1 signals faded after %.0fs, clearing pending %s",
+                        self.pair, pt1_age, pt1_side,
+                    )
+                    self._pending_tier1 = None
+                else:
+                    # Still pending — log periodically
+                    if self._tick_count % 6 == 0:
+                        self.logger.info(
+                            "[%s] T1_PENDING %.0fs/%ds | %s | mom=%+.3f%% need %+.2f%%",
+                            self.pair, pt1_age, self.PHASE1_SECONDS,
+                            pt1_side, momentum_60s, self.CONFIRM_MOM_PCT,
+                        )
+                    self._skip_reason = f"T1_PENDING ({pt1_side}, {int(pt1_age)}s/{self.PHASE1_SECONDS}s)"
+                    return signals  # don't scan for new entries while pending
+
         # ── Quality momentum detection (3-of-4 with setup tracking) ──
-        entry = self._detect_quality_entry(
+        if entry is None:
+            entry = self._detect_quality_entry(
             current_price, rsi_now, vol_ratio,
             momentum_60s, momentum_120s, momentum_300s,
             bb_upper, bb_lower,
@@ -1308,8 +1385,7 @@ class ScalpStrategy(BaseStrategy):
         threshold is still expressed as N-of-4 scale (3/4).
         """
         can_short = self.is_futures and config.delta.enable_shorting
-        self._entry_path = "momentum"  # default; overridden to "tier1" in gate 0 fallthrough
-        self._entry_confirmed = True   # momentum entries are pre-confirmed; tier1 sets False
+        self._entry_path = "momentum"  # default; overridden to "tier1" when pending confirms
         self._tier1_count = 0
         self._tier2_count = 0
 
@@ -1539,13 +1615,13 @@ class ScalpStrategy(BaseStrategy):
             }
 
         # ══════════════════════════════════════════════════════════════
-        # GATE 0: NO MOMENTUM → try TIER 1 anticipatory entry
-        # Instead of blocking, fall through to tier 1 leading signals.
-        # Momentum becomes a TIER 2 confirming signal only.
+        # GATE 0: NO MOMENTUM → check TIER 1 leading signals
+        # Instead of entering immediately, store as pending and wait
+        # for momentum confirmation on subsequent ticks (no order placed).
         # ══════════════════════════════════════════════════════════════
         if below_gate:
             self._last_signal_breakdown = _build_breakdown()
-            # Try tier 1 anticipatory entry (leading signals, no momentum needed)
+            # Try tier 1 anticipatory detection (leading signals, no momentum needed)
             tier1_result = self._detect_tier1_entry(
                 price, rsi_now, vol_ratio, momentum_60s,
                 bb_upper, bb_lower, ema_9, ema_21,
@@ -1553,10 +1629,26 @@ class ScalpStrategy(BaseStrategy):
                 bull_signals, bear_signals, widened,
             )
             if tier1_result is not None:
-                self._entry_path = "tier1"
-                self._entry_confirmed = False  # needs confirmation during Phase 1
-                return tier1_result
-            self._skip_reason = f"NO_MOMENTUM ({abs(momentum_60s):.3f}% < {eff_mom:.3f}%)"
+                t1_side, t1_reason, _, t1_strength = tier1_result
+                # Store as PENDING — do NOT place any order yet
+                self._pending_tier1 = {
+                    "side": t1_side,
+                    "reason": t1_reason,
+                    "strength": t1_strength,
+                    "tier1_count": self._tier1_count,
+                    "tier2_count": self._tier2_count,
+                    "timestamp": time.monotonic(),
+                    "price": price,
+                    "pair": self.pair,
+                }
+                self.logger.info(
+                    "[%s] T1_PENDING — %s | strength=%d | t1=%d t2=%d | waiting for momentum confirm",
+                    self.pair, t1_reason, t1_strength,
+                    self._tier1_count, self._tier2_count,
+                )
+                self._skip_reason = f"T1_PENDING ({t1_side}, waiting for momentum)"
+            else:
+                self._skip_reason = f"NO_MOMENTUM ({abs(momentum_60s):.3f}% < {eff_mom:.3f}%)"
             return None
 
         # WEAK momentum counter to 15m trend = skip (don't fight the bigger picture)
@@ -1931,9 +2023,9 @@ class ScalpStrategy(BaseStrategy):
             return self._do_exit(current_price, pnl_pct, side, "RATCHET", hold_seconds)
 
         # ══════════════════════════════════════════════════════════════
-        # PHASE 1 (0-30s): CONFIRMATION WINDOW for tier1 / HANDS OFF for momentum
-        # Tier1 entries: actively check if momentum confirms direction
-        # Momentum entries: hands off (already confirmed by momentum)
+        # PHASE 1 (0-30s): HANDS OFF — only SL/TP/ratchet above
+        # All entries (momentum AND tier1) arrive pre-confirmed.
+        # Tier1 confirmation happens BEFORE order placement (pending check).
         # EXCEPTION: if peak PnL >= +0.5%, skip to Phase 2 immediately
         # ══════════════════════════════════════════════════════════════
         if hold_seconds < self.PHASE1_SECONDS:
@@ -1943,54 +2035,13 @@ class ScalpStrategy(BaseStrategy):
                     self.pair, self._peak_unrealized_pnl,
                     self.PHASE1_SKIP_AT_PEAK_PCT, int(hold_seconds),
                 )
-                if self._entry_path == "tier1":
-                    self._entry_confirmed = True  # price action confirmed
-            elif self._entry_path == "tier1" and not self._entry_confirmed:
-                # ── TIER1 CONFIRMATION WINDOW: check momentum each tick ──
-                mom_confirms = (
-                    (side == "long" and momentum_60s >= self.CONFIRM_MOM_PCT)
-                    or (side == "short" and momentum_60s <= -self.CONFIRM_MOM_PCT)
-                )
-                counter_mom = (
-                    (side == "long" and momentum_60s <= -self.CONFIRM_COUNTER_PCT)
-                    or (side == "short" and momentum_60s >= self.CONFIRM_COUNTER_PCT)
-                )
-
-                if mom_confirms:
-                    self._entry_confirmed = True
-                    self.logger.info(
-                        "[%s] TIER1 CONFIRMED at %ds — mom=%+.3f%% in direction",
-                        self.pair, int(hold_seconds), momentum_60s,
-                    )
-                elif counter_mom:
-                    # Momentum against us → immediate UNCONFIRMED exit
-                    self.logger.info(
-                        "[%s] TIER1 UNCONFIRMED — counter-momentum %+.3f%% at %ds, exiting",
-                        self.pair, momentum_60s, int(hold_seconds),
-                    )
-                    return self._do_exit(current_price, pnl_pct, side, "UNCONFIRMED", hold_seconds)
-                elif hold_seconds >= self.PHASE1_SECONDS - 2:
-                    # 30s up, no confirmation → UNCONFIRMED exit
-                    self.logger.info(
-                        "[%s] TIER1 UNCONFIRMED — no momentum confirmation after %ds, exiting",
-                        self.pair, int(hold_seconds),
-                    )
-                    return self._do_exit(current_price, pnl_pct, side, "UNCONFIRMED", hold_seconds)
-                else:
-                    if self._tick_count % 10 == 0:
-                        self.logger.info(
-                            "[%s] TIER1 WAITING %ds/%ds | mom=%+.3f%% need %+.2f%% | PnL=%+.2f%%",
-                            self.pair, int(hold_seconds), self.PHASE1_SECONDS,
-                            momentum_60s, self.CONFIRM_MOM_PCT, pnl_pct,
-                        )
-                    return signals
             else:
-                # Momentum entry: standard Phase 1 hands-off
                 if self._tick_count % 30 == 0:
                     self.logger.info(
-                        "[%s] PHASE1 %ds/%ds | %s $%.2f | PnL=%+.2f%% | peak=%+.2f%%",
+                        "[%s] PHASE1 %ds/%ds | %s $%.2f | PnL=%+.2f%% | peak=%+.2f%% | path=%s",
                         self.pair, int(hold_seconds), self.PHASE1_SECONDS,
                         side, current_price, pnl_pct, self._peak_unrealized_pnl,
+                        self._entry_path,
                     )
                 return signals
 
@@ -3010,6 +3061,7 @@ class ScalpStrategy(BaseStrategy):
         self._in_position_tick = 0  # reset tick counter for OHLCV refresh cadence
         self._mom_flip_since = 0.0  # reset momentum flip confirmation timer
         self._reversal_exit_logged = False  # reset reversal log suppression
+        self._pending_tier1 = None  # clear any pending T1 on entry
         self._hourly_trades.append(time.time())
 
     def _record_scalp_result(self, pnl_pct: float, exit_type: str) -> None:
@@ -3041,53 +3093,45 @@ class ScalpStrategy(BaseStrategy):
 
         now = time.monotonic()
 
-        # UNCONFIRMED exits (tier1 entries that didn't confirm) —
-        # don't count toward streaks/cooldowns, just record P&L
-        is_unconfirmed = exit_type.upper() == "UNCONFIRMED"
-
         # Track per-pair win/loss history (for adaptive allocation)
-        # Skip UNCONFIRMED — not a signal quality failure
         is_win = pnl_pct >= 0
-        if not is_unconfirmed:
-            if self._base_asset not in ScalpStrategy._pair_trade_history:
-                ScalpStrategy._pair_trade_history[self._base_asset] = []
-            ScalpStrategy._pair_trade_history[self._base_asset].append(is_win)
-            # Keep only last PERF_WINDOW trades
-            if len(ScalpStrategy._pair_trade_history[self._base_asset]) > self.PERF_WINDOW:
-                ScalpStrategy._pair_trade_history[self._base_asset] = \
-                    ScalpStrategy._pair_trade_history[self._base_asset][-self.PERF_WINDOW:]
+        if self._base_asset not in ScalpStrategy._pair_trade_history:
+            ScalpStrategy._pair_trade_history[self._base_asset] = []
+        ScalpStrategy._pair_trade_history[self._base_asset].append(is_win)
+        # Keep only last PERF_WINDOW trades
+        if len(ScalpStrategy._pair_trade_history[self._base_asset]) > self.PERF_WINDOW:
+            ScalpStrategy._pair_trade_history[self._base_asset] = \
+                ScalpStrategy._pair_trade_history[self._base_asset][-self.PERF_WINDOW:]
 
         if pnl_pct >= 0:
             self.hourly_wins += 1
-            if not is_unconfirmed:
-                # Win resets consecutive loss streak for THIS PAIR
-                ScalpStrategy._pair_consecutive_losses[self._base_asset] = 0
-                ScalpStrategy._pair_post_streak[self._base_asset] = False
+            # Win resets consecutive loss streak for THIS PAIR
+            ScalpStrategy._pair_consecutive_losses[self._base_asset] = 0
+            ScalpStrategy._pair_post_streak[self._base_asset] = False
         else:
             self.hourly_losses += 1
-            if not is_unconfirmed:
-                # Track consecutive losses PER PAIR (BTC losses don't pause XRP)
-                prev = ScalpStrategy._pair_consecutive_losses.get(self._base_asset, 0)
-                ScalpStrategy._pair_consecutive_losses[self._base_asset] = prev + 1
+            # Track consecutive losses PER PAIR (BTC losses don't pause XRP)
+            prev = ScalpStrategy._pair_consecutive_losses.get(self._base_asset, 0)
+            ScalpStrategy._pair_consecutive_losses[self._base_asset] = prev + 1
 
-                # SL cooldown: pause THIS PAIR for 2 min after SL
-                if exit_type.lower() in ("sl", "ws-sl"):
-                    ScalpStrategy._pair_last_sl_time[self._base_asset] = now
-                    self.logger.info(
-                        "[%s] SL COOLDOWN SET — no new %s entries for %ds",
-                        self.pair, self._base_asset, self.SL_COOLDOWN_SECONDS,
-                    )
+            # SL cooldown: pause THIS PAIR for 2 min after SL
+            if exit_type.lower() in ("sl", "ws-sl"):
+                ScalpStrategy._pair_last_sl_time[self._base_asset] = now
+                self.logger.info(
+                    "[%s] SL COOLDOWN SET — no new %s entries for %ds",
+                    self.pair, self._base_asset, self.SL_COOLDOWN_SECONDS,
+                )
 
-                # Streak pause: after N consecutive losses on THIS PAIR
-                pair_losses = ScalpStrategy._pair_consecutive_losses[self._base_asset]
-                if pair_losses >= self.CONSECUTIVE_LOSS_LIMIT:
-                    ScalpStrategy._pair_streak_pause_until[self._base_asset] = now + self.STREAK_PAUSE_SECONDS
-                    ScalpStrategy._pair_post_streak[self._base_asset] = True  # first trade back needs 3/4
-                    self.logger.warning(
-                        "[%s] STREAK PAUSE — %d consecutive %s losses! Pausing %s for %ds",
-                        self.pair, pair_losses, self._base_asset,
-                        self._base_asset, self.STREAK_PAUSE_SECONDS,
-                    )
+            # Streak pause: after N consecutive losses on THIS PAIR
+            pair_losses = ScalpStrategy._pair_consecutive_losses[self._base_asset]
+            if pair_losses >= self.CONSECUTIVE_LOSS_LIMIT:
+                ScalpStrategy._pair_streak_pause_until[self._base_asset] = now + self.STREAK_PAUSE_SECONDS
+                ScalpStrategy._pair_post_streak[self._base_asset] = True  # first trade back needs 3/4
+                self.logger.warning(
+                    "[%s] STREAK PAUSE — %d consecutive %s losses! Pausing %s for %ds",
+                    self.pair, pair_losses, self._base_asset,
+                    self._base_asset, self.STREAK_PAUSE_SECONDS,
+                )
 
         # Reversal cooldown: block same-direction re-entry for 3 min (move is dead)
         if exit_type.upper() == "REVERSAL":
