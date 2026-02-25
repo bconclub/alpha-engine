@@ -235,12 +235,13 @@ class ScalpStrategy(BaseStrategy):
     # Two modes: ride momentum with wide ratchet floor, OR exit on signal reversal.
     # Ratchet floor table: peak PnL % → locked floor % (only moves UP)
     RATCHET_FLOOR_TABLE: list[tuple[float, float]] = [
-        (0.30, 0.10),   # peak +0.30% → floor +0.10% (minimum, covers fees)
-        (0.50, 0.20),   # peak +0.50% → floor +0.20%
-        (1.00, 0.50),   # peak +1.00% → floor +0.50%
-        (2.00, 1.00),   # peak +2.00% → floor +1.00%
-        (3.00, 1.75),   # peak +3.00% → floor +1.75%
-        (5.00, 3.00),   # peak +5.00% → floor +3.00%
+        (0.20, 0.08),   # peak +0.20% → floor +0.08% (early lock)
+        (0.30, 0.15),   # peak +0.30% → floor +0.15% (protect 50%)
+        (0.50, 0.30),   # peak +0.50% → floor +0.30% (protect 60%)
+        (1.00, 0.60),   # peak +1.00% → floor +0.60% (protect 60%)
+        (2.00, 1.20),   # peak +2.00% → floor +1.20% (protect 60%)
+        (3.00, 2.00),   # peak +3.00% → floor +2.00% (protect 67%)
+        (5.00, 3.50),   # peak +5.00% → floor +3.50% (protect 70%)
     ]
 
     # Signal reversal exit thresholds (exit IMMEDIATELY at market)
@@ -248,6 +249,7 @@ class ScalpStrategy(BaseStrategy):
     RSI_REVERSAL_SHORT = 30           # short exit when RSI crosses below 30
     MOMENTUM_DYING_PCT = 0.02         # exit if abs(momentum) drops below 0.02% (was 0.04 — normal oscillation)
     MOM_FLIP_CONFIRM_SECONDS = 15     # momentum must stay flipped for 15s before reversal exit
+    MOM_DYING_CONFIRM_SECONDS = 20    # momentum must stay dead (<0.02%) for 20s before reversal
     REVERSAL_MIN_PROFIT_PCT = 0.30    # need at least +0.30% peak to consider reversal exit (was 0.10 — exiting dust)
 
     # ── Trailing stop tiers: peak PnL % → trail distance % from peak price ─
@@ -479,6 +481,7 @@ class ScalpStrategy(BaseStrategy):
         self._prev_rsi: float = 50.0
         # Momentum flip confirmation timer (0 = not flipped)
         self._mom_flip_since: float = 0.0
+        self._mom_dying_since: float = 0.0
         # Suppress repeated reversal exit logs (only log first detection)
         self._reversal_exit_logged: bool = False
 
@@ -2219,8 +2222,25 @@ class ScalpStrategy(BaseStrategy):
                 self._reversal_exit_logged = False  # allow fresh log if it flips again
 
             # Check 2: momentum dying (below 0.02% absolute — truly dead)
+            # Requires MOM_DYING_CONFIRM_SECONDS of sustained dead momentum
             if not reversal_reason and abs(momentum_60s) < self.MOMENTUM_DYING_PCT:
-                reversal_reason = f"mom_dying ({abs(momentum_60s):.3f}% < {self.MOMENTUM_DYING_PCT}%)"
+                if self._mom_dying_since == 0:
+                    self._mom_dying_since = time.monotonic()
+                    self.logger.info(
+                        "MOM_DYING_START: %s abs_mom=%.3f%% — confirming for %ds",
+                        self.pair, abs(momentum_60s), self.MOM_DYING_CONFIRM_SECONDS,
+                    )
+                elif time.monotonic() - self._mom_dying_since >= self.MOM_DYING_CONFIRM_SECONDS:
+                    dying_dur = int(time.monotonic() - self._mom_dying_since)
+                    reversal_reason = f"mom_dying_confirmed ({abs(momentum_60s):.3f}%, {dying_dur}s)"
+            else:
+                # Momentum recovered above threshold — reset timer
+                if self._mom_dying_since > 0:
+                    self.logger.info(
+                        "MOM_DYING_RESET: %s abs_mom=%.3f%% recovered after %.0fs — false alarm",
+                        self.pair, abs(momentum_60s), time.monotonic() - self._mom_dying_since,
+                    )
+                self._mom_dying_since = 0.0
 
             # RSI cross REMOVED as reversal trigger for futures.
             # RSI crossing 70 in a long is trend strength, not reversal.
@@ -3186,6 +3206,7 @@ class ScalpStrategy(BaseStrategy):
         self._profit_floor_pct = -999.0  # reset ratcheting profit floor
         self._in_position_tick = 0  # reset tick counter for OHLCV refresh cadence
         self._mom_flip_since = 0.0  # reset momentum flip confirmation timer
+        self._mom_dying_since = 0.0  # reset momentum dying confirmation timer
         self._reversal_exit_logged = False  # reset reversal log suppression
         self._pending_tier1 = None  # clear any pending T1 on entry
         self._hourly_trades.append(time.time())
