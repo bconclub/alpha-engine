@@ -82,8 +82,6 @@ class AlphaBot:
         self._hourly_pnl: float = 0.0
         self._hourly_wins: int = 0
         self._hourly_losses: int = 0
-        # Daily loss tracking flags kept for compatibility (no auto-pause)
-        self._daily_loss_warned: bool = False
         # Track last analysis cycle time for diagnostics
         self._last_cycle_time: float = time.monotonic()
 
@@ -764,7 +762,6 @@ class AlphaBot:
             delta_balance=delta_bal,
         )
         rm.reset_daily()
-        self._daily_loss_warned = False
         # Also reset hourly counters at midnight
         self._hourly_pnl = 0.0
         self._hourly_wins = 0
