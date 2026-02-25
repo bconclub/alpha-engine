@@ -102,12 +102,12 @@ type ColumnDef = { key: string; label: string; align?: 'right' };
 
 const COLUMNS: ColumnDef[] = [
   // ── Frozen columns (sticky left) ──
+  { key: 'id', label: '#' },
   { key: 'pair', label: 'Pair' },
   { key: 'position_type', label: 'Type' },
   { key: 'leverage', label: 'Lev', align: 'right' },
   { key: 'price', label: 'Entry', align: 'right' },
   // ── Scrollable columns ──
-  { key: 'id', label: 'ID' },
   { key: 'timestamp', label: 'Date' },
   { key: 'exchange', label: 'Exchange' },
   { key: 'exit_price', label: 'Exit', align: 'right' },
@@ -128,10 +128,11 @@ const COLUMNS: ColumnDef[] = [
 
 // Frozen column sticky offsets (must match actual rendered widths)
 const STICKY_COLS: Record<string, string> = {
-  pair: 'left-0',
-  position_type: 'left-[100px]',
-  leverage: 'left-[180px]',
-  price: 'left-[240px]',
+  id: 'left-0',
+  pair: 'left-[52px]',
+  position_type: 'left-[152px]',
+  leverage: 'left-[232px]',
+  price: 'left-[292px]',
 };
 const LAST_STICKY_COL = 'price';
 
@@ -1139,9 +1140,19 @@ export default function TradeTable({ trades }: TradeTableProps) {
                       >
                         {/* ── Frozen sticky columns ── */}
 
+                        {/* # (Trade Number) — STICKY */}
+                        <td className={cn(
+                          'sticky left-0 z-10 whitespace-nowrap px-2 py-3 text-xs font-mono text-zinc-500',
+                          trade.status === 'open' ? 'bg-zinc-900' : 'bg-[#0d1117]',
+                        )}>
+                          #{typeof trade.id === 'string' && trade.id.length > 6
+                            ? trade.id.slice(-6)
+                            : trade.id}
+                        </td>
+
                         {/* Pair — STICKY */}
                         <td className={cn(
-                          'sticky left-0 z-10 whitespace-nowrap px-4 py-3 font-medium text-zinc-100',
+                          'sticky left-[52px] z-10 whitespace-nowrap px-4 py-3 font-medium text-zinc-100',
                           trade.status === 'open' ? 'bg-zinc-900' : 'bg-[#0d1117]',
                         )}>
                           {isOptionTrade(trade) ? (
@@ -1154,7 +1165,7 @@ export default function TradeTable({ trades }: TradeTableProps) {
 
                         {/* Type — STICKY */}
                         <td className={cn(
-                          'sticky left-[100px] z-10 whitespace-nowrap px-4 py-3',
+                          'sticky left-[152px] z-10 whitespace-nowrap px-4 py-3',
                           trade.status === 'open' ? 'bg-zinc-900' : 'bg-[#0d1117]',
                         )}>
                           {isOptionTrade(trade) ? (
@@ -1170,7 +1181,7 @@ export default function TradeTable({ trades }: TradeTableProps) {
 
                         {/* Leverage — STICKY */}
                         <td className={cn(
-                          'sticky left-[180px] z-10 whitespace-nowrap px-4 py-3 text-right',
+                          'sticky left-[232px] z-10 whitespace-nowrap px-4 py-3 text-right',
                           trade.status === 'open' ? 'bg-zinc-900' : 'bg-[#0d1117]',
                         )}>
                           {isOptionTrade(trade) ? (
@@ -1189,20 +1200,13 @@ export default function TradeTable({ trades }: TradeTableProps) {
 
                         {/* Entry Price — STICKY + right border */}
                         <td className={cn(
-                          'sticky left-[240px] z-10 border-r border-zinc-700 whitespace-nowrap px-4 py-3 text-right font-mono text-zinc-300',
+                          'sticky left-[292px] z-10 border-r border-zinc-700 whitespace-nowrap px-4 py-3 text-right font-mono text-zinc-300',
                           trade.status === 'open' ? 'bg-zinc-900' : 'bg-[#0d1117]',
                         )}>
                           {formatPrice(trade.price)}
                         </td>
 
                         {/* ── Scrollable columns ── */}
-
-                        {/* ID */}
-                        <td className="whitespace-nowrap px-4 py-3 text-xs font-mono text-zinc-500">
-                          #{typeof trade.id === 'string' && trade.id.length > 6
-                            ? trade.id.slice(-6)
-                            : trade.id}
-                        </td>
 
                         {/* Date */}
                         <td className="whitespace-nowrap px-4 py-3 text-zinc-300">
