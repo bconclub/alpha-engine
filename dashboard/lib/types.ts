@@ -135,6 +135,26 @@ export interface BotStatus {
   // Daily P&L breakdown
   daily_pnl_scalp?: number;
   daily_pnl_options?: number;
+  // Diagnostics — "Why No Trades?" blob from engine
+  diagnostics?: {
+    last_scan_ago_s: number;
+    paused: { is_paused: boolean; reason: string | null };
+    positions: { open: number; max: number; slots_free: number; pairs: string[] };
+    balance: {
+      delta: number | null; binance: number | null;
+      delta_min_trade: boolean; binance_min_trade: boolean;
+    };
+    pairs: Record<string, {
+      skip_reason: string;
+      in_position: boolean;
+      position_side: string | null;
+      cooldowns: { sl: number; reversal: number; streak: number; phantom: number };
+      signals: {
+        bull_count: number; bear_count: number;
+        rsi: number | null; momentum: number | null; trend_15m: string | null;
+      };
+    }>;
+  } | null;
 }
 
 export interface BotCommand {

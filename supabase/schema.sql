@@ -188,7 +188,10 @@ create table if not exists public.bot_status (
     chop_score        numeric(10,4),
     atr_ratio         numeric(10,4),
     net_change_30m    numeric(10,4),
-    regime_since      text
+    regime_since      text,
+
+    -- Diagnostics (JSONB blob with per-pair skip reasons, cooldowns, signals)
+    diagnostics       jsonb
 );
 
 -- Indexes: latest-status lookup, timeline

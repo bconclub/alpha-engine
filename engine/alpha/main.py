@@ -84,6 +84,8 @@ class AlphaBot:
         self._hourly_losses: int = 0
         # Daily loss tracking flags kept for compatibility (no auto-pause)
         self._daily_loss_warned: bool = False
+        # Track last analysis cycle time for diagnostics
+        self._last_cycle_time: float = time.monotonic()
 
     @property
     def all_pairs(self) -> list[str]:
@@ -419,6 +421,7 @@ class AlphaBot:
         """Analyze all pairs (both exchanges) concurrently, switch strategies by signal strength."""
         if not self._running:
             return
+        self._last_cycle_time = time.monotonic()
 
         # Refresh pair/setup configs from DB (hot-reload every analysis cycle)
         try:
@@ -1022,6 +1025,52 @@ class AlphaBot:
         status["net_change_30m"] = round(best_net_change, 3)
         if regime_since_ts:
             status["regime_since"] = regime_since_ts
+
+        # ── Diagnostics blob — "Why No Trades?" data for dashboard ──
+        try:
+            now_m = time.monotonic()
+            diag: dict[str, Any] = {
+                "last_scan_ago_s": int(now_m - self._last_cycle_time),
+                "paused": {"is_paused": rm.is_paused, "reason": rm._pause_reason or None},
+                "positions": {
+                    "open": len(rm.open_positions),
+                    "max": rm.max_concurrent,
+                    "slots_free": rm.max_concurrent - len(rm.open_positions),
+                    "pairs": [p.pair for p in rm.open_positions],
+                },
+                "balance": {
+                    "delta": round(delta_bal, 2) if delta_bal else None,
+                    "binance": round(binance_bal, 2) if binance_bal else None,
+                    "delta_min_trade": bool(delta_bal and delta_bal >= 5),
+                    "binance_min_trade": bool(binance_bal and binance_bal >= 6),
+                },
+                "pairs": {},
+            }
+            for pair, scalp in self._scalp_strategies.items():
+                sl_cd = max(0, int((ScalpStrategy._pair_last_sl_time.get(pair, 0) + 120) - now_m))
+                rev_cd = max(0, int((ScalpStrategy._pair_last_reversal_time.get(pair, 0) + 120) - now_m))
+                streak_cd = max(0, int(ScalpStrategy._pair_streak_pause_until.get(pair, 0) - now_m))
+                phantom_cd = max(0, int(getattr(scalp, "_phantom_cooldown_until", 0) - now_m))
+                sig = getattr(scalp, "last_signal_state", None) or {}
+                diag["pairs"][pair] = {
+                    "skip_reason": getattr(scalp, "_skip_reason", "") or "NONE",
+                    "in_position": scalp.in_position,
+                    "position_side": scalp.position_side,
+                    "cooldowns": {
+                        "sl": sl_cd, "reversal": rev_cd,
+                        "streak": streak_cd, "phantom": phantom_cd,
+                    },
+                    "signals": {
+                        "bull_count": sig.get("bull_count", 0),
+                        "bear_count": sig.get("bear_count", 0),
+                        "rsi": round(sig["rsi"], 1) if sig.get("rsi") is not None else None,
+                        "momentum": round(sig["momentum_60s"], 3) if sig.get("momentum_60s") is not None else None,
+                        "trend_15m": sig.get("trend_15m"),
+                    },
+                }
+            status["diagnostics"] = diag
+        except Exception:
+            logger.debug("Failed to build diagnostics blob")
 
         await self.db.save_bot_status(status)
 

@@ -516,6 +516,9 @@ alter table public.bot_status add column if not exists uptime_seconds        int
 alter table public.trades add column if not exists slippage_pct  numeric(10,4);
 alter table public.trades add column if not exists slippage_flag boolean not null default false;
 
+-- ── bot_status: diagnostics JSONB (v3.23) ──
+alter table public.bot_status add column if not exists diagnostics jsonb;
+
 -- ── Indexes (all IF NOT EXISTS — safe to re-run) ──
 create index if not exists idx_strategy_log_exchange   on public.strategy_log (exchange);
 create index if not exists idx_strategy_log_created    on public.strategy_log (created_at desc);

@@ -91,6 +91,16 @@ const navItems = [
     ),
   },
   {
+    name: 'Status',
+    href: '/status',
+    icon: (
+      <svg width="18" height="18" viewBox="0 0 20 20" fill="none" xmlns="http://www.w3.org/2000/svg">
+        <path d="M10 2C5.58 2 2 5.58 2 10s3.58 8 8 8 8-3.58 8-8-3.58-8-8-8zm0 14.5c-3.58 0-6.5-2.92-6.5-6.5S6.42 3.5 10 3.5s6.5 2.92 6.5 6.5-2.92 6.5-6.5 6.5z" fill="currentColor" />
+        <path d="M10.5 6H9v5l4.28 2.54.72-1.21-3.5-2.08V6z" fill="currentColor" />
+      </svg>
+    ),
+  },
+  {
     name: 'Setting',
     href: '/settings',
     icon: (
