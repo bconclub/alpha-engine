@@ -122,6 +122,19 @@ export function PerformancePanel() {
 
   const totalPnL = trades.reduce((s, t) => s + t.pnl, 0);
 
+  // Fee breakdown: gross P&L (before fees) and total fees
+  const { grossPnL, totalFees } = useMemo(() => {
+    let gross = 0;
+    let fees = 0;
+    for (const t of trades) {
+      const tradeFees = (t.entry_fee ?? 0) + (t.exit_fee ?? 0);
+      fees += tradeFees;
+      // Use gross_pnl if available, otherwise derive from net + fees
+      gross += t.gross_pnl != null ? t.gross_pnl : (t.pnl + tradeFees);
+    }
+    return { grossPnL: gross, totalFees: fees };
+  }, [trades]);
+
   return (
     <div className="bg-[#0d1117] border border-zinc-800 rounded-xl overflow-hidden">
       {/* Header */}
@@ -133,14 +146,27 @@ export function PerformancePanel() {
           Performance
         </h3>
         <div className="flex items-center gap-3 md:gap-4">
-          <div className="flex flex-wrap gap-2 md:gap-3 text-xs">
-            <span className={cn('font-mono', totalPnL >= 0 ? 'text-[#00c853]' : 'text-[#ff1744]')}>
-              {formatPnL(totalPnL)}
-            </span>
-            <span className="text-zinc-500">|</span>
-            <span className="text-zinc-300">{formatPercentage(winRate)} WR</span>
-            <span className="text-zinc-500">|</span>
-            <span className="text-zinc-400">{totalTrades} trades</span>
+          <div className="flex flex-col items-end gap-0.5">
+            <div className="flex flex-wrap gap-2 md:gap-3 text-xs">
+              <span className={cn('font-mono font-bold', totalPnL >= 0 ? 'text-[#00c853]' : 'text-[#ff1744]')}>
+                {formatPnL(totalPnL)} net
+              </span>
+              <span className="text-zinc-500">|</span>
+              <span className="text-zinc-300">{formatPercentage(winRate)} WR</span>
+              <span className="text-zinc-500">|</span>
+              <span className="text-zinc-400">{totalTrades} trades</span>
+            </div>
+            {totalFees > 0 && (
+              <div className="flex gap-2 text-[10px] font-mono">
+                <span className={cn(grossPnL >= 0 ? 'text-[#00c853]/70' : 'text-[#ff1744]/70')}>
+                  {formatPnL(grossPnL)} P&L
+                </span>
+                <span className="text-zinc-600">|</span>
+                <span className="text-zinc-500">
+                  ${totalFees.toFixed(2)} fees
+                </span>
+              </div>
+            )}
           </div>
           <svg
             className={cn('w-4 h-4 text-zinc-500 transition-transform', isCollapsed ? '' : 'rotate-180')}
@@ -172,6 +198,40 @@ export function PerformancePanel() {
               </button>
             ))}
           </div>
+
+          {/* Fee breakdown row */}
+          {totalFees > 0 && (
+            <div className="flex items-center gap-4 bg-zinc-900/40 border border-zinc-800/50 rounded-lg px-4 py-2.5">
+              <div className="flex items-center gap-2">
+                <span className="text-[10px] text-zinc-500 uppercase tracking-wider">Net</span>
+                <span className={cn('text-sm font-mono font-bold', totalPnL >= 0 ? 'text-[#00c853]' : 'text-[#ff1744]')}>
+                  {formatPnL(totalPnL)}
+                </span>
+              </div>
+              <span className="text-zinc-700">=</span>
+              <div className="flex items-center gap-2">
+                <span className="text-[10px] text-zinc-500 uppercase tracking-wider">Gross</span>
+                <span className={cn('text-sm font-mono', grossPnL >= 0 ? 'text-[#00c853]' : 'text-[#ff1744]')}>
+                  {formatPnL(grossPnL)}
+                </span>
+              </div>
+              <span className="text-zinc-700">&minus;</span>
+              <div className="flex items-center gap-2">
+                <span className="text-[10px] text-zinc-500 uppercase tracking-wider">Fees</span>
+                <span className="text-sm font-mono text-zinc-400">
+                  ${totalFees.toFixed(2)}
+                </span>
+              </div>
+              {totalTrades > 0 && (
+                <div className="ml-auto hidden sm:flex items-center gap-2">
+                  <span className="text-[10px] text-zinc-600">avg fee/trade</span>
+                  <span className="text-xs font-mono text-zinc-500">
+                    ${(totalFees / totalTrades).toFixed(4)}
+                  </span>
+                </div>
+              )}
+            </div>
+          )}
 
           {/* P&L Chart */}
           <div className="h-48 md:h-64">
