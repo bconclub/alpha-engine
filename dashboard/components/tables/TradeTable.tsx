@@ -210,7 +210,7 @@ function getExitReasonColor(reason: string): string {
   // Red: stop loss
   if (upper === 'SL' || upper === 'SL_EXCHANGE') return 'text-red-400';
   // Yellow: conditional exits
-  if (['REVERSAL', 'PULLBACK', 'DECAY', 'DECAY_EMERGENCY', 'SPOT_PULLBACK', 'SPOT_DECAY', 'SPOT_BREAKEVEN'].includes(upper)) return 'text-yellow-400';
+  if (['REVERSAL', 'PULLBACK', 'DECAY', 'DECAY_EMERGENCY', 'MOMENTUM_FADE', 'DEAD_MOMENTUM', 'SPOT_PULLBACK', 'SPOT_DECAY', 'SPOT_BREAKEVEN'].includes(upper)) return 'text-yellow-400';
   // Orange: external/phantom
   if (upper === 'PHANTOM' || upper === 'POSITION_GONE' || upper === 'CLOSED_BY_EXCHANGE') return 'text-orange-400';
   // Gray: neutral exits
@@ -223,8 +223,8 @@ function parseExitReason(reason?: string | null): string | null {
   if (!reason) return null;
   const upper = reason.toUpperCase().trim();
   // Check from most specific to least (HARD_TP before TP)
-  const keywords = ['HARD_TP', 'PROFIT_LOCK', 'DECAY_EMERGENCY', 'MANUAL_CLOSE',
-    'SPOT_PULLBACK', 'SPOT_DECAY', 'SPOT_BREAKEVEN',
+  const keywords = ['HARD_TP', 'PROFIT_LOCK', 'DEAD_MOMENTUM', 'MOMENTUM_FADE',
+    'DECAY_EMERGENCY', 'MANUAL_CLOSE', 'SPOT_PULLBACK', 'SPOT_DECAY', 'SPOT_BREAKEVEN',
     'TRAIL', 'TP', 'SL', 'FLAT', 'TIMEOUT', 'BREAKEVEN', 'REVERSAL', 'PULLBACK',
     'DECAY', 'SAFETY', 'EXPIRY'];
   for (const kw of keywords) {

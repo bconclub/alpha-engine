@@ -2258,8 +2258,19 @@ class ScalpStrategy(BaseStrategy):
                 self._reversal_exit_logged = False  # allow fresh log if it flips again
 
             # Check 2: momentum dying (below 0.02% absolute — truly dead)
-            # Requires MOM_DYING_CONFIRM_SECONDS of sustained dead momentum
+            # MOMENTUM_FADE: if dying AND in profit → exit immediately, no timer.
+            # +0.05% on 30x = +1.5% capital. Take it before it goes red.
+            # If NOT in profit → fall through to timer → DEAD_MOMENTUM path.
             if not reversal_reason and abs(momentum_60s) < self.MOMENTUM_DYING_PCT:
+                if pnl_pct > 0.05 and hold_seconds > 30:
+                    self.logger.info(
+                        "MOMENTUM_FADE: %s pnl=%+.2f%% hold=%ds mom=%.3f%% — "
+                        "taking profit before fade (no timer wait)",
+                        self.pair, pnl_pct, int(hold_seconds), abs(momentum_60s),
+                    )
+                    return self._do_exit(current_price, pnl_pct, side, "MOMENTUM_FADE", hold_seconds)
+
+                # Requires MOM_DYING_CONFIRM_SECONDS of sustained dead momentum
                 if self._mom_dying_since == 0:
                     self._mom_dying_since = time.monotonic()
                     self.logger.info(
@@ -2509,7 +2520,7 @@ class ScalpStrategy(BaseStrategy):
         # TRAIL/BREAKEVEN/RATCHET protect profit — blocking them turns winners into losers.
         _PROTECTED_EXIT_TYPES = {"SL", "TRAIL", "BREAKEVEN", "PROFIT_LOCK",
                                  "HARD_TP", "HARD_TP_10PCT", "RATCHET", "SAFETY",
-                                 "DEAD_MOMENTUM"}
+                                 "DEAD_MOMENTUM", "MOMENTUM_FADE"}
         clean_type = exit_type.replace("WS-", "")
         if clean_type not in _PROTECTED_EXIT_TYPES and self.entry_price > 0:
             if self.is_futures:
