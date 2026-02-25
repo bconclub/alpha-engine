@@ -60,6 +60,18 @@ const navItems = [
     ),
   },
   {
+    name: 'Brain',
+    href: '/brain',
+    icon: (
+      <svg width="18" height="18" viewBox="0 0 20 20" fill="none" xmlns="http://www.w3.org/2000/svg">
+        <path d="M10 2C7.5 2 5.5 3.5 5 5.5C3.5 6 2 7.5 2 9.5C2 11 3 12.5 4 13V16C4 17 5 18 6 18H8C8 18 8.5 17.5 8.5 17V14H11.5V17C11.5 17.5 12 18 12 18H14C15 18 16 17 16 16V13C17 12.5 18 11 18 9.5C18 7.5 16.5 6 15 5.5C14.5 3.5 12.5 2 10 2Z" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+        <circle cx="7.5" cy="9" r="1" fill="currentColor" />
+        <circle cx="12.5" cy="9" r="1" fill="currentColor" />
+        <path d="M7 11.5C7 11.5 8.5 13 10 13C11.5 13 13 11.5 13 11.5" stroke="currentColor" strokeWidth="1" strokeLinecap="round" />
+      </svg>
+    ),
+  },
+  {
     name: 'Status',
     href: '/status',
     icon: (
@@ -71,12 +83,13 @@ const navItems = [
   },
 ];
 
-// Bottom nav items — subset for mobile
+// Bottom nav items — subset for mobile (5 max for mobile bar)
 const bottomNavItems = [
   { name: 'Dashboard', href: '/', icon: navItems[0].icon },
   { name: 'Trades', href: '/trades', icon: navItems[1].icon },
+  { name: 'Brain', href: '/brain', icon: navItems[4].icon },
   { name: 'Analytics', href: '/analytics', icon: navItems[3].icon },
-  { name: 'Status', href: '/status', icon: navItems[4].icon },
+  { name: 'Status', href: '/status', icon: navItems[5].icon },
 ];
 
 export function Sidebar() {

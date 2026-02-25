@@ -348,3 +348,44 @@ export interface SignalState {
   direction: string; // 'bull' | 'bear' | 'neutral'
   updated_at: string;
 }
+
+// ── Alpha Brain types ───────────────────────────────────────
+
+export interface ChangelogEntry {
+  id: number;
+  created_at: string;
+  deployed_at: string | null;
+  change_type: 'gpfc' | 'param_change' | 'bugfix' | 'feature' | 'revert' | 'strategy';
+  title: string;
+  description: string | null;
+  version: string | null;
+  parameters_before: Record<string, unknown> | null;
+  parameters_after: Record<string, unknown> | null;
+  status: 'pending' | 'deployed' | 'reverted';
+  git_commit_hash: string | null;
+  tags: string[] | null;
+}
+
+export interface AlphaAnalysis {
+  id: number;
+  created_at: string;
+  changelog_entry_id: number | null;
+  analysis_type: 'general' | 'changelog_impact' | 'pair_review' | 'strategy_review';
+  prompt_context: Record<string, unknown> | null;
+  model_used: string;
+  analysis_text: string;
+  summary: string | null;
+  recommendations: { action: string; priority: 'high' | 'medium' | 'low'; reason: string }[] | null;
+  input_tokens: number | null;
+  output_tokens: number | null;
+  triggered_by: 'manual' | 'scheduled';
+}
+
+export interface SnapshotStats {
+  trade_count: number;
+  win_rate: number;
+  avg_pnl: number;
+  total_pnl: number;
+  avg_hold_seconds: number;
+  exit_breakdown: Record<string, number>;
+}

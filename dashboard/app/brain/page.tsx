@@ -1,177 +1,37 @@
 'use client';
 
-import { useState, useEffect, useCallback, useMemo } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import { getSupabase } from '@/lib/supabase';
-import { cn, formatPnL } from '@/lib/utils';
-import type { Trade } from '@/lib/types';
+import { cn } from '@/lib/utils';
+import type { Trade, ChangelogEntry } from '@/lib/types';
+import { ChangelogTab } from '@/components/brain/ChangelogTab';
+import { AnalysisTab } from '@/components/brain/AnalysisTab';
+import { SentinelTab } from '@/components/brain/SentinelTab';
 
-// ─── Types ────────────────────────────────────────────────────────────────────
+// ─── Tab definitions ─────────────────────────────────────────────────────────
 
-interface PairSignal {
-  shortPair: string;
-  fullPair: string;
-  trades: number;
-  wins: number;
-  winRate: number;
-  pnl: number;
-  streak: string; // "WWLWL" last 5
-  streakTrades: Trade[];
-  topExit: string;      // e.g. "TRAIL 80% WR"
-  worstExit: string;    // e.g. "SL 0% WR"
-  signal: string;       // one-line recommendation
-  signalType: 'good' | 'warn' | 'bad' | 'neutral';
-  config: { sl: number; tp: number; trail: number };
-  recommendations: string[];
-}
+type Tab = 'changelog' | 'analysis' | 'sentinel';
 
-interface BrainLogEntry {
-  id: string;
-  created_at: string;
-  command: string;
-  params: Record<string, unknown>;
-  executed: boolean;
-  result: string | null;
-}
+const TABS: { key: Tab; label: string; description: string }[] = [
+  { key: 'changelog', label: 'Changelog', description: 'Track GPFCs & changes' },
+  { key: 'analysis',  label: 'Analysis',  description: 'Claude AI insights' },
+  { key: 'sentinel',  label: 'Sentinel',  description: 'Pair analysis' },
+];
 
-// ─── Config (mirrors scalp.py) ────────────────────────────────────────────────
-
-const PAIR_CONFIG: Record<string, { sl: number; tp: number; trail: number }> = {
-  BTC: { sl: 0.30, tp: 1.50, trail: 0.20 },
-  ETH: { sl: 0.35, tp: 1.50, trail: 0.20 },
-  XRP: { sl: 0.40, tp: 2.00, trail: 0.20 },
-  SOL: { sl: 0.35, tp: 1.50, trail: 0.20 },
-};
-
-// ─── Helpers ──────────────────────────────────────────────────────────────────
-
-function shortPair(pair: string): string {
-  return pair.split('/')[0];
-}
-
-function classifyExit(reason: string | undefined): string {
-  if (!reason) return '?';
-  const r = reason.toUpperCase();
-  if (r.includes('TRAIL')) return 'TRAIL';
-  if (r.includes('STOP') || r.includes('SL') || r.includes('STOP-LOSS') || r.includes('STOP_LOSS')) return 'SL';
-  if (r.includes('BREAKEVEN') || r.includes('BREAK-EVEN') || r.includes('BE EXIT')) return 'BE';
-  if (r.includes('EXPIR')) return 'EXPIRY';
-  if (r.includes('TIMEOUT') || r.includes('MAX HOLD') || r.includes('MAX_HOLD')) return 'TIMEOUT';
-  if (r.includes('FLAT') || r.includes('FLATLINE')) return 'FLAT';
-  if (r.includes('REVERSAL') || r.includes('SIGNAL')) return 'REV';
-  if (r.includes('TP') || r.includes('TAKE PROFIT') || r.includes('TAKE_PROFIT') || r.includes('TARGET')) return 'TP';
-  if (r.includes('PULLBACK') || r.includes('DECAY')) return 'PB';
-  if (r.includes('DUST')) return 'DUST';
-  return '?';
-}
-
-function holdMinutes(opened: string, closed: string | null | undefined): number {
-  if (!closed) return 0;
-  return (new Date(closed).getTime() - new Date(opened).getTime()) / 60000;
-}
-
-// ─── Analysis ─────────────────────────────────────────────────────────────────
-
-function buildPairSignal(trades: Trade[], sp: string): PairSignal {
-  const pairTrades = trades.filter((t) => shortPair(t.pair) === sp);
-  const wins = pairTrades.filter((t) => t.pnl > 0);
-  const winRate = pairTrades.length > 0 ? (wins.length / pairTrades.length) * 100 : 0;
-  const pnl = pairTrades.reduce((s, t) => s + t.pnl, 0);
-  const fullPair = pairTrades[0]?.pair || sp;
-
-  // Last 5 streak
-  const last5 = pairTrades.slice(0, 5);
-  const streak = last5.map((t) => (t.pnl > 0 ? 'W' : 'L')).join('');
-
-  // Exit stats
-  const exitMap: Record<string, { count: number; wins: number }> = {};
-  for (const t of pairTrades) {
-    const ex = classifyExit(t.reason);
-    if (!exitMap[ex]) exitMap[ex] = { count: 0, wins: 0 };
-    exitMap[ex].count++;
-    if (t.pnl > 0) exitMap[ex].wins++;
-  }
-  const exitEntries = Object.entries(exitMap).filter(([, d]) => d.count >= 2);
-  exitEntries.sort((a, b) => (b[1].wins / b[1].count) - (a[1].wins / a[1].count));
-  const topExit = exitEntries[0] ? `${exitEntries[0][0]} ${((exitEntries[0][1].wins / exitEntries[0][1].count) * 100).toFixed(0)}% WR` : '—';
-  const worstExit = exitEntries.length > 1
-    ? `${exitEntries[exitEntries.length - 1][0]} ${((exitEntries[exitEntries.length - 1][1].wins / exitEntries[exitEntries.length - 1][1].count) * 100).toFixed(0)}% WR`
-    : '—';
-
-  // Recommendations + signal
-  const recommendations: string[] = [];
-  let signal = '';
-  let signalType: PairSignal['signalType'] = 'neutral';
-
-  // Long vs short
-  const longs = pairTrades.filter((t) => t.position_type === 'long');
-  const shorts = pairTrades.filter((t) => t.position_type === 'short');
-  const longWR = longs.length >= 3 ? (longs.filter((t) => t.pnl > 0).length / longs.length) * 100 : -1;
-  const shortWR = shorts.length >= 3 ? (shorts.filter((t) => t.pnl > 0).length / shorts.length) * 100 : -1;
-
-  if (pairTrades.length >= 5 && winRate === 0) {
-    signal = `0% win rate on ${pairTrades.length} trades — disable`;
-    signalType = 'bad';
-    recommendations.push('Disable this pair');
-  } else if (pairTrades.length >= 5 && winRate < 20) {
-    signal = `${winRate.toFixed(0)}% WR — reduce allocation or widen SL`;
-    signalType = 'bad';
-    recommendations.push('Widen SL');
-  } else if (pairTrades.length >= 5 && winRate >= 40) {
-    signal = `${winRate.toFixed(0)}% WR — performing well`;
-    signalType = 'good';
-  } else if (pairTrades.length >= 3) {
-    signal = `${winRate.toFixed(0)}% WR on ${pairTrades.length} trades`;
-    signalType = winRate >= 30 ? 'warn' : 'bad';
-  } else {
-    signal = `Only ${pairTrades.length} trades — not enough data`;
-    signalType = 'neutral';
-  }
-
-  if (longWR >= 0 && shortWR >= 0 && Math.abs(longWR - shortWR) > 20) {
-    if (shortWR > longWR) {
-      recommendations.push(`Bias shorts (${shortWR.toFixed(0)}% vs ${longWR.toFixed(0)}% long)`);
-    } else {
-      recommendations.push(`Bias longs (${longWR.toFixed(0)}% vs ${shortWR.toFixed(0)}% short)`);
-    }
-  }
-
-  // SL exits with 0% WR
-  const slData = exitMap['SL'];
-  if (slData && slData.count >= 3 && slData.wins === 0) {
-    recommendations.push('SL exits 0% WR — review SL distance');
-  }
-
-  const config = PAIR_CONFIG[sp] || { sl: 0.35, tp: 1.50, trail: 0.20 };
-
-  return {
-    shortPair: sp,
-    fullPair,
-    trades: pairTrades.length,
-    wins: wins.length,
-    winRate,
-    pnl,
-    streak,
-    streakTrades: last5,
-    topExit,
-    worstExit,
-    signal,
-    signalType,
-    config,
-    recommendations,
-  };
-}
-
-// ─── Component ────────────────────────────────────────────────────────────────
+// ─── Page ────────────────────────────────────────────────────────────────────
 
 export default function BrainPage() {
+  const [activeTab, setActiveTab] = useState<Tab>('changelog');
   const [trades, setTrades] = useState<Trade[]>([]);
+  const [changelog, setChangelog] = useState<ChangelogEntry[]>([]);
   const [loading, setLoading] = useState(true);
-  const [applyingPair, setApplyingPair] = useState<string | null>(null);
-  const [feedback, setFeedback] = useState<{ type: 'success' | 'error'; message: string } | null>(null);
-  const [brainLog, setBrainLog] = useState<BrainLogEntry[]>([]);
+
+  // Cross-tab state: when user clicks "Analyze Impact" on a changelog entry
+  const [pendingAnalysis, setPendingAnalysis] = useState<ChangelogEntry | null>(null);
+
+  // ─── Data fetching (shared between Changelog & Analysis tabs) ──────────────
 
   const fetchTrades = useCallback(async () => {
-    setLoading(true);
     try {
       const sb = getSupabase();
       if (!sb) return;
@@ -201,251 +61,113 @@ export default function BrainPage() {
         leverage: Number(row.leverage || 1),
         position_type: String(row.position_type || 'spot') as Trade['position_type'],
         reason: row.reason ? String(row.reason) : undefined,
+        exit_reason: row.exit_reason ? String(row.exit_reason) : (row.reason ? String(row.reason) : undefined),
         order_id: row.order_id ? String(row.order_id) : undefined,
+        setup_type: row.setup_type ? String(row.setup_type) : undefined,
       }));
       setTrades(normalized);
     } catch (err) {
       console.error('Failed to fetch trades:', err);
-    } finally {
-      setLoading(false);
     }
   }, []);
 
-  const fetchBrainLog = useCallback(async () => {
+  const fetchChangelog = useCallback(async () => {
     try {
       const sb = getSupabase();
       if (!sb) return;
-      const { data } = await sb
-        .from('bot_commands')
+      const { data, error } = await sb
+        .from('changelog')
         .select('*')
-        .eq('command', 'update_pair_config')
         .order('created_at', { ascending: false })
-        .limit(20);
-      setBrainLog((data as BrainLogEntry[]) || []);
-    } catch { /* silent */ }
+        .limit(100);
+      if (error) throw error;
+      setChangelog((data as ChangelogEntry[]) || []);
+    } catch (err) {
+      console.error('Failed to fetch changelog:', err);
+    }
   }, []);
 
   useEffect(() => {
-    fetchTrades();
-    fetchBrainLog();
-  }, [fetchTrades, fetchBrainLog]);
+    const load = async () => {
+      setLoading(true);
+      await Promise.all([fetchTrades(), fetchChangelog()]);
+      setLoading(false);
+    };
+    load();
+  }, [fetchTrades, fetchChangelog]);
 
-  // Build signals
-  const pairs = useMemo(() => {
-    return Array.from(new Set(trades.map((t) => shortPair(t.pair)))).filter(Boolean).sort();
-  }, [trades]);
+  // ─── Cross-tab: Changelog → Analysis ──────────────────────────────────────
 
-  const signals = useMemo(() => {
-    const built = pairs.map((p) => buildPairSignal(trades, p));
-    built.sort((a, b) => b.winRate - a.winRate);
-    return built;
-  }, [trades, pairs]);
+  const handleAnalyzeEntry = useCallback((entry: ChangelogEntry) => {
+    setPendingAnalysis(entry);
+    setActiveTab('analysis');
+  }, []);
 
-  // Summary
-  const totalPnl = useMemo(() => trades.reduce((s, t) => s + t.pnl, 0), [trades]);
-  const totalWins = useMemo(() => trades.filter((t) => t.pnl > 0).length, [trades]);
-  const overallWR = trades.length > 0 ? (totalWins / trades.length) * 100 : 0;
+  const handleAnalysisDone = useCallback(() => {
+    setPendingAnalysis(null);
+  }, []);
 
-  // Apply
-  const handleApply = useCallback(async (s: PairSignal) => {
-    setApplyingPair(s.shortPair);
-    try {
-      const sb = getSupabase();
-      if (!sb) throw new Error('No connection');
-      const params: Record<string, unknown> = {
-        pair: s.fullPair,
-        sl: s.config.sl,
-        tp: s.config.tp,
-        trail_activate: s.config.trail,
-      };
-      for (const rec of s.recommendations) {
-        if (rec.includes('Bias shorts')) params.bias = 'short';
-        else if (rec.includes('Bias longs')) params.bias = 'long';
-        else if (rec.includes('Disable')) params.enabled = false;
-        else if (rec.includes('Widen SL')) params.sl = Math.min(s.config.sl + 0.10, 0.60);
-      }
-      const { error } = await sb.from('bot_commands').insert({ command: 'update_pair_config', params });
-      if (error) throw error;
-      setFeedback({ type: 'success', message: `Sent config update for ${s.shortPair}` });
-      fetchBrainLog();
-    } catch (err) {
-      setFeedback({ type: 'error', message: err instanceof Error ? err.message : 'Failed' });
-    } finally {
-      setApplyingPair(null);
-      setTimeout(() => setFeedback(null), 4000);
-    }
-  }, [fetchBrainLog]);
-
-  if (loading) {
-    return (
-      <div className="flex items-center justify-center min-h-[60vh]">
-        <div className="text-zinc-500 text-sm">Loading...</div>
-      </div>
-    );
-  }
+  // ─── Render ────────────────────────────────────────────────────────────────
 
   return (
     <div className="space-y-4">
       {/* Header */}
       <div className="flex items-center justify-between">
-        <h1 className="text-xl font-bold text-white">Sentinel</h1>
-        <button
-          onClick={() => { fetchTrades(); fetchBrainLog(); }}
-          className="rounded-lg border border-zinc-700 bg-zinc-800 px-3 py-1.5 text-xs text-zinc-300 hover:bg-zinc-700 hover:text-white transition-colors"
-        >
-          Refresh
-        </button>
-      </div>
-
-      {/* Feedback */}
-      {feedback && (
-        <div className={cn(
-          'rounded-lg px-4 py-2.5 text-sm font-medium',
-          feedback.type === 'success'
-            ? 'bg-emerald-400/10 text-emerald-400 border border-emerald-400/20'
-            : 'bg-red-400/10 text-red-400 border border-red-400/20',
-        )}>
-          {feedback.message}
+        <div>
+          <h1 className="text-xl font-bold text-white">Alpha Brain</h1>
+          <p className="text-xs text-zinc-600 mt-0.5">Changelog, AI analysis, pair intelligence</p>
         </div>
-      )}
-
-      {/* ─── Summary row ─────────────────────────────────────────────────── */}
-      <div className="flex items-center gap-6 text-sm font-mono">
-        <span className="text-zinc-500">{trades.length} trades</span>
-        <span className={overallWR >= 40 ? 'text-emerald-400' : 'text-red-400'}>{overallWR.toFixed(0)}% WR</span>
-        <span className={totalPnl >= 0 ? 'text-emerald-400' : 'text-red-400'}>{formatPnL(totalPnl)}</span>
+        {loading && (
+          <span className="inline-block w-4 h-4 border-2 border-zinc-600 border-t-zinc-300 rounded-full animate-spin" />
+        )}
       </div>
 
-      {/* ─── Pair signals ────────────────────────────────────────────────── */}
-      <div className="space-y-3">
-        {signals.map((s) => (
-          <PairRow key={s.shortPair} signal={s} onApply={handleApply} applying={applyingPair === s.shortPair} />
+      {/* Tab bar */}
+      <div className="flex items-center gap-1 bg-zinc-900/50 border border-zinc-800 rounded-xl p-1">
+        {TABS.map((tab) => (
+          <button
+            key={tab.key}
+            onClick={() => setActiveTab(tab.key)}
+            className={cn(
+              'flex-1 rounded-lg px-3 py-2 text-xs font-medium transition-all duration-150',
+              activeTab === tab.key
+                ? 'bg-zinc-800 text-white shadow-sm'
+                : 'text-zinc-500 hover:text-zinc-300 hover:bg-zinc-800/40',
+            )}
+          >
+            <span className="block">{tab.label}</span>
+            <span className={cn(
+              'block text-[10px] mt-0.5 transition-colors',
+              activeTab === tab.key ? 'text-zinc-400' : 'text-zinc-600',
+            )}>
+              {tab.description}
+            </span>
+          </button>
         ))}
       </div>
 
-      {/* ─── Sentinel log ────────────────────────────────────────────────── */}
-      {brainLog.length > 0 && (
-        <div className="bg-card border border-zinc-800 rounded-xl p-4">
-          <p className="text-[10px] text-zinc-500 uppercase tracking-wider mb-3">Sentinel Log</p>
-          <div className="space-y-1.5">
-            {brainLog.map((entry) => {
-              const params = entry.params || {};
-              const pair = shortPair(String(params.pair || '?'));
-              const changes = Object.entries(params)
-                .filter(([k]) => k !== 'pair')
-                .map(([k, v]) => `${k}=${String(v)}`)
-                .join(' ');
-              return (
-                <div key={entry.id} className="flex items-center gap-3 text-xs font-mono">
-                  <span className="text-zinc-600">{new Date(entry.created_at).toLocaleDateString()}</span>
-                  <span className="text-zinc-300 font-medium">{pair}</span>
-                  <span className="text-zinc-500">{changes}</span>
-                  <span className={entry.executed ? 'text-emerald-500' : 'text-amber-500'}>
-                    {entry.executed ? 'done' : 'pending'}
-                  </span>
-                </div>
-              );
-            })}
-          </div>
-        </div>
-      )}
-    </div>
-  );
-}
+      {/* Tab content */}
+      <div className="min-h-[40vh]">
+        {activeTab === 'changelog' && (
+          <ChangelogTab
+            trades={trades}
+            onAnalyzeEntry={handleAnalyzeEntry}
+          />
+        )}
 
-// ─── Pair Row ─────────────────────────────────────────────────────────────────
+        {activeTab === 'analysis' && (
+          <AnalysisTab
+            trades={trades}
+            changelog={changelog}
+            pendingAnalysis={pendingAnalysis}
+            onAnalysisDone={handleAnalysisDone}
+          />
+        )}
 
-function PairRow({
-  signal: s,
-  onApply,
-  applying,
-}: {
-  signal: PairSignal;
-  onApply: (s: PairSignal) => void;
-  applying: boolean;
-}) {
-  const borderColor =
-    s.signalType === 'good' ? 'border-emerald-800/40'
-    : s.signalType === 'bad' ? 'border-red-800/40'
-    : s.signalType === 'warn' ? 'border-amber-800/40'
-    : 'border-zinc-800';
-
-  return (
-    <div className={cn('bg-card border rounded-xl p-4', borderColor)}>
-      {/* Row 1: Pair + stats + PnL */}
-      <div className="flex items-center justify-between mb-3">
-        <div className="flex items-center gap-3">
-          <span className="text-base font-bold text-white">{s.shortPair}</span>
-          <span className="text-xs font-mono text-zinc-500">{s.trades} trades</span>
-          <span className={cn('text-xs font-mono font-medium', s.winRate >= 40 ? 'text-emerald-400' : s.winRate >= 25 ? 'text-amber-400' : 'text-red-400')}>
-            {s.winRate.toFixed(0)}% WR
-          </span>
-        </div>
-        <span className={cn('text-sm font-mono font-bold', s.pnl >= 0 ? 'text-emerald-400' : 'text-red-400')}>
-          {formatPnL(s.pnl)}
-        </span>
+        {activeTab === 'sentinel' && (
+          <SentinelTab />
+        )}
       </div>
-
-      {/* Row 2: Last 5 trades — visual streak */}
-      <div className="flex items-center gap-1.5 mb-3">
-        <span className="text-[10px] text-zinc-600 mr-1">LAST 5</span>
-        {s.streakTrades.map((t) => {
-          const win = t.pnl > 0;
-          const exit = classifyExit(t.reason);
-          const hold = holdMinutes(t.timestamp, t.closed_at);
-          return (
-            <div
-              key={t.id}
-              className={cn(
-                'flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] font-mono',
-                win ? 'bg-emerald-400/10 text-emerald-400' : 'bg-red-400/10 text-red-400',
-              )}
-              title={`${win ? 'Win' : 'Loss'} · ${exit} · ${hold.toFixed(0)}m · ${formatPnL(t.pnl)}`}
-            >
-              <span className="font-bold">{win ? 'W' : 'L'}</span>
-              <span className={win ? 'text-emerald-500/60' : 'text-red-500/60'}>{exit}</span>
-            </div>
-          );
-        })}
-        {s.streakTrades.length === 0 && <span className="text-[10px] text-zinc-600">no trades</span>}
-      </div>
-
-      {/* Row 3: Exit stats + signal */}
-      <div className="flex items-center gap-4 mb-3 text-xs font-mono">
-        <span className="text-zinc-500">Best: <span className="text-emerald-400">{s.topExit}</span></span>
-        <span className="text-zinc-500">Worst: <span className="text-red-400">{s.worstExit}</span></span>
-      </div>
-
-      {/* Row 4: Signal — the one-liner */}
-      <div className={cn(
-        'rounded-lg px-3 py-2 text-xs font-mono',
-        s.signalType === 'good' ? 'bg-emerald-400/5 text-emerald-400'
-        : s.signalType === 'bad' ? 'bg-red-400/5 text-red-400'
-        : s.signalType === 'warn' ? 'bg-amber-400/5 text-amber-400'
-        : 'bg-zinc-800/50 text-zinc-400',
-      )}>
-        {s.signal}
-      </div>
-
-      {/* Row 5: Recommendations + Apply */}
-      {s.recommendations.length > 0 && (
-        <div className="mt-3 flex items-center justify-between gap-3">
-          <div className="flex flex-wrap gap-2">
-            {s.recommendations.map((rec, i) => (
-              <span key={i} className="rounded bg-amber-500/10 px-2 py-0.5 text-[10px] font-mono text-amber-400">
-                {rec}
-              </span>
-            ))}
-          </div>
-          <button
-            onClick={() => onApply(s)}
-            disabled={applying}
-            className="shrink-0 rounded-lg bg-amber-500/20 px-3 py-1.5 text-xs font-bold text-amber-400 border border-amber-500/40 hover:bg-amber-500/30 hover:text-amber-300 transition-all disabled:opacity-50"
-          >
-            {applying ? '...' : 'Apply'}
-          </button>
-        </div>
-      )}
     </div>
   );
 }
