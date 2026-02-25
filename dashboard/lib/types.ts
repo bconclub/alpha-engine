@@ -38,6 +38,13 @@ export interface Trade {
   current_pnl?: number | null;
   current_price?: number | null;
   peak_pnl?: number | null;
+  // Momentum fade / dead momentum timer state
+  fade_timer_active?: boolean;
+  fade_elapsed?: number | null;
+  fade_required?: number | null;
+  dead_timer_active?: boolean;
+  dead_elapsed?: number | null;
+  dead_required?: number | null;
 }
 
 export interface StrategyLog {
@@ -203,6 +210,13 @@ export interface OpenPosition {
   trail_stop_price?: number | null;
   current_pnl?: number | null;   // unrealized P&L % (price move)
   peak_pnl?: number | null;      // highest P&L % reached
+  // Momentum fade / dead momentum timer state
+  fade_timer_active?: boolean;
+  fade_elapsed?: number | null;
+  fade_required?: number | null;
+  dead_timer_active?: boolean;
+  dead_elapsed?: number | null;
+  dead_required?: number | null;
 }
 
 export interface PnLByExchange {

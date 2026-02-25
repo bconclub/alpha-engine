@@ -428,6 +428,13 @@ function buildPositionDisplay(
     slPrice: trade.stop_loss ?? null,
     tpPrice: trade.take_profit ?? null,
     exchange: trade.exchange,
+    // Momentum fade / dead momentum timer state
+    fadeTimerActive: trade.fade_timer_active ?? false,
+    fadeElapsed: trade.fade_elapsed ?? null,
+    fadeRequired: trade.fade_required ?? null,
+    deadTimerActive: trade.dead_timer_active ?? false,
+    deadElapsed: trade.dead_elapsed ?? null,
+    deadRequired: trade.dead_required ?? null,
   };
 }
 
@@ -985,6 +992,7 @@ export default function TradeTable({ trades }: TradeTableProps) {
                               state={posState}
                               trailStopPrice={posDisplay.trailStopPrice}
                               entryPrice={posDisplay.entryPrice}
+                              pos={posDisplay}
                             />
                             <div className="w-full mt-1">
                               <div className="max-w-[240px]">
@@ -1372,6 +1380,7 @@ export default function TradeTable({ trades }: TradeTableProps) {
                                     state={posState}
                                     trailStopPrice={posDisplay.trailStopPrice}
                                     entryPrice={posDisplay.entryPrice}
+                                    pos={posDisplay}
                                   />
                                   <div className="w-[140px]">
                                     <PositionRangeBar pos={posDisplay} compact />

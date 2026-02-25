@@ -56,6 +56,13 @@ export interface PositionDisplay {
   exchange: string;
   isOption?: boolean;             // options trade flag
   optionSide?: 'CALL' | 'PUT' | null;  // CALL or PUT (null if not an option)
+  // Momentum fade / dead momentum timer state
+  fadeTimerActive?: boolean;
+  fadeElapsed?: number | null;
+  fadeRequired?: number | null;
+  deadTimerActive?: boolean;
+  deadElapsed?: number | null;
+  deadRequired?: number | null;
 }
 
 // ---------------------------------------------------------------------------
@@ -90,39 +97,82 @@ export function getPositionState(pos: PositionDisplay): PositionState {
   return 'holding_gain';
 }
 
-export function StateBadge({ state, trailStopPrice }: {
+/** Timer countdown badge for FADE or DEAD momentum */
+function TimerBadge({ type, elapsed, required }: {
+  type: 'fade' | 'dead';
+  elapsed: number;
+  required: number;
+}) {
+  const pct = Math.min(100, (elapsed / required) * 100);
+  const isFade = type === 'fade';
+  const icon = isFade ? '\u23F3' : '\uD83D\uDC80';
+  const label = isFade ? 'FADE' : 'DEAD';
+  const bgColor = isFade ? 'bg-amber-400/10' : 'bg-[#ff1744]/10';
+  const textColor = isFade ? 'text-amber-400' : 'text-[#ff1744]';
+  const barColor = isFade ? 'bg-amber-400' : 'bg-[#ff1744]';
+
+  return (
+    <span className={cn('inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium', bgColor, textColor)}>
+      <span>{icon}</span>
+      <span>{label}</span>
+      <span className="font-mono">{elapsed}/{required}s</span>
+      <span className="relative w-6 h-1.5 rounded-full bg-zinc-700 overflow-hidden ml-0.5">
+        <span
+          className={cn('absolute top-0 left-0 h-full rounded-full transition-all duration-1000', barColor)}
+          style={{ width: `${pct}%` }}
+        />
+      </span>
+    </span>
+  );
+}
+
+export function StateBadge({ state, trailStopPrice, pos }: {
   state: PositionState;
   trailStopPrice: number | null;
   entryPrice?: number;
+  pos?: PositionDisplay;
 }) {
+  // Timer badges — show alongside the state badge
+  const timerBadge = pos?.fadeTimerActive && pos.fadeElapsed != null && pos.fadeRequired != null
+    ? <TimerBadge type="fade" elapsed={pos.fadeElapsed} required={pos.fadeRequired} />
+    : pos?.deadTimerActive && pos.deadElapsed != null && pos.deadRequired != null
+    ? <TimerBadge type="dead" elapsed={pos.deadElapsed} required={pos.deadRequired} />
+    : null;
+
+  let stateBadge: React.ReactNode;
+
   switch (state) {
     case 'near_sl':
-      return (
+      stateBadge = (
         <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium bg-[#ff1744]/15 text-[#ff1744]">
           <span className="w-1.5 h-1.5 rounded-full bg-[#ff1744] animate-pulse" />
           NEAR SL
         </span>
       );
+      break;
     case 'at_risk':
-      return (
+      stateBadge = (
         <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium bg-[#ff1744]/10 text-[#ff1744]">
           AT RISK
         </span>
       );
+      break;
     case 'holding_loss':
-      return (
+      stateBadge = (
         <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium bg-amber-400/10 text-amber-400">
           HOLDING
         </span>
       );
+      break;
     case 'holding_gain':
-      return (
+      stateBadge = (
         <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium bg-[#00c853]/10 text-[#00c853]">
           HOLDING
         </span>
       );
+      break;
     case 'trailing':
-      return (
+      stateBadge = (
         <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium bg-[#00c853]/10 text-[#00c853]">
           <span className="w-1.5 h-1.5 rounded-full bg-[#00c853] animate-pulse" />
           TRAILING
@@ -133,7 +183,15 @@ export function StateBadge({ state, trailStopPrice }: {
           )}
         </span>
       );
+      break;
   }
+
+  return (
+    <span className="inline-flex items-center gap-1.5">
+      {stateBadge}
+      {timerBadge}
+    </span>
+  );
 }
 
 // ---------------------------------------------------------------------------

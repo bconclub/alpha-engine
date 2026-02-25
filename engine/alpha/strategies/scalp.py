@@ -2612,6 +2612,23 @@ class ScalpStrategy(BaseStrategy):
             open_trade = await self.executor.db.get_open_trade(
                 pair=self.pair, exchange=self._exchange_id, strategy="scalp",
             )
+            # Momentum fade / dead momentum timer state
+            fade_timer_active = self._mom_fade_since > 0
+            fade_elapsed = int(time.monotonic() - self._mom_fade_since) if fade_timer_active else 0
+            dead_timer_active = self._mom_dying_since > 0
+            dead_elapsed = int(time.monotonic() - self._mom_dying_since) if dead_timer_active else 0
+
+            # Determine confirm time needed based on trend alignment
+            fade_required = 0
+            dead_required = self.MOM_DYING_CONFIRM_SECONDS
+            if fade_timer_active:
+                trend_15m = self._get_15m_trend()
+                trend_aligned = (
+                    (self.position_side == "long" and trend_15m == "bullish")
+                    or (self.position_side == "short" and trend_15m == "bearish")
+                )
+                fade_required = self.MOM_FADE_TREND_CONFIRM if trend_aligned else self.MOM_FADE_CONFIRM_SECONDS
+
             if open_trade:
                 await self.executor.db.update_trade(open_trade["id"], {
                     "position_state": state,
@@ -2619,6 +2636,12 @@ class ScalpStrategy(BaseStrategy):
                     "current_pnl": round(pnl_pct, 4),
                     "current_price": round(current_price, 8),
                     "peak_pnl": round(peak_pnl, 4),
+                    "fade_timer_active": fade_timer_active,
+                    "fade_elapsed": fade_elapsed if fade_timer_active else None,
+                    "fade_required": fade_required if fade_timer_active else None,
+                    "dead_timer_active": dead_timer_active,
+                    "dead_elapsed": dead_elapsed if dead_timer_active else None,
+                    "dead_required": dead_required if dead_timer_active else None,
                 })
         except Exception:
             # Non-critical — don't crash the trade loop for a dashboard update

@@ -213,6 +213,13 @@ export function LivePositions() {
         exchange: pos.exchange,
         isOption,
         optionSide: isOption ? getOptionSide(pos.pair) : null,
+        // Momentum fade / dead momentum timer state
+        fadeTimerActive: pos.fade_timer_active ?? false,
+        fadeElapsed: pos.fade_elapsed ?? null,
+        fadeRequired: pos.fade_required ?? null,
+        deadTimerActive: pos.dead_timer_active ?? false,
+        deadElapsed: pos.dead_elapsed ?? null,
+        deadRequired: pos.dead_required ?? null,
       };
     });
   }, [openPositions, livePrices.prices, fallbackPrices, optionsState]);
@@ -299,6 +306,7 @@ export function LivePositions() {
                     state={posState}
                     trailStopPrice={pos.trailStopPrice}
                     entryPrice={pos.entryPrice}
+                    pos={pos}
                   />
                   <button
                     onClick={() => handleClose(pos.id, pos.pair)}
