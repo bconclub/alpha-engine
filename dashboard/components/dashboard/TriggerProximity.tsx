@@ -165,7 +165,7 @@ function computeTrigger(log: StrategyLog): TriggerInfo {
       statusColor = 'text-zinc-600';
     } else if (signalCount >= 3) {
       overallStatus = `${signalCount}/4 — TRADE READY`;
-      statusColor = 'text-[#00c853]';
+      statusColor = bearCount > bullCount ? 'text-[#ff1744]' : 'text-[#00c853]';
     } else if (signalCount >= 1) {
       overallStatus = `${signalCount}/4 — Needs ${3 - signalCount} more`;
       statusColor = 'text-[#ffd600]';
@@ -250,7 +250,7 @@ function computeTrigger(log: StrategyLog): TriggerInfo {
     statusColor = 'text-zinc-600';
   } else if (signalCount >= 3) {
     overallStatus = `${signalCount}/4 — TRADE READY`;
-    statusColor = 'text-[#00c853]';
+    statusColor = bearCount > bullCount ? 'text-[#ff1744]' : 'text-[#00c853]';
   } else if (signalCount >= 1) {
     overallStatus = `${signalCount}/4 — Needs ${3 - signalCount} more`;
     statusColor = 'text-[#ffd600]';
@@ -464,7 +464,7 @@ export function TriggerProximity() {
                         {t.overallStatus}
                       </span>
                       {t.skipReason && (
-                        <span className="text-[9px] font-mono text-amber-400/70 truncate max-w-[180px]">
+                        <span className="text-[9px] font-mono text-amber-400/70 max-w-[280px]" title={t.skipReason.replace(/_/g, ' ')}>
                           ⚠ {t.skipReason.replace(/_/g, ' ')}
                         </span>
                       )}
