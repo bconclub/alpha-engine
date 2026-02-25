@@ -274,10 +274,10 @@ class ScalpStrategy(BaseStrategy):
     # ── DISABLED SETUPS — controlled via dashboard setup_config only (no hardcoded blocks)
 
     # ── Entry thresholds — 3-of-4 with 15m trend soft weight ────────────
-    MOMENTUM_MIN_PCT = 0.20           # 0.20%+ move in 60s (raised from 0.15 — losers peaked 0.00-0.08%)
-    VOL_SPIKE_RATIO = 0.8             # volume > 0.8x average (was 1.2 — most vol is under 1x)
-    RSI_EXTREME_LONG = 35             # RSI < 35 = oversold → long (was 40, too loose)
-    RSI_EXTREME_SHORT = 65            # RSI > 65 = overbought → short (was 60, too loose)
+    MOMENTUM_MIN_PCT = 0.08           # Level 5/10 — 0.08%+ move in 60s (was 0.20)
+    VOL_SPIKE_RATIO = 0.6             # Level 5/10 — volume > 0.6x average (was 0.8)
+    RSI_EXTREME_LONG = 40             # Level 5/10 — RSI < 40 = oversold → long (was 35)
+    RSI_EXTREME_SHORT = 60            # Level 5/10 — RSI > 60 = overbought → short (was 60→65→60)
     # BB mean-reversion thresholds (upper = short, lower = long):
     BB_MEAN_REVERT_UPPER = 0.85      # price in top 15% of BB → short signal
     BB_MEAN_REVERT_LOWER = 0.15      # price in bottom 15% of BB → long signal
@@ -1502,9 +1502,8 @@ class ScalpStrategy(BaseStrategy):
             mom_strength = "WEAK"
 
         # ── SIGNAL GATE: always require 3/4 signals ─────────────────────
-        # v6.1: removed 15m trend soft weight that was letting 2/4 entries
-        # through for "trend-aligned" trades. 2/4 entries are coin flips at
-        # 20x leverage and were the root cause of the 26.6% WR collapse.
+        # Level 5/10: base 3/4 signals required. Trend-aligned = 2/4,
+        # counter-trend = 4/4 (set below via regime + 15m gates).
         required_long = 3
         required_short = 3
 
@@ -1532,6 +1531,14 @@ class ScalpStrategy(BaseStrategy):
             required_short = max(required_short, 4)  # shorting into bullish 15m = 4/4
         elif trend_15m == "bearish":
             required_long = max(required_long, 4)  # longing into bearish 15m = 4/4
+
+        # ── TREND-ALIGNED REDUCTION — Level 5/10 aggressive entries ──────
+        # When 15m trend aligns with signal direction, 2/4 signals are enough.
+        # Counter-trend stays at 4/4 (set above), neutral stays at 3/4.
+        if trend_15m == "bullish":
+            required_long = min(required_long, 2)   # longing with bullish 15m = 2/4
+        elif trend_15m == "bearish":
+            required_short = min(required_short, 2)  # shorting with bearish 15m = 2/4
 
         # WEAK momentum in SIDEWAYS already requires 4/4 signals (line above).
         # No hard skip — 4/4 is sufficient protection. Let strong setups through.

@@ -7,10 +7,10 @@ import type { StrategyLog, Exchange, OpenPosition } from '@/lib/types';
 
 // ── Engine thresholds (Focused Signal v6.1) ─────────────────────────
 // Used ONLY as fallback when DB doesn't have signal_count/signal_* fields
-const RSI_LONG_THRESHOLD = 35;     // was 40 — matches scalp.py RSI_THRESHOLD_LONG
-const RSI_SHORT_THRESHOLD = 65;    // was 60 — matches scalp.py RSI_THRESHOLD_SHORT
-const MOMENTUM_MIN_PCT = 0.20;     // matches scalp.py MOMENTUM_MIN_PCT (v3.14.3)
-const VOL_SPIKE_RATIO = 0.8;       // was 1.2 — matches scalp.py VOLUME_SPIKE_RATIO
+const RSI_LONG_THRESHOLD = 40;     // Level 5/10 — matches scalp.py RSI_EXTREME_LONG
+const RSI_SHORT_THRESHOLD = 60;    // Level 5/10 — matches scalp.py RSI_EXTREME_SHORT
+const MOMENTUM_MIN_PCT = 0.08;     // Level 5/10 — matches scalp.py MOMENTUM_MIN_PCT
+const VOL_SPIKE_RATIO = 0.6;       // Level 5/10 — matches scalp.py VOL_SPIKE_RATIO
 const BB_TREND_UPPER = 0.85;
 const BB_TREND_LOWER = 0.15;
 
