@@ -8,9 +8,8 @@ import { useSidebar } from '@/components/providers/SidebarProvider';
 import { cn } from '@/lib/utils';
 
 const navItems = [
-  // ── Group 1: Core ──
   {
-    name: 'Overview',
+    name: 'Dashboard',
     href: '/',
     icon: (
       <svg width="18" height="18" viewBox="0 0 20 20" fill="none" xmlns="http://www.w3.org/2000/svg">
@@ -60,36 +59,6 @@ const navItems = [
       </svg>
     ),
   },
-  // ── Group 2: Tools ──
-  {
-    name: 'Top Trades',
-    href: '/leaderboard',
-    icon: (
-      <svg width="18" height="18" viewBox="0 0 20 20" fill="none" xmlns="http://www.w3.org/2000/svg">
-        <path d="M10 2L12.09 7.26L18 8.27L14 12.14L14.81 18.02L10 15.77L5.19 18.02L6 12.14L2 8.27L7.91 7.26L10 2Z" fill="currentColor" />
-      </svg>
-    ),
-  },
-  {
-    name: 'Pairs',
-    href: '/pairs',
-    icon: (
-      <svg width="18" height="18" viewBox="0 0 20 20" fill="none" xmlns="http://www.w3.org/2000/svg">
-        <circle cx="7" cy="7" r="4" stroke="currentColor" strokeWidth="2" fill="none" />
-        <circle cx="13" cy="13" r="4" stroke="currentColor" strokeWidth="2" fill="none" />
-      </svg>
-    ),
-  },
-  {
-    name: 'Sentinel',
-    href: '/brain',
-    icon: (
-      <svg width="18" height="18" viewBox="0 0 20 20" fill="none" xmlns="http://www.w3.org/2000/svg">
-        <path d="M10 2C7.24 2 5 4.24 5 7c0 1.4.58 2.66 1.5 3.57V12a1 1 0 0 0 1 1h5a1 1 0 0 0 1-1v-1.43A4.98 4.98 0 0 0 15 7c0-2.76-2.24-5-5-5z" fill="currentColor" />
-        <path d="M7.5 14.5h5M8 16h4" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
-      </svg>
-    ),
-  },
   {
     name: 'Status',
     href: '/status',
@@ -100,28 +69,14 @@ const navItems = [
       </svg>
     ),
   },
-  {
-    name: 'Setting',
-    href: '/settings',
-    icon: (
-      <svg width="18" height="18" viewBox="0 0 20 20" fill="none" xmlns="http://www.w3.org/2000/svg">
-        <path
-          fillRule="evenodd"
-          clipRule="evenodd"
-          d="M8.03371 2.08545C8.19529 1.45517 8.76252 1 9.41421 1H10.5858C11.2375 1 11.8047 1.45517 11.9663 2.08545L12.2801 3.30906C12.5952 3.45447 12.8966 3.62445 13.1814 3.81688L14.3738 3.41416C14.9832 3.20829 15.6509 3.46476 15.9767 4.02918L16.5625 5.04466C16.8884 5.60908 16.777 6.31699 16.2909 6.75557L15.3562 7.59834C15.3849 7.86017 15.4 8.12593 15.4 8.39525C15.4 8.66458 15.3849 8.93034 15.3562 9.19217L16.2909 10.0349C16.777 10.4735 16.8884 11.1814 16.5625 11.7458L15.9767 12.7613C15.6509 13.3257 14.9832 13.5822 14.3738 13.3763L13.1814 12.9736C12.8966 13.166 12.5952 13.336 12.2801 13.4814L11.9663 14.705C11.8047 15.3353 11.2375 15.7905 10.5858 15.7905H9.41421C8.76252 15.7905 8.19529 15.3353 8.03371 14.705L7.71987 13.4814C7.40483 13.336 7.10341 13.166 6.81861 12.9736L5.62618 13.3763C5.01681 13.5822 4.34912 13.3257 4.02329 12.7613L3.4375 11.7458C3.11167 11.1814 3.22303 10.4735 3.70914 10.0349L4.64379 9.19217C4.61508 8.93034 4.6 8.66458 4.6 8.39525C4.6 8.12593 4.61508 7.86017 4.64379 7.59834L3.70914 6.75557C3.22303 6.31699 3.11167 5.60908 3.4375 5.04466L4.02329 4.02918C4.34912 3.46476 5.01681 3.20829 5.62618 3.41416L6.81861 3.81688C7.10341 3.62445 7.40483 3.45447 7.71987 3.30906L8.03371 2.08545ZM10 10.8953C11.3807 10.8953 12.5 9.77595 12.5 8.39525C12.5 7.01455 11.3807 5.89525 10 5.89525C8.61929 5.89525 7.5 7.01455 7.5 8.39525C7.5 9.77595 8.61929 10.8953 10 10.8953Z"
-          fill="currentColor"
-        />
-      </svg>
-    ),
-  },
 ];
 
 // Bottom nav items — subset for mobile
 const bottomNavItems = [
-  { name: 'Overview', href: '/', icon: navItems[0].icon },
-  { name: 'Trade', href: '/trades', icon: navItems[1].icon },
-  { name: 'Top Trades', href: '/leaderboard', icon: navItems[4].icon },
-  { name: 'Setting', href: '/settings', icon: navItems[7].icon },
+  { name: 'Dashboard', href: '/', icon: navItems[0].icon },
+  { name: 'Trades', href: '/trades', icon: navItems[1].icon },
+  { name: 'Analytics', href: '/analytics', icon: navItems[3].icon },
+  { name: 'Status', href: '/status', icon: navItems[4].icon },
 ];
 
 export function Sidebar() {

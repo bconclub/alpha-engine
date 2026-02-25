@@ -249,12 +249,17 @@ export function LiveStatusBar() {
             <div className="min-w-0">
               {pnlStats.total > 0 ? (
                 <>
-                  <span className={cn(
-                    'font-mono text-base font-bold',
-                    pnlStats.pnl >= 0 ? 'text-[#00c853]' : 'text-[#ff1744]',
-                  )}>
-                    {pnlStats.pnl >= 0 ? '+' : ''}{formatCurrency(pnlStats.pnl)}
-                  </span>
+                  <div className="flex items-baseline gap-1.5">
+                    <span className={cn(
+                      'font-mono text-base font-bold',
+                      pnlStats.pnl >= 0 ? 'text-[#00c853]' : 'text-[#ff1744]',
+                    )}>
+                      {pnlStats.pnl >= 0 ? '+' : ''}{formatCurrency(pnlStats.pnl)}
+                    </span>
+                    <span className="text-[9px] text-zinc-500 font-mono">
+                      {pnlStats.pnl >= 0 ? '+' : '-'}{'\u20B9'}{Math.abs(Math.round(pnlStats.pnl * inrRate)).toLocaleString('en-IN')}
+                    </span>
+                  </div>
                   <div className="text-[9px] text-zinc-500 font-mono mt-0.5">
                     {pnlStats.wins}W / {pnlStats.losses}L · {pnlStats.winRate.toFixed(0)}% WR · {pnlStats.total} trades
                   </div>
@@ -380,6 +385,9 @@ export function LiveStatusBar() {
                     pnlStats.pnl >= 0 ? 'text-[#00c853]' : 'text-[#ff1744]',
                   )}>
                     {pnlStats.pnl >= 0 ? '+' : ''}{formatCurrency(pnlStats.pnl)}
+                  </span>
+                  <span className="text-[10px] text-zinc-500 font-mono">
+                    {pnlStats.pnl >= 0 ? '+' : '-'}{'\u20B9'}{Math.abs(Math.round(pnlStats.pnl * inrRate)).toLocaleString('en-IN')}
                   </span>
                 </div>
                 <div className="text-[10px] text-zinc-500 font-mono">
