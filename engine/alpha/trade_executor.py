@@ -1101,6 +1101,9 @@ class TradeExecutor:
         (Telegram notification), or None on failure.
         """
         if self.db is None:
+            # No DB — still clean up risk manager to prevent ghost entries
+            if self.risk_manager is not None:
+                self.risk_manager.record_close(signal.pair, 0.0)
             return None
         try:
             fill_price = order.get("average") or order.get("price") or signal.price
@@ -1134,6 +1137,9 @@ class TradeExecutor:
                     "leverage": signal.leverage,
                     "position_type": signal.position_type,
                 })
+                # Still clean up risk manager — strategy already set in_position=False
+                if self.risk_manager is not None:
+                    self.risk_manager.record_close(signal.pair, 0.0)
                 return None
 
             # Calculate P&L using shared function (single source of truth)
@@ -1237,6 +1243,10 @@ class TradeExecutor:
 
         except Exception:
             logger.exception("Failed to close trade in DB")
+            # Still clean up risk manager — strategy already set in_position=False,
+            # so without this the entry would persist as a ghost in open_positions
+            if self.risk_manager is not None:
+                self.risk_manager.record_close(signal.pair, 0.0)
             return None
 
     async def _notify_trade_opened(self, signal: Signal, order: dict) -> None:

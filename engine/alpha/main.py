@@ -2082,6 +2082,7 @@ class AlphaBot:
 
         CASE 1: Exchange has position, bot doesn't track it → CLOSE immediately
         CASE 2: Bot thinks it has position, exchange doesn't → Mark closed in DB
+        CASE 3: open_positions has entry but strategy says no position → GHOST SWEEP
 
         This is the #1 safety net. Runs on startup AND every 60 seconds.
         """
@@ -2094,6 +2095,29 @@ class AlphaBot:
             await self._reconcile_binance_positions()
         except Exception:
             logger.exception("Orphan reconciliation failed (Binance)")
+
+        # ── GHOST SWEEP ──────────────────────────────────────────────
+        # Catch stale entries in open_positions where the strategy has
+        # already cleared in_position (e.g., close order placed but
+        # _close_trade_in_db() failed/threw, so record_close() was
+        # never called). Without this, stale entries persist forever
+        # because the per-pair reconciliation skips pairs where
+        # scalp.in_position == False.
+        try:
+            ghost_pairs: list[str] = []
+            for pos in self.risk_manager.open_positions:
+                scalp = self._scalp_strategies.get(pos.pair)
+                if scalp is None or not scalp.in_position:
+                    ghost_pairs.append(pos.pair)
+            for pair in ghost_pairs:
+                logger.warning(
+                    "GHOST SWEEP: removing stale open_positions entry for %s "
+                    "(strategy.in_position=False but risk_manager still tracking)",
+                    pair,
+                )
+                self.risk_manager.record_close(pair, 0.0)
+        except Exception:
+            logger.exception("Ghost sweep failed")
 
     async def _reconcile_delta_positions(self) -> None:
         """Reconcile Delta Exchange positions with bot memory.
