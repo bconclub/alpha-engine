@@ -255,6 +255,7 @@ class ScalpStrategy(BaseStrategy):
     MOM_FADE_TREND_HOLD = 120         # if trend-aligned, extend min hold to 120s
     MOM_FADE_TREND_CONFIRM = 20       # if trend-aligned, extend confirmation to 20s
     REVERSAL_MIN_PROFIT_PCT = 0.30    # need at least +0.30% peak to consider reversal exit (was 0.10 — exiting dust)
+    DEAD_MOM_MIN_HOLD = 180           # minimum 180s (3 min) hold before DEAD_MOMENTUM can fire (was 60s — too aggressive)
 
     # ── Trailing stop tiers: peak PnL % → trail distance % from peak price ─
     # When peak crosses a tier, trail_stop_price = peak * (1 - trail_dist/100)
@@ -2311,9 +2312,9 @@ class ScalpStrategy(BaseStrategy):
             # RSI crossing 70 in a long is trend strength, not reversal.
             # Ratchet floor handles profit protection.
 
-            # DEAD_MOMENTUM: confirmed dead momentum + losing + held >60s → cut losses
+            # DEAD_MOMENTUM: confirmed dead momentum + losing + held >3min → cut losses
             # Don't wait for SL when the setup has clearly failed.
-            if reversal_reason and pnl_pct < 0 and hold_seconds > 60:
+            if reversal_reason and pnl_pct < 0 and hold_seconds > self.DEAD_MOM_MIN_HOLD:
                 if not self._reversal_exit_logged:
                     self._reversal_exit_logged = True
                     self.logger.info(
