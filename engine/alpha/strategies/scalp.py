@@ -387,7 +387,6 @@ class ScalpStrategy(BaseStrategy):
 
     # ── Rate limiting / risk ──────────────────────────────────────────────
     MAX_TRADES_PER_HOUR = 10          # keep trading aggressively
-    DAILY_LOSS_LIMIT_PCT = 20.0       # stop at 20% daily drawdown
 
     # ── Class-level shared state ──────────────────────────────────────────
     _live_pnl: dict[str, float] = {}           # pair → current unrealized P&L % (updated every tick)
@@ -487,7 +486,6 @@ class ScalpStrategy(BaseStrategy):
 
         # Rate limiting
         self._hourly_trades: list[float] = []
-        self._daily_scalp_loss: float = 0.0
 
         # No more forced entries — we wait for quality setups
         self._last_position_exit: float = 0.0
@@ -563,8 +561,7 @@ class ScalpStrategy(BaseStrategy):
             "SL=%.2f%% TP=%.2f%% Phase1=%ds(skip@+%.1f%%) Phase2=%ds MaxHold=%ds "
             "Exit=%s MoveToEntry@+%.1f%% Flat=%ds "
             "MaxPos=%d Alloc=%.0f%% SLcool=%ds LossStreak=%d→%ds "
-            "Mom=%.2f%% Vol=%.1fx RSI-Override=%d/%d "
-            "DailyLoss=%.0f%%%s%s",
+            "Mom=%.2f%% Vol=%.1fx RSI-Override=%d/%d%s%s",
             self.pair, tag,
             self._sl_pct, self._tp_pct,
             self.PHASE1_SECONDS, self.PHASE1_SKIP_AT_PEAK_PCT,
@@ -576,7 +573,7 @@ class ScalpStrategy(BaseStrategy):
             self.STREAK_PAUSE_SECONDS,
             self.MOMENTUM_MIN_PCT, self.VOL_SPIKE_RATIO,
             self.RSI_OVERRIDE_LONG, self.RSI_OVERRIDE_SHORT,
-            self.DAILY_LOSS_LIMIT_PCT, disabled_tag,
+            disabled_tag,
             pos_info,
         )
         self.logger.info("[%s] Soul: %s", self.pair, soul_msg)
@@ -796,16 +793,6 @@ class ScalpStrategy(BaseStrategy):
                         "[%s] EXPIRY in %.0f min — no new entries", self.pair, _mins_to_expiry,
                     )
                 return signals
-
-        # ── Daily loss limit ───────────────────────────────────────────
-        exchange_cap = self.risk_manager.get_exchange_capital(self._exchange_id)
-        if exchange_cap > 0 and self._daily_scalp_loss <= -(exchange_cap * self.DAILY_LOSS_LIMIT_PCT / 100):
-            if self._tick_count % 60 == 0:
-                self.logger.info(
-                    "[%s] STOPPED — daily loss limit $%.2f",
-                    self.pair, self._daily_scalp_loss,
-                )
-            return signals
 
         # ── Rate limit — quality over quantity ─────────────────────────
         cutoff = time.time() - 3600
@@ -3297,7 +3284,6 @@ class ScalpStrategy(BaseStrategy):
         capital_pnl_pct = pnl_pct * self._trade_leverage
 
         self.hourly_pnl += net_pnl
-        self._daily_scalp_loss += net_pnl if net_pnl < 0 else 0
 
         now = time.monotonic()
 
@@ -3409,4 +3395,4 @@ class ScalpStrategy(BaseStrategy):
         return stats
 
     def reset_daily_stats(self) -> None:
-        self._daily_scalp_loss = 0.0
+        pass  # No daily loss tracking — trade every opportunity

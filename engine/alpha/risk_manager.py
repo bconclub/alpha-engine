@@ -42,7 +42,6 @@ class RiskManager:
     - Max 3 concurrent positions across ALL pairs/exchanges (3 per exchange)
     - Max 1 position per pair at a time
     - Total exposure capped at 90% of capital (collateral-based for futures)
-    - Daily loss limit: stop bot at threshold
     - Per-trade stop-loss: 2%
     - Win-rate circuit breaker: if < 40% over last 20 trades -> pause
     """
@@ -52,9 +51,6 @@ class RiskManager:
         self.max_position_pct = config.trading.max_position_pct
         self.max_total_exposure_pct = config.trading.max_total_exposure_pct
         self.max_concurrent = config.trading.max_concurrent_positions
-        self.daily_loss_limit_pct = config.trading.max_loss_daily_pct
-        self.daily_loss_hard_limit_pct = config.trading.max_loss_daily_hard_pct
-        self.loss_cooldown_seconds = config.trading.loss_cooldown_minutes * 60
         self.per_trade_sl_pct = config.trading.per_trade_stop_loss_pct
 
         # Per-exchange capital: strategies size off their own exchange balance
@@ -71,9 +67,6 @@ class RiskManager:
         self.is_paused = False
         self._pause_reason: str = ""
         self._force_resumed = False  # bypass win-rate breaker until next win
-        self._hard_stopped = False   # True = hard daily limit hit, no auto-resume
-        self._loss_cooldown_until: float = 0.0  # monotonic time when soft cooldown expires
-        self._soft_limit_served = False  # True after soft cooldown served, skip re-trigger
 
     def update_exchange_balances(self, binance: float | None, delta: float | None) -> None:
         """Update per-exchange capital from live balance fetches."""
@@ -239,14 +232,7 @@ class RiskManager:
             logger.warning("Bot is paused: %s -- rejecting %s %s", self._pause_reason, signal.side, signal.pair)
             return False
 
-        # Daily loss: LOG only — never pause. Trade every opportunity.
-        if self.daily_loss_pct >= 10.0 and self.daily_loss_pct < 10.1:
-            logger.info(
-                "Daily loss at %.1f%% — logging only, no auto-pause",
-                self.daily_loss_pct,
-            )
-
-        # 2. Win-rate circuit breaker (skipped after force resume)
+        # Win-rate circuit breaker (skipped after force resume)
         if len(self.trade_results) >= 20 and self.win_rate < 40 and not self._force_resumed:
             self._pause("win rate too low (%.1f%% over last 20 trades)" % self.win_rate)
             return False
@@ -430,9 +416,6 @@ class RiskManager:
         If force=True, also bypass the win-rate circuit breaker so the bot
         doesn't immediately re-pause on the next entry check. The bypass
         auto-clears after a winning trade proves conditions have improved.
-
-        Always clears hard-stop and cooldown so dashboard resume overrides
-        both soft and hard daily loss pauses.
         """
         self.is_paused = False
         self._pause_reason = ""
@@ -464,8 +447,6 @@ class RiskManager:
             "win_rate": self.win_rate,
             "is_paused": self.is_paused,
             "pause_reason": self._pause_reason,
-            "hard_stopped": False,  # daily loss pause removed — never stops
-            "loss_cooldown_remaining_s": 0,
             "pairs_with_positions": list(self.pairs_with_positions()),
             "binance_available": self.get_available_capital("binance"),
             "delta_available": self.get_available_capital("delta"),

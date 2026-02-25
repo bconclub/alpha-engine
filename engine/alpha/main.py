@@ -1168,12 +1168,6 @@ class AlphaBot:
                 if "max_position_pct" in params:
                     self.risk_manager.max_position_pct = float(params["max_position_pct"])
                     result_msg = f"max_position_pct -> {params['max_position_pct']}"
-                elif "daily_loss_limit_pct" in params:
-                    self.risk_manager.daily_loss_limit_pct = float(params["daily_loss_limit_pct"])
-                    result_msg = f"daily_loss_limit_pct -> {params['daily_loss_limit_pct']}"
-                elif "daily_loss_hard_limit_pct" in params:
-                    self.risk_manager.daily_loss_hard_limit_pct = float(params["daily_loss_hard_limit_pct"])
-                    result_msg = f"daily_loss_hard_limit_pct -> {params['daily_loss_hard_limit_pct']}"
                 elif "setup_type" in params:
                     # Setup toggle from dashboard Strategies page
                     st = params["setup_type"]
