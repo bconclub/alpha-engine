@@ -250,6 +250,10 @@ class ScalpStrategy(BaseStrategy):
     MOMENTUM_DYING_PCT = 0.02         # exit if abs(momentum) drops below 0.02% (was 0.04 — normal oscillation)
     MOM_FLIP_CONFIRM_SECONDS = 15     # momentum must stay flipped for 15s before reversal exit
     MOM_DYING_CONFIRM_SECONDS = 20    # momentum must stay dead (<0.02%) for 20s before reversal
+    MOM_FADE_CONFIRM_SECONDS = 15     # momentum must stay dead for 15s before MOMENTUM_FADE profit exit
+    MOM_FADE_MIN_HOLD = 90            # minimum 90s hold before MOMENTUM_FADE can fire
+    MOM_FADE_TREND_HOLD = 120         # if trend-aligned, extend min hold to 120s
+    MOM_FADE_TREND_CONFIRM = 20       # if trend-aligned, extend confirmation to 20s
     REVERSAL_MIN_PROFIT_PCT = 0.30    # need at least +0.30% peak to consider reversal exit (was 0.10 — exiting dust)
 
     # ── Trailing stop tiers: peak PnL % → trail distance % from peak price ─
@@ -481,6 +485,7 @@ class ScalpStrategy(BaseStrategy):
         # Momentum flip confirmation timer (0 = not flipped)
         self._mom_flip_since: float = 0.0
         self._mom_dying_since: float = 0.0
+        self._mom_fade_since: float = 0.0   # MOMENTUM_FADE confirmation timer
         # Suppress repeated reversal exit logs (only log first detection)
         self._reversal_exit_logged: bool = False
 
@@ -2245,19 +2250,39 @@ class ScalpStrategy(BaseStrategy):
                 self._reversal_exit_logged = False  # allow fresh log if it flips again
 
             # Check 2: momentum dying (below 0.02% absolute — truly dead)
-            # MOMENTUM_FADE: if dying AND in profit → exit immediately, no timer.
-            # +0.05% on 30x = +1.5% capital. Take it before it goes red.
-            # If NOT in profit → fall through to timer → DEAD_MOMENTUM path.
             if not reversal_reason and abs(momentum_60s) < self.MOMENTUM_DYING_PCT:
-                if pnl_pct > 0.05 and hold_seconds > 30:
-                    self.logger.info(
-                        "MOMENTUM_FADE: %s pnl=%+.2f%% hold=%ds mom=%.3f%% — "
-                        "taking profit before fade (no timer wait)",
-                        self.pair, pnl_pct, int(hold_seconds), abs(momentum_60s),
+                # MOMENTUM_FADE: dying + in profit → confirm via timer, then exit.
+                # Trend-aligned trades get extra patience (pauses are legs, not death).
+                if pnl_pct > 0.05:
+                    trend_15m = self._get_15m_trend()
+                    trend_aligned = (
+                        (side == "long" and trend_15m == "bullish")
+                        or (side == "short" and trend_15m == "bearish")
                     )
-                    return self._do_exit(current_price, pnl_pct, side, "MOMENTUM_FADE", hold_seconds)
+                    min_hold = self.MOM_FADE_TREND_HOLD if trend_aligned else self.MOM_FADE_MIN_HOLD
+                    confirm_req = self.MOM_FADE_TREND_CONFIRM if trend_aligned else self.MOM_FADE_CONFIRM_SECONDS
 
-                # Requires MOM_DYING_CONFIRM_SECONDS of sustained dead momentum
+                    if hold_seconds >= min_hold:
+                        now_m = time.monotonic()
+                        if self._mom_fade_since == 0:
+                            self._mom_fade_since = now_m
+                            self.logger.info(
+                                "MOM_FADE_START: %s pnl=%+.2f%% mom=%.3f%% hold=%ds "
+                                "trend=%s — confirming for %ds",
+                                self.pair, pnl_pct, abs(momentum_60s),
+                                int(hold_seconds), trend_15m, confirm_req,
+                            )
+                        elif now_m - self._mom_fade_since >= confirm_req:
+                            confirm_dur = int(now_m - self._mom_fade_since)
+                            self.logger.info(
+                                "MOMENTUM_FADE: %s pnl=%+.2f%% hold=%ds "
+                                "confirmed=%ds trend=%s",
+                                self.pair, pnl_pct, int(hold_seconds),
+                                confirm_dur, trend_15m,
+                            )
+                            return self._do_exit(current_price, pnl_pct, side, "MOMENTUM_FADE", hold_seconds)
+
+                # DEAD_MOMENTUM path: requires MOM_DYING_CONFIRM_SECONDS of sustained dead momentum
                 if self._mom_dying_since == 0:
                     self._mom_dying_since = time.monotonic()
                     self.logger.info(
@@ -2268,13 +2293,19 @@ class ScalpStrategy(BaseStrategy):
                     dying_dur = int(time.monotonic() - self._mom_dying_since)
                     reversal_reason = f"mom_dying_confirmed ({abs(momentum_60s):.3f}%, {dying_dur}s)"
             else:
-                # Momentum recovered above threshold — reset timer
+                # Momentum recovered above threshold — reset ALL dying/fade timers
                 if self._mom_dying_since > 0:
                     self.logger.info(
                         "MOM_DYING_RESET: %s abs_mom=%.3f%% recovered after %.0fs — false alarm",
                         self.pair, abs(momentum_60s), time.monotonic() - self._mom_dying_since,
                     )
+                if self._mom_fade_since > 0:
+                    self.logger.info(
+                        "MOM_FADE_RESET: %s abs_mom=%.3f%% recovered after %.0fs — holding",
+                        self.pair, abs(momentum_60s), time.monotonic() - self._mom_fade_since,
+                    )
                 self._mom_dying_since = 0.0
+                self._mom_fade_since = 0.0
 
             # RSI cross REMOVED as reversal trigger for futures.
             # RSI crossing 70 in a long is trend strength, not reversal.
@@ -3255,6 +3286,7 @@ class ScalpStrategy(BaseStrategy):
         self._in_position_tick = 0  # reset tick counter for OHLCV refresh cadence
         self._mom_flip_since = 0.0  # reset momentum flip confirmation timer
         self._mom_dying_since = 0.0  # reset momentum dying confirmation timer
+        self._mom_fade_since = 0.0   # reset momentum fade confirmation timer
         self._reversal_exit_logged = False  # reset reversal log suppression
         self._pending_tier1 = None  # clear any pending T1 on entry
         self._hourly_trades.append(time.time())
