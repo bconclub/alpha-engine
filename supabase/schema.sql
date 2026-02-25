@@ -67,6 +67,14 @@ create table if not exists public.trades (
     stop_loss       numeric(20,8),                     -- current stop loss price
     take_profit     numeric(20,8),                     -- current take profit price
 
+    -- Momentum timer state (written by bot every ~10s while position is open)
+    fade_timer_active boolean not null default false,   -- MOMENTUM_FADE confirmation running
+    fade_elapsed     integer,                           -- seconds elapsed in fade confirmation
+    fade_required    integer,                           -- seconds required (15 or 20 if trend-aligned)
+    dead_timer_active boolean not null default false,   -- DEAD_MOMENTUM confirmation running
+    dead_elapsed     integer,                           -- seconds elapsed in dead confirmation
+    dead_required    integer,                           -- seconds required (20)
+
     -- Slippage tracking (v3.4)
     slippage_pct    numeric(10,4),                     -- fill vs expected price slippage %
     slippage_flag   boolean not null default false      -- true when slippage > 2% (anomalous)
