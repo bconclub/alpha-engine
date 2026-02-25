@@ -141,6 +141,8 @@ export function LiveStatusBar() {
     let pnl = 0;
     let total = 0;
     let wins = 0;
+    let fees = 0;
+    let grossPnl = 0;
     for (const t of trades) {
       if (t.status !== 'closed') continue;
       const tradeTime = new Date(t.timestamp).getTime();
@@ -148,10 +150,13 @@ export function LiveStatusBar() {
         pnl += t.pnl ?? 0;
         total++;
         if ((t.pnl ?? 0) > 0) wins++;
+        const tradeFees = (t.entry_fee ?? 0) + (t.exit_fee ?? 0);
+        fees += tradeFees;
+        grossPnl += t.gross_pnl != null ? t.gross_pnl : ((t.pnl ?? 0) + tradeFees);
       }
     }
     const winRate = total > 0 ? (wins / total) * 100 : 0;
-    return { pnl, total, wins, losses: total - wins, winRate };
+    return { pnl, total, wins, losses: total - wins, winRate, fees, grossPnl };
   }, [trades, pnlRange]);
 
   // Build sparkline data: cumulative PnL from dailyPnL for selected range
@@ -263,6 +268,15 @@ export function LiveStatusBar() {
                   <div className="text-[9px] text-zinc-500 font-mono mt-0.5">
                     {pnlStats.wins}W / {pnlStats.losses}L · {pnlStats.winRate.toFixed(0)}% WR · {pnlStats.total} trades
                   </div>
+                  {pnlStats.fees > 0 && (
+                    <div className="text-[9px] font-mono mt-0.5">
+                      <span className={pnlStats.grossPnl >= 0 ? 'text-[#00c853]/60' : 'text-[#ff1744]/60'}>
+                        {pnlStats.grossPnl >= 0 ? '+' : ''}{formatCurrency(pnlStats.grossPnl)} P&L
+                      </span>
+                      <span className="text-zinc-600"> · </span>
+                      <span className="text-zinc-500">${pnlStats.fees.toFixed(2)} fees</span>
+                    </div>
+                  )}
                 </>
               ) : (
                 <span className="text-xs text-zinc-500">No trades</span>
@@ -393,6 +407,15 @@ export function LiveStatusBar() {
                 <div className="text-[10px] text-zinc-500 font-mono">
                   {pnlStats.wins}W / {pnlStats.losses}L · {pnlStats.winRate.toFixed(0)}% WR · {pnlStats.total} trades
                 </div>
+                {pnlStats.fees > 0 && (
+                  <div className="text-[10px] font-mono">
+                    <span className={pnlStats.grossPnl >= 0 ? 'text-[#00c853]/60' : 'text-[#ff1744]/60'}>
+                      {pnlStats.grossPnl >= 0 ? '+' : ''}{formatCurrency(pnlStats.grossPnl)} P&L
+                    </span>
+                    <span className="text-zinc-600"> · </span>
+                    <span className="text-zinc-500">${pnlStats.fees.toFixed(2)} fees</span>
+                  </div>
+                )}
               </>
             ) : (
               <span className="text-xs text-zinc-500">No trades</span>
