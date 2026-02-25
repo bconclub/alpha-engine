@@ -183,7 +183,7 @@ class AlphaBot:
         #         )
 
         # Options overlay — buy CALLs/PUTs on 3/4+ scalp signals
-        if self.delta and self.delta_options and config.delta.options_enabled:
+        if self.delta and self.delta_options and self._options_enabled:
             for pair in config.delta.options_pairs:
                 if pair not in self._scalp_strategies:
                     logger.warning("Options pair %s not in scalp strategies — skipping", pair)
@@ -1485,6 +1485,12 @@ class AlphaBot:
                 # Fallback to single capital field
                 self.risk_manager.capital = last.get("capital", config.trading.starting_capital)
                 logger.info("Restored state from DB -- capital: $%.2f (legacy)", self.risk_manager.capital)
+
+            # Restore dashboard toggle state for options_scalp
+            db_options = last.get("options_scalp_enabled")
+            if db_options is not None:
+                self._options_enabled = bool(db_options)
+                logger.info("Restored options_scalp_enabled=%s from DB", self._options_enabled)
         else:
             logger.info("No previous state found -- starting fresh")
 
