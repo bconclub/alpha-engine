@@ -117,6 +117,7 @@ class AlphaBot:
         # Connect external services
         await self._init_exchanges()
         await self.db.connect()
+        await self._auto_changelog(version)
         await self.alerts.connect()
 
         # Restore state from DB if available
@@ -1524,6 +1525,105 @@ class AlphaBot:
                 logger.info("Closed %d Binance dust trades (< $5)", dust_count)
         except Exception:
             logger.exception("Failed to check Binance dust trades")
+
+    async def _auto_changelog(self, version: str) -> None:
+        """Auto-detect version changes and parameter diffs, log to changelog."""
+        if not self.db.is_connected:
+            return
+
+        import subprocess
+        from pathlib import Path as _Path
+
+        now = iso_now()
+        repo_root = str(_Path(__file__).resolve().parent.parent.parent)
+
+        # 1. Get git info
+        git_hash: str | None = None
+        git_message: str | None = None
+        try:
+            git_hash = subprocess.check_output(
+                ["git", "rev-parse", "--short", "HEAD"],
+                cwd=repo_root, text=True, timeout=5,
+            ).strip()
+        except Exception:
+            pass
+        try:
+            git_message = subprocess.check_output(
+                ["git", "log", "-1", "--format=%s"],
+                cwd=repo_root, text=True, timeout=5,
+            ).strip()
+        except Exception:
+            pass
+
+        # 2. Version change → deploy entry
+        last_entry = await self.db.get_latest_changelog()
+        last_version = last_entry.get("version") if last_entry else None
+
+        if last_version != version:
+            title = f"Deploy v{version}"
+            if git_message:
+                title = f"Deploy v{version}: {git_message}"
+            await self.db.log_changelog({
+                "change_type": "gpfc",
+                "title": title[:200],
+                "description": (
+                    f"Auto-detected version change from "
+                    f"{last_version or 'unknown'} to {version}"
+                ),
+                "version": version,
+                "status": "deployed",
+                "deployed_at": now,
+                "git_commit_hash": git_hash,
+                "tags": ["auto"],
+            })
+            logger.info("Auto-changelog: version %s -> %s", last_version, version)
+
+        # 3. Parameter change detection
+        current_snapshot = ScalpStrategy.get_constants_snapshot()
+
+        last_param = await self.db.get_latest_changelog(change_type="param_change")
+        previous_snapshot = (
+            last_param.get("parameters_after") if last_param else None
+        )
+
+        if previous_snapshot and previous_snapshot != current_snapshot:
+            # Build diff description
+            changed: list[str] = []
+            all_keys = set(list(current_snapshot.keys()) + list(previous_snapshot.keys()))
+            for key in sorted(all_keys):
+                old_val = previous_snapshot.get(key)
+                new_val = current_snapshot.get(key)
+                if old_val != new_val:
+                    changed.append(f"{key}: {old_val} -> {new_val}")
+
+            await self.db.log_changelog({
+                "change_type": "param_change",
+                "title": f"Parameter change ({len(changed)} params)",
+                "description": "; ".join(changed)[:500],
+                "version": version,
+                "parameters_before": previous_snapshot,
+                "parameters_after": current_snapshot,
+                "status": "deployed",
+                "deployed_at": now,
+                "git_commit_hash": git_hash,
+                "tags": ["auto", "params"],
+            })
+            logger.info("Auto-changelog: %d parameter(s) changed", len(changed))
+        elif not previous_snapshot:
+            # Seed baseline snapshot
+            await self.db.log_changelog({
+                "change_type": "param_change",
+                "title": f"Initial parameter snapshot v{version}",
+                "description": "Baseline snapshot — no previous entry to compare",
+                "version": version,
+                "parameters_before": None,
+                "parameters_after": current_snapshot,
+                "status": "deployed",
+                "deployed_at": now,
+                "git_commit_hash": git_hash,
+                "tags": ["auto", "params", "baseline"],
+            })
+            logger.info("Auto-changelog: seeded initial parameter snapshot")
 
     async def _restore_state(self) -> None:
         """Restore capital, state, and open positions from last saved status.

@@ -26,6 +26,7 @@ class Database:
     TABLE_BOT_STATUS = "bot_status"
     TABLE_BOT_COMMANDS = "bot_commands"
     TABLE_ACTIVITY_LOG = "activity_log"
+    TABLE_CHANGELOG = "changelog"
 
     def __init__(self) -> None:
         self._client: Client | None = None
@@ -551,6 +552,58 @@ class Database:
         if metadata:
             row["metadata"] = metadata
         await self._insert(self.TABLE_ACTIVITY_LOG, row)
+
+    # ── Changelog ──────────────────────────────────────────────────────────
+
+    async def get_latest_changelog(
+        self, change_type: str | None = None,
+    ) -> dict[str, Any] | None:
+        """Fetch the most recent changelog entry, optionally filtered by type."""
+        if not self.is_connected:
+            return None
+        loop = asyncio.get_running_loop()
+
+        def _query() -> Any:
+            q = (
+                self._client.table(self.TABLE_CHANGELOG)  # type: ignore[union-attr]
+                .select("*")
+                .order("created_at", desc=True)
+                .limit(1)
+            )
+            if change_type:
+                q = q.eq("change_type", change_type)
+            return q.execute()
+
+        try:
+            result = await loop.run_in_executor(None, _query)
+            return result.data[0] if result.data else None
+        except Exception as e:
+            logger.error("get_latest_changelog failed: %s", e)
+            return None
+
+    async def log_changelog(self, data: dict[str, Any]) -> int | None:
+        """Insert a changelog entry. Returns the row ID."""
+        if not self.is_connected:
+            return None
+        try:
+            loop = asyncio.get_running_loop()
+            result = await loop.run_in_executor(
+                None,
+                lambda: (
+                    self._client.table(self.TABLE_CHANGELOG)  # type: ignore[union-attr]
+                    .insert(data)
+                    .execute()
+                ),
+            )
+            row_id = result.data[0].get("id") if result.data else None
+            logger.info(
+                "Changelog logged (id=%s): [%s] %s",
+                row_id, data.get("change_type"), data.get("title"),
+            )
+            return row_id
+        except Exception as e:
+            logger.error("Changelog INSERT failed: %s | %s", type(e).__name__, e)
+            return None
 
     # ── Internal ─────────────────────────────────────────────────────────────
 

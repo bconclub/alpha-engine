@@ -64,6 +64,10 @@ export default function BrainPage() {
         exit_reason: row.exit_reason ? String(row.exit_reason) : (row.reason ? String(row.reason) : undefined),
         order_id: row.order_id ? String(row.order_id) : undefined,
         setup_type: row.setup_type ? String(row.setup_type) : undefined,
+        gross_pnl: row.gross_pnl != null ? Number(row.gross_pnl) : undefined,
+        entry_fee: row.entry_fee != null ? Number(row.entry_fee) : undefined,
+        exit_fee: row.exit_fee != null ? Number(row.exit_fee) : undefined,
+        peak_pnl: row.peak_pnl != null ? Number(row.peak_pnl) : undefined,
       }));
       setTrades(normalized);
     } catch (err) {

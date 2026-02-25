@@ -14,6 +14,9 @@ interface PairSignal {
   wins: number;
   winRate: number;
   pnl: number;
+  avgPnl: number;
+  avgHoldMin: number;
+  dominantExit: string;
   streak: string;
   streakTrades: Trade[];
   topExit: string;
@@ -70,11 +73,21 @@ function holdMinutes(opened: string, closed: string | null | undefined): number 
 }
 
 function buildPairSignal(trades: Trade[], sp: string): PairSignal {
-  const pairTrades = trades.filter((t) => shortPair(t.pair) === sp);
+  // Limit to last 20 trades per pair (trades are pre-sorted newest-first)
+  const pairTrades = trades.filter((t) => shortPair(t.pair) === sp).slice(0, 20);
   const wins = pairTrades.filter((t) => t.pnl > 0);
   const winRate = pairTrades.length > 0 ? (wins.length / pairTrades.length) * 100 : 0;
   const pnl = pairTrades.reduce((s, t) => s + t.pnl, 0);
+  const avgPnl = pairTrades.length > 0 ? pnl / pairTrades.length : 0;
   const fullPair = pairTrades[0]?.pair || sp;
+
+  // Avg hold time in minutes
+  const holdTimes = pairTrades
+    .filter(t => t.closed_at && t.timestamp)
+    .map(t => (new Date(t.closed_at!).getTime() - new Date(t.timestamp).getTime()) / 60000);
+  const avgHoldMin = holdTimes.length > 0
+    ? holdTimes.reduce((s, h) => s + h, 0) / holdTimes.length
+    : 0;
 
   const last5 = pairTrades.slice(0, 5);
   const streak = last5.map((t) => (t.pnl > 0 ? 'W' : 'L')).join('');
@@ -93,6 +106,11 @@ function buildPairSignal(trades: Trade[], sp: string): PairSignal {
     ? `${exitEntries[exitEntries.length - 1][0]} ${((exitEntries[exitEntries.length - 1][1].wins / exitEntries[exitEntries.length - 1][1].count) * 100).toFixed(0)}% WR`
     : '\u2014';
 
+  // Dominant exit type (most common)
+  const dominantExit = Object.entries(exitMap).length > 0
+    ? Object.entries(exitMap).reduce((a, b) => a[1].count > b[1].count ? a : b)[0]
+    : '\u2014';
+
   const recommendations: string[] = [];
   let signal = '';
   let signalType: PairSignal['signalType'] = 'neutral';
@@ -103,21 +121,26 @@ function buildPairSignal(trades: Trade[], sp: string): PairSignal {
   const shortWR = shorts.length >= 3 ? (shorts.filter((t) => t.pnl > 0).length / shorts.length) * 100 : -1;
 
   if (pairTrades.length >= 5 && winRate === 0) {
-    signal = `0% win rate on ${pairTrades.length} trades \u2014 disable`;
+    signal = `0% win rate on ${pairTrades.length} trades`;
     signalType = 'bad';
-    recommendations.push('Disable this pair');
+    recommendations.push('Disable pair');
   } else if (pairTrades.length >= 5 && winRate < 20) {
-    signal = `${winRate.toFixed(0)}% WR \u2014 reduce allocation or widen SL`;
+    signal = `${winRate.toFixed(0)}% WR \u2014 bleeding capital`;
     signalType = 'bad';
-    recommendations.push('Widen SL');
-  } else if (pairTrades.length >= 5 && winRate >= 40) {
-    signal = `${winRate.toFixed(0)}% WR \u2014 performing well`;
+    recommendations.push('Reduce allocation');
+  } else if (pairTrades.length >= 5 && winRate >= 40 && pnl > 0) {
+    signal = `${winRate.toFixed(0)}% WR \u2014 strong performer`;
     signalType = 'good';
+    recommendations.push('Increase allocation');
+  } else if (pairTrades.length >= 5 && winRate >= 40) {
+    signal = `${winRate.toFixed(0)}% WR but net loss (fee drag?)`;
+    signalType = 'warn';
   } else if (pairTrades.length >= 3) {
     signal = `${winRate.toFixed(0)}% WR on ${pairTrades.length} trades`;
     signalType = winRate >= 30 ? 'warn' : 'bad';
+    if (winRate < 30) recommendations.push('Reduce allocation');
   } else {
-    signal = `Only ${pairTrades.length} trades \u2014 not enough data`;
+    signal = `Only ${pairTrades.length} trades \u2014 insufficient data`;
     signalType = 'neutral';
   }
 
@@ -136,7 +159,7 @@ function buildPairSignal(trades: Trade[], sp: string): PairSignal {
 
   const config = PAIR_CONFIG[sp] || { sl: 0.35, tp: 1.50, trail: 0.20 };
 
-  return { shortPair: sp, fullPair, trades: pairTrades.length, wins: wins.length, winRate, pnl, streak, streakTrades: last5, topExit, worstExit, signal, signalType, config, recommendations };
+  return { shortPair: sp, fullPair, trades: pairTrades.length, wins: wins.length, winRate, pnl, avgPnl, avgHoldMin, dominantExit, streak, streakTrades: last5, topExit, worstExit, signal, signalType, config, recommendations };
 }
 
 // ─── Component ────────────────────────────────────────────────────────────────
@@ -317,9 +340,14 @@ function PairRow({ signal: s, onApply, applying }: { signal: PairSignal; onApply
         {s.streakTrades.length === 0 && <span className="text-[10px] text-zinc-600">no trades</span>}
       </div>
 
-      <div className="flex items-center gap-4 mb-3 text-xs font-mono">
+      <div className="flex items-center gap-4 mb-2 text-xs font-mono">
         <span className="text-zinc-500">Best: <span className="text-emerald-400">{s.topExit}</span></span>
         <span className="text-zinc-500">Worst: <span className="text-red-400">{s.worstExit}</span></span>
+      </div>
+      <div className="flex items-center gap-4 mb-3 text-xs font-mono">
+        <span className="text-zinc-500">Avg PnL: <span className={s.avgPnl >= 0 ? 'text-emerald-400' : 'text-red-400'}>{formatPnL(s.avgPnl)}</span></span>
+        <span className="text-zinc-500">Avg Hold: <span className="text-zinc-300">{s.avgHoldMin.toFixed(1)}m</span></span>
+        <span className="text-zinc-500">Main Exit: <span className="text-zinc-300">{s.dominantExit}</span></span>
       </div>
 
       <div className={cn('rounded-lg px-3 py-2 text-xs font-mono', s.signalType === 'good' ? 'bg-emerald-400/5 text-emerald-400' : s.signalType === 'bad' ? 'bg-red-400/5 text-red-400' : s.signalType === 'warn' ? 'bg-amber-400/5 text-amber-400' : 'bg-zinc-800/50 text-zinc-400')}>{s.signal}</div>

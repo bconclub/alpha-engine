@@ -63,10 +63,70 @@ export function AnalysisTab({ trades, changelog, pendingAnalysis, onAnalysisDone
         .sort((a, b) => new Date(b.closed_at || b.timestamp).getTime() - new Date(a.closed_at || a.timestamp).getTime())
         .slice(0, 100);
 
+      // Pre-compute breakdowns for richer analysis
+      const byPair: Record<string, { wins: number; total: number; pnl: number }> = {};
+      const byExit: Record<string, { wins: number; total: number; pnl: number }> = {};
+      const byHour: Record<number, { wins: number; total: number }> = {};
+      let totalGross = 0;
+      let totalFees = 0;
+
+      for (const t of closedTrades) {
+        // By pair
+        const pair = t.pair?.split('/')[0] || '?';
+        if (!byPair[pair]) byPair[pair] = { wins: 0, total: 0, pnl: 0 };
+        byPair[pair].total++;
+        if (t.pnl >= 0) byPair[pair].wins++;
+        byPair[pair].pnl += t.pnl;
+
+        // By exit type
+        const exit = t.exit_reason || t.reason || '?';
+        if (!byExit[exit]) byExit[exit] = { wins: 0, total: 0, pnl: 0 };
+        byExit[exit].total++;
+        if (t.pnl >= 0) byExit[exit].wins++;
+        byExit[exit].pnl += t.pnl;
+
+        // By hour
+        const hour = new Date(t.timestamp).getHours();
+        if (!byHour[hour]) byHour[hour] = { wins: 0, total: 0 };
+        byHour[hour].total++;
+        if (t.pnl >= 0) byHour[hour].wins++;
+
+        // Fee totals
+        totalGross += (t.gross_pnl ?? t.pnl) || 0;
+        totalFees += ((t.entry_fee ?? 0) + (t.exit_fee ?? 0));
+      }
+
+      const breakdowns = {
+        by_pair: Object.fromEntries(
+          Object.entries(byPair).map(([k, v]) => [k, {
+            win_rate: `${((v.wins / v.total) * 100).toFixed(1)}%`,
+            trades: v.total,
+            pnl: `$${v.pnl.toFixed(4)}`,
+          }]),
+        ),
+        by_exit: byExit,
+        by_hour: byHour,
+        fee_analysis: {
+          total_gross_pnl: `$${totalGross.toFixed(4)}`,
+          total_fees: `$${totalFees.toFixed(4)}`,
+          total_net_pnl: `$${(totalGross - totalFees).toFixed(4)}`,
+          fee_pct_of_gross: totalGross !== 0
+            ? `${((totalFees / Math.abs(totalGross)) * 100).toFixed(1)}%`
+            : 'N/A',
+        },
+      };
+
+      // Get current params from latest param_change changelog entry
+      const latestParamEntry = changelog.find(
+        c => c.change_type === 'param_change' && c.parameters_after,
+      );
+
       const body: any = {
         analysis_type: type,
         trades: closedTrades,
         changelog: changelog.slice(0, 10),
+        breakdowns,
+        current_params: latestParamEntry?.parameters_after ?? null,
       };
 
       if (entry) {

@@ -393,6 +393,70 @@ class ScalpStrategy(BaseStrategy):
     # ── Rate limiting / risk ──────────────────────────────────────────────
     MAX_TRADES_PER_HOUR = 10          # keep trading aggressively
 
+    # ── Constants snapshot (for auto-changelog param change detection) ───
+    @classmethod
+    def get_constants_snapshot(cls) -> dict[str, object]:
+        """Return a JSON-serializable dict of all tunable trading constants."""
+        return {
+            # SL / TP
+            "STOP_LOSS_PCT": cls.STOP_LOSS_PCT,
+            "MIN_TP_PCT": cls.MIN_TP_PCT,
+            "PAIR_SL_FLOOR": cls.PAIR_SL_FLOOR,
+            "PAIR_SL_CAP": cls.PAIR_SL_CAP,
+            "PAIR_TP_FLOOR": cls.PAIR_TP_FLOOR,
+            "ATR_SL_MULTIPLIER": cls.ATR_SL_MULTIPLIER,
+            "ATR_TP_MULTIPLIER": cls.ATR_TP_MULTIPLIER,
+            # Phase timing
+            "PHASE1_SECONDS": cls.PHASE1_SECONDS,
+            "PHASE1_SKIP_AT_PEAK_PCT": cls.PHASE1_SKIP_AT_PEAK_PCT,
+            "PHASE2_SECONDS": cls.PHASE2_SECONDS,
+            "MAX_HOLD_SECONDS": cls.MAX_HOLD_SECONDS,
+            "FLATLINE_SECONDS": cls.FLATLINE_SECONDS,
+            "FLATLINE_MIN_MOVE_PCT": cls.FLATLINE_MIN_MOVE_PCT,
+            "MOVE_SL_TO_ENTRY_PCT": cls.MOVE_SL_TO_ENTRY_PCT,
+            "HARD_TP_CAPITAL_PCT": cls.HARD_TP_CAPITAL_PCT,
+            # Momentum / reversal exits
+            "MOMENTUM_DYING_PCT": cls.MOMENTUM_DYING_PCT,
+            "MOM_FLIP_CONFIRM_SECONDS": cls.MOM_FLIP_CONFIRM_SECONDS,
+            "MOM_DYING_CONFIRM_SECONDS": cls.MOM_DYING_CONFIRM_SECONDS,
+            "MOM_FADE_CONFIRM_SECONDS": cls.MOM_FADE_CONFIRM_SECONDS,
+            "MOM_FADE_MIN_HOLD": cls.MOM_FADE_MIN_HOLD,
+            "MOM_FADE_TREND_HOLD": cls.MOM_FADE_TREND_HOLD,
+            "MOM_FADE_TREND_CONFIRM": cls.MOM_FADE_TREND_CONFIRM,
+            "DEAD_MOM_MIN_HOLD": cls.DEAD_MOM_MIN_HOLD,
+            "REVERSAL_MIN_PROFIT_PCT": cls.REVERSAL_MIN_PROFIT_PCT,
+            "RSI_REVERSAL_LONG": cls.RSI_REVERSAL_LONG,
+            "RSI_REVERSAL_SHORT": cls.RSI_REVERSAL_SHORT,
+            # Trail tiers (tuples → lists for JSON)
+            "TRAIL_TIER_TABLE": [[t, d] for t, d in cls.TRAIL_TIER_TABLE],
+            "RATCHET_FLOOR_TABLE": [[t, f] for t, f in cls.RATCHET_FLOOR_TABLE],
+            # Entry thresholds
+            "MOMENTUM_MIN_PCT": cls.MOMENTUM_MIN_PCT,
+            "VOL_SPIKE_RATIO": cls.VOL_SPIKE_RATIO,
+            "RSI_EXTREME_LONG": cls.RSI_EXTREME_LONG,
+            "RSI_EXTREME_SHORT": cls.RSI_EXTREME_SHORT,
+            "BB_MEAN_REVERT_UPPER": cls.BB_MEAN_REVERT_UPPER,
+            "BB_MEAN_REVERT_LOWER": cls.BB_MEAN_REVERT_LOWER,
+            "RSI_OVERRIDE_LONG": cls.RSI_OVERRIDE_LONG,
+            "RSI_OVERRIDE_SHORT": cls.RSI_OVERRIDE_SHORT,
+            # Position sizing
+            "CAPITAL_PCT_FUTURES": cls.CAPITAL_PCT_FUTURES,
+            "PAIR_ALLOC_PCT": cls.PAIR_ALLOC_PCT,
+            "MAX_COLLATERAL_PCT": cls.MAX_COLLATERAL_PCT,
+            "SURVIVAL_BALANCE": cls.SURVIVAL_BALANCE,
+            "SURVIVAL_MAX_ALLOC": cls.SURVIVAL_MAX_ALLOC,
+            "MAX_SL_LOSS_PCT": cls.MAX_SL_LOSS_PCT,
+            "PAIR_MIN_STRENGTH": cls.PAIR_MIN_STRENGTH,
+            # Cooldowns
+            "SL_COOLDOWN_SECONDS": cls.SL_COOLDOWN_SECONDS,
+            "REVERSAL_COOLDOWN_SECONDS": cls.REVERSAL_COOLDOWN_SECONDS,
+            "CONSECUTIVE_LOSS_LIMIT": cls.CONSECUTIVE_LOSS_LIMIT,
+            "STREAK_PAUSE_SECONDS": cls.STREAK_PAUSE_SECONDS,
+            # Rate limits
+            "MAX_TRADES_PER_HOUR": cls.MAX_TRADES_PER_HOUR,
+            "MAX_SPREAD_PCT": cls.MAX_SPREAD_PCT,
+        }
+
     # ── Class-level shared state ──────────────────────────────────────────
     _live_pnl: dict[str, float] = {}           # pair → current unrealized P&L % (updated every tick)
     _pair_trade_history: dict[str, list[bool]] = {}  # base_asset → list of win/loss booleans (last N)

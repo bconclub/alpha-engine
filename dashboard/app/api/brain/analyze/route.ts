@@ -23,34 +23,32 @@ function checkRateLimit(ip: string): boolean {
 
 const SYSTEM_PROMPT = `You are Alpha Brain, the analytical intelligence layer for the Alpha crypto trading bot.
 
-Alpha is a high-frequency scalp trading bot running on Delta Exchange India. It trades BTC, ETH, XRP, and SOL perpetual futures with 20-50x leverage. Trades last 30 seconds to 30 minutes. The bot uses a multi-signal entry system (momentum, volume, RSI, Bollinger Bands, VWAP, etc.) and a phased exit system (Phase 1 hands-off, Phase 2 trailing, Phase 3 cut).
-
-Your role is to:
-1. Analyze trade performance data and identify patterns
-2. Evaluate the impact of parameter/strategy changes (GPFCs)
-3. Provide actionable recommendations for improving bot performance
-4. Be direct and quantitative — use numbers, not vague language
+Alpha is a high-frequency scalp trading bot on Delta Exchange India. It trades BTC, ETH, XRP, SOL perpetual futures with 20-50x leverage. Trades last 30s to 30min. Entry: 11-signal gate (3/4 minimum — momentum, volume, RSI, BB, VWAP, etc). Exit: 3-phase system (Phase 1 hands-off, Phase 2 trailing, Phase 3 cut).
 
 Key context:
 - P&L is in USD (small amounts, $0.01-$2.00 per trade due to small capital)
-- Win rate matters more than individual trade size at 20-50x leverage
-- Exit reasons: TRAIL (trailing stop), SL (stop loss), FLAT (flatline timeout), TP (take profit), TIMEOUT (max hold), BE (breakeven), MOM_FADE (momentum fade), DEAD_MOM (dead momentum), REV (reversal)
-- A good trade: enters on 3+/4 signals, trails to +0.5-2% profit, exits TRAIL
-- A bad trade: enters on weak signals, hits SL quickly (-0.3% loss * 20x = -6% capital)
-- The bot has been through 17+ GPFCs (General Purpose Fixes/Changes)
+- At 20x leverage, a 0.30% SL hit = 6% capital loss per trade
+- Fee drag is REAL: ~0.083% round trip (entry + exit) at 20x = 1.66% capital per trade
+- Exit types: TRAIL (trailing stop), SL (stop loss), FLAT (flatline timeout), TP (take profit), TIMEOUT (max hold), BREAKEVEN, MOMENTUM_FADE (momentum fading while in profit), DEAD_MOMENTUM (dead momentum while losing), REVERSAL
+- A good trade: 3+/4 signals, trails to +0.5-2% profit, exits TRAIL
+- A bad trade: weak confluence, hits SL quickly
+- The bot has been through 19+ GPFCs (General Purpose Fixes/Changes)
 
-Format your response in markdown with:
-## Key Findings
-(3-5 bullet points with specific numbers)
+You will receive RAW trade data — every row from the database. Find the patterns yourself.
 
-## Impact Assessment
-(if analyzing a specific change — was it positive or negative?)
+Format your response EXACTLY as:
 
-## Recommendations
-(actionable items with priority: HIGH/MEDIUM/LOW)
+## WHAT'S WORKING
+Which exits are profitable? Which pairs? Which setups? Which hours? Be specific with numbers.
 
-## Risk Alerts
-(anything concerning that needs attention)`;
+## WHAT'S BLEEDING
+Biggest loss categories. Fee drag analysis. Bad patterns. Pair-specific issues. Quantify everything.
+
+## SPECIFIC FIXES
+Parameter changes with EXACT values. Format each as: "Change X from Y to Z because [data-backed reason]"
+
+## RISK SCORE
+Single number 1-10. 1 = extremely safe/profitable. 10 = about to blow up. Explain briefly.`;
 
 // ── Route Handler ──────────────────────────────────────────────────────────────
 
@@ -75,6 +73,7 @@ export async function POST(req: NextRequest) {
       trades = [],
       changelog = [],
       current_params,
+      breakdowns,
       snapshots,
     } = body;
 
@@ -99,10 +98,12 @@ export async function POST(req: NextRequest) {
       userPrompt += `Analyze the current performance of my trading bot.\n\n`;
     }
 
+    // Current config snapshot
     if (current_params) {
-      userPrompt += `## Current Parameters\n${JSON.stringify(current_params, null, 2)}\n\n`;
+      userPrompt += `## Current Bot Parameters\n${JSON.stringify(current_params, null, 2)}\n\n`;
     }
 
+    // Recent changelog
     if (changelog.length > 0 && analysis_type !== 'changelog_impact') {
       userPrompt += `## Recent Changelog\n`;
       for (const c of changelog.slice(0, 10)) {
@@ -111,8 +112,25 @@ export async function POST(req: NextRequest) {
       userPrompt += '\n';
     }
 
+    // Pre-computed breakdowns
+    if (breakdowns) {
+      userPrompt += `## Pre-Computed Breakdowns\n`;
+      if (breakdowns.by_pair) {
+        userPrompt += `### Win Rate by Pair\n${JSON.stringify(breakdowns.by_pair, null, 2)}\n\n`;
+      }
+      if (breakdowns.by_exit) {
+        userPrompt += `### Win Rate by Exit Type\n${JSON.stringify(breakdowns.by_exit, null, 2)}\n\n`;
+      }
+      if (breakdowns.by_hour) {
+        userPrompt += `### Win Rate by Hour (UTC)\n${JSON.stringify(breakdowns.by_hour, null, 2)}\n\n`;
+      }
+      if (breakdowns.fee_analysis) {
+        userPrompt += `### Fee Analysis\n${JSON.stringify(breakdowns.fee_analysis, null, 2)}\n\n`;
+      }
+    }
+
+    // Raw trade data
     if (trades.length > 0) {
-      // Aggregate stats
       const closed = trades.filter((t: any) => t.status === 'closed');
       const wins = closed.filter((t: any) => t.pnl >= 0).length;
       const totalPnl = closed.reduce((s: number, t: any) => s + t.pnl, 0);
@@ -122,21 +140,22 @@ export async function POST(req: NextRequest) {
       userPrompt += `- Total PnL: $${totalPnl.toFixed(4)}\n`;
       userPrompt += `- Avg PnL: $${closed.length > 0 ? (totalPnl / closed.length).toFixed(4) : 0}\n\n`;
 
-      // Trade table (last 100)
-      userPrompt += `## Last ${Math.min(trades.length, 100)} Trades\n`;
-      userPrompt += `| # | Pair | Side | PnL | PnL% | Exit | Hold(s) | Setup | Leverage |\n`;
-      userPrompt += `|---|------|------|-----|------|------|---------|-------|----------|\n`;
+      // Expanded trade table with entry/exit prices, gross, fees, peak
+      userPrompt += `## Raw Trade Data (last ${Math.min(trades.length, 100)})\n`;
+      userPrompt += `| # | Pair | Side | Entry | Exit | Net PnL | PnL% | Gross | Fees | Peak% | Exit Reason | Hold(s) | Setup | Lev |\n`;
+      userPrompt += `|---|------|------|-------|------|---------|------|-------|------|-------|-------------|---------|-------|-----|\n`;
       for (let i = 0; i < Math.min(trades.length, 100); i++) {
         const t = trades[i];
         const hold = t.closed_at && t.timestamp
           ? Math.round((new Date(t.closed_at).getTime() - new Date(t.timestamp).getTime()) / 1000)
           : '?';
-        userPrompt += `| ${i + 1} | ${t.pair?.split('/')[0] || '?'} | ${t.position_type || t.side} | $${t.pnl?.toFixed(4) || '?'} | ${t.pnl_pct?.toFixed(2) || '?'}% | ${t.exit_reason || '?'} | ${hold} | ${t.setup_type || '-'} | ${t.leverage || 1}x |\n`;
+        const fees = ((t.entry_fee || 0) + (t.exit_fee || 0)).toFixed(4);
+        userPrompt += `| ${i + 1} | ${t.pair?.split('/')[0] || '?'} | ${t.position_type || t.side} | ${t.price?.toFixed(2) || '?'} | ${t.exit_price?.toFixed(2) || '?'} | $${t.pnl?.toFixed(4) || '?'} | ${t.pnl_pct?.toFixed(2) || '?'}% | $${(t.gross_pnl ?? t.pnl)?.toFixed(4) || '?'} | $${fees} | ${t.peak_pnl?.toFixed(2) || '?'}% | ${t.exit_reason || '?'} | ${hold} | ${t.setup_type || '-'} | ${t.leverage || 1}x |\n`;
       }
       userPrompt += '\n';
     }
 
-    userPrompt += 'What patterns do you see? What should I change next?';
+    userPrompt += 'Analyze the data above. Be specific and data-driven.';
 
     // Call Claude API
     const response = await fetch('https://api.anthropic.com/v1/messages', {
@@ -148,7 +167,7 @@ export async function POST(req: NextRequest) {
       },
       body: JSON.stringify({
         model: 'claude-sonnet-4-20250514',
-        max_tokens: 2048,
+        max_tokens: 3000,
         system: SYSTEM_PROMPT,
         messages: [{ role: 'user', content: userPrompt }],
       }),
@@ -165,27 +184,39 @@ export async function POST(req: NextRequest) {
     const inputTokens = data.usage?.input_tokens || 0;
     const outputTokens = data.usage?.output_tokens || 0;
 
-    // Extract summary (first paragraph or first 200 chars)
-    const summaryMatch = analysisText.match(/## Key Findings\n+([\s\S]*?)(?=\n## |$)/);
+    // Extract summary from WHAT'S WORKING section
+    const summaryMatch = analysisText.match(/## WHAT'S WORKING\n+([\s\S]*?)(?=\n## |$)/);
     const summary = summaryMatch ? summaryMatch[1].trim().slice(0, 300) : analysisText.slice(0, 200);
 
-    // Try to extract structured recommendations
+    // Extract recommendations from SPECIFIC FIXES
     let recommendations = null;
-    const recsMatch = analysisText.match(/## Recommendations\n+([\s\S]*?)(?=\n## |$)/);
+    const recsMatch = analysisText.match(/## SPECIFIC FIXES\n+([\s\S]*?)(?=\n## |$)/);
     if (recsMatch) {
-      const lines = recsMatch[1].trim().split('\n').filter((l: string) => l.startsWith('- ') || l.startsWith('* '));
+      const lines = recsMatch[1].trim().split('\n').filter((l: string) =>
+        l.startsWith('- ') || l.startsWith('* ') || /^\d+\./.test(l),
+      );
       recommendations = lines.map((l: string) => {
-        const text = l.replace(/^[-*]\s*/, '');
+        const text = l.replace(/^[-*\d.)\s]+/, '');
         const priority = text.match(/\**(HIGH|MEDIUM|LOW)\**/i)?.[1]?.toLowerCase() || 'medium';
         return { action: text, priority, reason: '' };
       });
     }
 
+    // Extract risk score
+    const riskMatch = analysisText.match(/## RISK SCORE\n+(\d+)/);
+    const riskScore = riskMatch ? parseInt(riskMatch[1]) : null;
+
     // Save to database
     const analysisRecord = {
       changelog_entry_id: changelog_entry_id || null,
       analysis_type,
-      prompt_context: { trades_count: trades.length, changelog_count: changelog.length },
+      prompt_context: {
+        trades_count: trades.length,
+        changelog_count: changelog.length,
+        has_breakdowns: !!breakdowns,
+        has_config: !!current_params,
+        risk_score: riskScore,
+      },
       model_used: 'claude-sonnet-4-20250514',
       analysis_text: analysisText,
       summary,
@@ -218,6 +249,7 @@ export async function POST(req: NextRequest) {
         model_used: 'claude-sonnet-4-20250514',
         input_tokens: inputTokens,
         output_tokens: outputTokens,
+        risk_score: riskScore,
       },
     });
   } catch (err: any) {
