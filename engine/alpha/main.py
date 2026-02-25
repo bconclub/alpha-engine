@@ -82,6 +82,7 @@ class AlphaBot:
         self._hourly_pnl: float = 0.0
         self._hourly_wins: int = 0
         self._hourly_losses: int = 0
+        # Daily loss tracking flags kept for compatibility (no auto-pause)
         self._daily_loss_warned: bool = False
 
     @property
@@ -269,67 +270,79 @@ class AlphaBot:
         self._scheduler.start()
 
         # Fetch live exchange balances → per-exchange capital for trade sizing
-        binance_bal = await self._fetch_portfolio_usd(self.binance)
-        delta_bal = await self._fetch_portfolio_usd(self.delta) if self.delta else None
-        self.risk_manager.update_exchange_balances(binance_bal, delta_bal)
+        binance_bal: float | None = None
+        delta_bal: float | None = None
+        try:
+            binance_bal = await self._fetch_portfolio_usd(self.binance)
+            delta_bal = await self._fetch_portfolio_usd(self.delta) if self.delta else None
+            self.risk_manager.update_exchange_balances(binance_bal, delta_bal)
+        except Exception:
+            logger.exception("[STARTUP] Failed to fetch exchange balances — continuing with defaults")
 
         total_capital = self.risk_manager.capital
 
         # ── Log per-pair affordability for Delta scalp ────────────────────
-        if self.delta and delta_bal is not None:
-            from alpha.trade_executor import DELTA_CONTRACT_SIZE
+        try:
+            if self.delta and delta_bal is not None:
+                from alpha.trade_executor import DELTA_CONTRACT_SIZE
 
-            active_pairs: list[str] = []
-            skipped_pairs: list[str] = []
-            for pair in self.delta_pairs:
-                contract_size = DELTA_CONTRACT_SIZE.get(pair, 0)
-                if contract_size <= 0:
-                    logger.warning("[STARTUP] %s — unknown contract size, may not trade", pair)
-                    skipped_pairs.append(pair)
-                    continue
-                try:
-                    ticker = await self.delta.fetch_ticker(pair)
-                    price = float(ticker.get("last", 0) or 0)
-                except Exception:
-                    price = 0
-                if price > 0:
-                    collateral = (contract_size * price) / config.delta.leverage
-                    affordable = delta_bal >= collateral
-                    status = "ACTIVE" if affordable else "SKIPPED"
-                    logger.info(
-                        "[STARTUP] %s %s — 1 contract=$%.2f collateral (%dx), bal=$%.2f",
-                        pair, status, collateral, config.delta.leverage, delta_bal,
-                    )
-                    if affordable:
-                        active_pairs.append(pair)
-                    else:
+                active_pairs: list[str] = []
+                skipped_pairs: list[str] = []
+                leverage = config.delta.leverage or 1  # guard against zero
+                for pair in self.delta_pairs:
+                    contract_size = DELTA_CONTRACT_SIZE.get(pair, 0)
+                    if contract_size <= 0:
+                        logger.warning("[STARTUP] %s — unknown contract size, may not trade", pair)
                         skipped_pairs.append(pair)
-                else:
-                    logger.warning("[STARTUP] %s — could not fetch price", pair)
-                    active_pairs.append(pair)  # still register, let runtime handle it
-            logger.info(
-                "[STARTUP] Delta Active: %s | Skipped: %s",
-                ", ".join(active_pairs) or "none",
-                ", ".join(skipped_pairs) or "none",
-            )
+                        continue
+                    try:
+                        ticker = await self.delta.fetch_ticker(pair)
+                        price = float(ticker.get("last", 0) or 0)
+                    except Exception:
+                        price = 0
+                    if price > 0:
+                        collateral = (contract_size * price) / leverage
+                        affordable = delta_bal >= collateral
+                        status = "ACTIVE" if affordable else "SKIPPED"
+                        logger.info(
+                            "[STARTUP] %s %s — 1 contract=$%.2f collateral (%dx), bal=$%.2f",
+                            pair, status, collateral, leverage, delta_bal,
+                        )
+                        if affordable:
+                            active_pairs.append(pair)
+                        else:
+                            skipped_pairs.append(pair)
+                    else:
+                        logger.warning("[STARTUP] %s — could not fetch price", pair)
+                        active_pairs.append(pair)  # still register, let runtime handle it
+                logger.info(
+                    "[STARTUP] Delta Active: %s | Skipped: %s",
+                    ", ".join(active_pairs) or "none",
+                    ", ".join(skipped_pairs) or "none",
+                )
 
-        # ── Log Binance spot pair info ──────────────────────────────────
-        if self.binance and binance_bal is not None and self.pairs:
-            min_trade = 6.0  # MIN_NOTIONAL_SPOT
-            can_trade = binance_bal >= min_trade
-            logger.info(
-                "[STARTUP] Binance: $%.2f USDT | %d pairs | Min trade: $%.0f | %s",
-                binance_bal, len(self.pairs), min_trade,
-                "ACTIVE" if can_trade else "INSUFFICIENT — need $6+",
-            )
-            for pair in self.pairs:
-                logger.info("[STARTUP] Binance spot: %s (1x, long-only)", pair)
+            # ── Log Binance spot pair info ──────────────────────────────────
+            if self.binance and binance_bal is not None and self.pairs:
+                min_trade = 6.0  # MIN_NOTIONAL_SPOT
+                can_trade = binance_bal >= min_trade
+                logger.info(
+                    "[STARTUP] Binance: $%.2f USDT | %d pairs | Min trade: $%.0f | %s",
+                    binance_bal, len(self.pairs), min_trade,
+                    "ACTIVE" if can_trade else "INSUFFICIENT — need $6+",
+                )
+                for pair in self.pairs:
+                    logger.info("[STARTUP] Binance spot: %s (1x, long-only)", pair)
+        except Exception:
+            logger.exception("[STARTUP] Affordability check failed — continuing")
 
-        # Notify
-        await self.alerts.send_bot_started(
-            self.all_pairs, total_capital,
-            binance_balance=binance_bal, delta_balance=delta_bal,
-        )
+        # Notify — ALWAYS send startup message even if balance checks failed above
+        try:
+            await self.alerts.send_bot_started(
+                self.all_pairs, total_capital,
+                binance_balance=binance_bal, delta_balance=delta_bal,
+            )
+        except Exception:
+            logger.exception("[STARTUP] Failed to send startup message")
 
         # Register shutdown signals
         self._running = True
@@ -555,13 +568,8 @@ class AlphaBot:
             # 5. Check liquidation risk for futures positions
             await self._check_liquidation_risks()
 
-            # 6. Check daily loss warning (alert once when > 80% of limit)
-            loss_threshold = rm.daily_loss_limit_pct * 0.8
-            if rm.daily_loss_pct >= loss_threshold and not self._daily_loss_warned:
-                self._daily_loss_warned = True
-                await self.alerts.send_daily_loss_warning(
-                    rm.daily_loss_pct, rm.daily_loss_limit_pct,
-                )
+            # 6. Daily loss monitoring — log only, no pausing
+            # (Z philosophy: trade every opportunity, never auto-pause)
 
         except Exception:
             logger.exception("Error in analysis cycle")
@@ -583,15 +591,16 @@ class AlphaBot:
     async def _check_liquidation_risks(self) -> None:
         """Monitor futures positions for liquidation proximity.
 
-        At 20x leverage, liquidation is ~5% away. SL at 0.75% triggers long before.
-        Warning levels:
-          >3%: no warning (normal operation)
-          2-3%: INFO log only, no Telegram
-          1-2%: Telegram WARNING (once per pair, yellow)
-          <1%: Telegram CRITICAL (every 30s, red)
+        Leverage-aware thresholds: at 50x liq is ~2% away, at 20x it's ~5%.
+        Warning tiers are scaled as fractions of the total liq distance:
+          >60% of liq distance: no warning (normal operation)
+          40-60%: INFO log only, no Telegram
+          20-40%: Telegram WARNING (once per pair, yellow)
+          <20%: Telegram CRITICAL (every 5 min, red)
 
-        Skip warning entirely if the position has a SL set that would trigger
-        before reaching liquidation.
+        Skip warning entirely if:
+          - The scalp strategy doesn't think we're in a position (ghost entry)
+          - SL distance > current distance (SL should fire first)
         """
         if not self.delta:
             return
@@ -600,18 +609,23 @@ class AlphaBot:
         if not hasattr(self, "_liq_warned"):
             self._liq_warned: dict[str, float] = {}  # pair -> last telegram time
 
+        sl_distance_pct = config.trading.per_trade_stop_loss_pct  # actual configured SL
+
         for pair in self.delta_pairs:
             try:
+                # ── Ghost position guard ──
+                # Only check liquidation if the scalp strategy ALSO thinks we're in
+                # a position. Prevents spam from stale entries in risk_manager.
+                scalp = self._scalp_strategies.get(pair)
+                if scalp and not scalp.in_position:
+                    self._liq_warned.pop(pair, None)
+                    continue
+
                 ticker = await self.delta.fetch_ticker(pair)
                 current_price = ticker["last"]
                 distance = self.risk_manager.check_liquidation_risk(pair, current_price)
                 if distance is None:
                     # No futures position — clear warning state
-                    self._liq_warned.pop(pair, None)
-                    continue
-
-                # >3%: normal operation, no warning needed
-                if distance > 3.0:
                     self._liq_warned.pop(pair, None)
                     continue
 
@@ -624,57 +638,65 @@ class AlphaBot:
                 if pos is None:
                     continue
 
-                # Calculate liq price
+                # Calculate liq price + leverage-aware thresholds
+                leverage = pos.leverage or 20
                 if pos.position_type == "long":
-                    liq_price = pos.entry_price * (1 - 1 / pos.leverage)
+                    liq_price = pos.entry_price * (1 - 1 / leverage)
                 else:
-                    liq_price = pos.entry_price * (1 + 1 / pos.leverage)
+                    liq_price = pos.entry_price * (1 + 1 / leverage)
+
+                liq_total_pct = 100.0 / leverage   # total distance: 2% at 50x, 5% at 20x
+                safe_threshold = liq_total_pct * 0.60     # >60%: safe
+                info_threshold = liq_total_pct * 0.40     # 40-60%: INFO
+                warn_threshold = liq_total_pct * 0.20     # 20-40%: WARNING
+                # <20%: CRITICAL
+
+                # >60% of liq distance: normal operation, no warning
+                if distance > safe_threshold:
+                    self._liq_warned.pop(pair, None)
+                    continue
 
                 # Skip if SL would trigger before liquidation
-                # At 0.50% SL and 5% liquidation, SL always fires first
-                sl_distance_pct = 0.50  # our configured SL
                 if distance > sl_distance_pct:
-                    # SL will trigger before we reach liquidation — safe
                     continue
 
                 now = time.monotonic()
 
-                # 2-3%: INFO log only (once per minute)
-                if 2.0 <= distance <= 3.0:
+                # 40-60% of liq distance: INFO log only
+                if distance >= info_threshold:
                     logger.info(
-                        "[%s] Liquidation distance: %.1f%% (%s %dx) — SL should trigger first",
-                        pair, distance, pos.position_type, pos.leverage,
+                        "[%s] Liquidation distance: %.2f%% (%s %dx, liq_total=%.1f%%) — SL should trigger first",
+                        pair, distance, pos.position_type, leverage, liq_total_pct,
                     )
                     continue
 
-                # 1-2%: Telegram WARNING (once per pair)
-                if 1.0 <= distance < 2.0:
+                # 20-40% of liq distance: Telegram WARNING (once per pair)
+                if distance >= warn_threshold:
                     if pair not in self._liq_warned:
                         self._liq_warned[pair] = now
                         await self.alerts.send_liquidation_warning(
-                            pair, distance, pos.position_type, pos.leverage,
+                            pair, distance, pos.position_type, leverage,
                             current_price=current_price, liq_price=liq_price,
                         )
                         logger.warning(
-                            "[%s] LIQUIDATION WARNING: %.1f%% from liquidation (%s %dx)",
-                            pair, distance, pos.position_type, pos.leverage,
+                            "[%s] LIQUIDATION WARNING: %.2f%% from liquidation (%s %dx)",
+                            pair, distance, pos.position_type, leverage,
                         )
                     continue
 
-                # <1%: CRITICAL — alert every 30 seconds
-                if distance < 1.0:
-                    last_alert = self._liq_warned.get(pair, 0)
-                    if now - last_alert >= 30:
-                        self._liq_warned[pair] = now
-                        await self.alerts.send_liquidation_warning(
-                            pair, distance, pos.position_type, pos.leverage,
-                            current_price=current_price, liq_price=liq_price,
-                        )
-                        logger.critical(
-                            "[%s] CRITICAL LIQUIDATION: %.1f%% from liquidation (%s %dx) — price=$%.2f liq=$%.2f",
-                            pair, distance, pos.position_type, pos.leverage,
-                            current_price, liq_price,
-                        )
+                # <20% of liq distance: CRITICAL — alert every 5 minutes
+                last_alert = self._liq_warned.get(pair, 0)
+                if now - last_alert >= 300:
+                    self._liq_warned[pair] = now
+                    await self.alerts.send_liquidation_warning(
+                        pair, distance, pos.position_type, leverage,
+                        current_price=current_price, liq_price=liq_price,
+                    )
+                    logger.critical(
+                        "[%s] CRITICAL LIQUIDATION: %.2f%% from liquidation (%s %dx) — price=$%.2f liq=$%.2f",
+                        pair, distance, pos.position_type, leverage,
+                        current_price, liq_price,
+                    )
 
             except Exception:
                 logger.debug("Could not check liquidation risk for %s", pair)
@@ -1100,6 +1122,9 @@ class AlphaBot:
                 elif "daily_loss_limit_pct" in params:
                     self.risk_manager.daily_loss_limit_pct = float(params["daily_loss_limit_pct"])
                     result_msg = f"daily_loss_limit_pct -> {params['daily_loss_limit_pct']}"
+                elif "daily_loss_hard_limit_pct" in params:
+                    self.risk_manager.daily_loss_hard_limit_pct = float(params["daily_loss_hard_limit_pct"])
+                    result_msg = f"daily_loss_hard_limit_pct -> {params['daily_loss_hard_limit_pct']}"
                 elif "setup_type" in params:
                     # Setup toggle from dashboard Strategies page
                     st = params["setup_type"]
@@ -1922,7 +1947,7 @@ class AlphaBot:
                         # Activate trailing if already profitable enough
                         if current_pnl >= scalp.TRAILING_ACTIVATE_PCT:
                             scalp._trailing_active = True
-                            scalp._update_trail_distance()
+                            scalp._update_trail_stop()
                             logger.info(
                                 "[%s] RESTORE: already at +%.2f%% — trailing activated",
                                 pair, current_pnl,
@@ -2134,7 +2159,7 @@ class AlphaBot:
                             # Activate trailing if already profitable enough
                             if current_pnl >= scalp.TRAILING_ACTIVATE_PCT:
                                 scalp._trailing_active = True
-                                scalp._update_trail_distance()
+                                scalp._update_trail_stop()
                                 logger.info(
                                     "RESTORE: %s already at +%.2f%% — trailing activated",
                                     pair, current_pnl,
@@ -2279,6 +2304,8 @@ class AlphaBot:
                 scalp._phantom_cooldown_until = now + 60
                 ScalpStrategy._live_pnl.pop(pair, None)
 
+                phantom_pnl_for_rm = 0.0  # track actual P&L for risk manager
+
                 # Mark closed in DB — use trade history to find real exit price & reason
                 if self.db.is_connected:
                     open_trade = await self.db.get_open_trade(
@@ -2335,6 +2362,7 @@ class AlphaBot:
                             entry_px, phantom_exit, phantom_amount,
                             pos_type, trade_lev, "delta", pair,
                         )
+                        phantom_pnl_for_rm = phantom_pnl
                         trade_id = open_trade.get("id")
                         _phantom_exit_map = {"phantom_cleared": "PHANTOM", "SL_EXCHANGE": "SL_EXCHANGE",
                                              "TP_EXCHANGE": "TP_EXCHANGE", "CLOSED_BY_EXCHANGE": "CLOSED_BY_EXCHANGE"}
@@ -2360,8 +2388,8 @@ class AlphaBot:
                             pair, phantom_exit, phantom_pnl, phantom_pnl_pct, phantom_reason,
                         )
 
-                # Remove from risk manager
-                self.risk_manager.record_close(pair, 0.0)
+                # Remove from risk manager — use real P&L for accurate daily tracking
+                self.risk_manager.record_close(pair, phantom_pnl_for_rm)
 
     async def _reconcile_binance_positions(self) -> None:
         """Reconcile Binance spot positions with bot memory.
@@ -2417,6 +2445,8 @@ class AlphaBot:
                 scalp._last_position_exit = bnow
                 scalp._phantom_cooldown_until = bnow + 60
 
+                phantom_pnl_for_rm_bn = 0.0  # track actual P&L for risk manager
+
                 if self.db.is_connected:
                     open_trade = await self.db.get_open_trade(
                         pair=pair, exchange="binance", strategy="scalp",
@@ -2460,6 +2490,7 @@ class AlphaBot:
                             entry_px, phantom_exit, phantom_amount,
                             "spot", 1, "binance", pair,
                         )
+                        phantom_pnl_for_rm_bn = phantom_pnl
                         trade_id = open_trade.get("id")
                         _phantom_exit_map_bn = {"phantom_cleared": "PHANTOM", "SL_EXCHANGE": "SL_EXCHANGE",
                                                 "TP_EXCHANGE": "TP_EXCHANGE", "CLOSED_BY_EXCHANGE": "CLOSED_BY_EXCHANGE"}
@@ -2484,7 +2515,8 @@ class AlphaBot:
                             "Phantom Binance %s closed: exit=$%.2f pnl=$%.4f reason=%s",
                             pair, phantom_exit, phantom_pnl, phantom_reason,
                         )
-                self.risk_manager.record_close(pair, 0.0)
+                # Remove from risk manager — use real P&L for accurate daily tracking
+                self.risk_manager.record_close(pair, phantom_pnl_for_rm_bn)
 
     async def _close_orphaned_positions(self) -> None:
         """Close any open positions from non-scalp strategies (e.g. futures_momentum).
@@ -2576,6 +2608,9 @@ class AlphaBot:
                         exit_reason="ORPHAN",
                     )
 
+                # Remove from risk manager — prevents ghost entries
+                self.risk_manager.record_close(pair, pnl)
+
                 # Send alert
                 await self.alerts.send_text(
                     f"🧹 Closed orphaned {strategy_name} position\n"
@@ -2612,6 +2647,8 @@ class AlphaBot:
                             "Orphan fallback close %s: exit=$%.2f pnl=$%.4f (%.2f%%)",
                             pair, fallback_exit, fallback_pnl, fallback_pnl_pct,
                         )
+                    # Remove from risk manager even in fallback path
+                    self.risk_manager.record_close(pair, fallback_pnl)
                 except Exception:
                     pass
 

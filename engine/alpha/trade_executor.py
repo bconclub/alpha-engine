@@ -23,6 +23,10 @@ logger = setup_logger("trade_executor")
 MAX_RETRIES = 3
 BASE_DELAY = 1.0  # seconds
 
+# Exit fill slippage thresholds
+SLIPPAGE_WARN_PCT = 1.0   # log warning + Telegram alert (futures only)
+SLIPPAGE_FLAG_PCT = 2.0   # also flag trade in DB for dashboard highlighting
+
 # Delta Exchange India contract sizes (linear perpetual, settled in USD)
 # 1 ETH contract = 0.01 ETH, 1 BTC contract = 0.001 BTC
 # 1 SOL contract = 1.0 SOL, 1 XRP contract = 1.0 XRP
@@ -141,9 +145,9 @@ def _extract_exit_reason(reason: str) -> str:
     if not reason:
         return "UNKNOWN"
     upper = reason.upper()
-    for kw in ("HARD_TP", "PROFIT_LOCK", "DECAY_EMERGENCY", "MANUAL_CLOSE",
-               "SPOT_PULLBACK", "SPOT_DECAY", "SPOT_BREAKEVEN",
-               "TRAIL", "SL", "FLAT", "TIMEOUT",
+    for kw in ("HARD_TP", "PROFIT_LOCK", "DEAD_MOMENTUM", "DECAY_EMERGENCY",
+               "MANUAL_CLOSE", "SPOT_PULLBACK", "SPOT_DECAY", "SPOT_BREAKEVEN",
+               "TRAIL", "RATCHET", "SL", "FLAT", "TIMEOUT",
                "BREAKEVEN", "REVERSAL", "PULLBACK", "DECAY", "SAFETY", "EXPIRY"):
         if kw in upper:
             return "MANUAL" if kw == "MANUAL_CLOSE" else kw
@@ -368,8 +372,15 @@ class TradeExecutor:
                         entry_price, exit_price, pnl, pnl_pct, exit_source,
                     )
                     actually_closed = True
+
+                    # Remove from risk manager — prevents ghost entries in open_positions
+                    if self.risk_manager is not None:
+                        self.risk_manager.record_close(signal.pair, pnl)
                 else:
                     logger.debug("[%s] position_gone: no open trade found in DB — already closed", signal.pair)
+                    # Still remove from risk manager in case it's tracked there
+                    if self.risk_manager is not None:
+                        self.risk_manager.record_close(signal.pair, 0.0)
             except Exception:
                 logger.exception("[%s] Failed to mark trade as position_gone", signal.pair)
 
@@ -1169,6 +1180,36 @@ class TradeExecutor:
             # Persist peak_pnl from signal metadata (final value at close time)
             if signal.metadata.get("peak_pnl") is not None:
                 close_data["peak_pnl"] = signal.metadata["peak_pnl"]
+
+            # ── Slippage detection ──────────────────────────────────────
+            expected_price = signal.price
+            if expected_price and expected_price > 0:
+                slippage_pct = abs(fill_price - expected_price) / expected_price * 100
+            else:
+                slippage_pct = 0.0
+
+            if slippage_pct > 0:
+                close_data["slippage_pct"] = round(slippage_pct, 4)
+            if slippage_pct >= SLIPPAGE_FLAG_PCT:
+                close_data["slippage_flag"] = True
+
+            is_futures = position_type in ("long", "short")
+            if is_futures and slippage_pct >= SLIPPAGE_WARN_PCT:
+                logger.warning(
+                    "SLIPPAGE_ALERT: %s %s expected=$%.2f fill=$%.2f slip=%.2f%% "
+                    "(%s, trade_id=%s)",
+                    position_type, signal.pair, expected_price, fill_price,
+                    slippage_pct, signal.exchange_id, trade_id,
+                )
+                if self.alerts:
+                    await self.alerts.send_slippage_alert(
+                        pair=signal.pair,
+                        expected_price=expected_price,
+                        fill_price=fill_price,
+                        slippage_pct=slippage_pct,
+                        position_type=position_type,
+                        exchange=signal.exchange_id,
+                    )
 
             await self.db.update_trade(trade_id, close_data)
 

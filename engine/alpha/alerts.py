@@ -500,12 +500,50 @@ class AlertManager:
     async def send_daily_loss_warning(
         self, current_loss_pct: float, limit_pct: float,
     ) -> None:
-        """Fired when daily loss approaches the limit."""
+        """Fired when daily loss approaches the soft limit."""
         msg = (
             f"\u26a0\ufe0f <b>RISK ALERT</b>\n\n"
             f"Daily loss limit approaching: <code>{current_loss_pct:.1f}%</code> "
-            f"(limit: <code>{limit_pct:.0f}%</code>)\n"
-            f"Bot will pause if <code>{limit_pct:.0f}%</code> hit."
+            f"(soft limit: <code>{limit_pct:.0f}%</code>)\n"
+            f"Bot will cool off for 30m if <code>{limit_pct:.0f}%</code> hit."
+        )
+        await self._send(msg)
+
+    async def send_daily_loss_cooldown(
+        self, current_loss_pct: float, limit_pct: float,
+        cooldown_minutes: int,
+    ) -> None:
+        """Fired when soft daily loss limit hit — bot enters cooldown."""
+        msg = (
+            f"\u23f8 <b>DAILY LOSS COOLDOWN</b>\n\n"
+            f"Daily loss: <code>{current_loss_pct:.1f}%</code> "
+            f"(soft limit: <code>{limit_pct:.0f}%</code>)\n"
+            f"Pausing new entries for <code>{cooldown_minutes}m</code>.\n"
+            f"Use <b>Resume</b> on dashboard to override, or wait for cooldown."
+        )
+        await self._send(msg)
+
+    async def send_daily_loss_hard_stop(
+        self, current_loss_pct: float, hard_limit_pct: float,
+    ) -> None:
+        """Fired when hard daily loss limit hit — done for the day."""
+        msg = (
+            f"\U0001f6d1 <b>DAILY LOSS HARD STOP</b>\n\n"
+            f"Daily loss: <code>{current_loss_pct:.1f}%</code> "
+            f"(hard limit: <code>{hard_limit_pct:.0f}%</code>)\n"
+            f"Trading stopped for the day.\n"
+            f"Use <b>Resume</b> on dashboard to manually override."
+        )
+        await self._send(msg)
+
+    async def send_daily_loss_cooldown_resumed(
+        self, current_loss_pct: float, cooldown_minutes: int,
+    ) -> None:
+        """Fired when cooldown expires and bot auto-resumes."""
+        msg = (
+            f"\u25b6\ufe0f <b>COOLDOWN EXPIRED</b>\n\n"
+            f"Auto-resuming after <code>{cooldown_minutes}m</code> cooldown.\n"
+            f"Daily loss: <code>{current_loss_pct:.1f}%</code>"
         )
         await self._send(msg)
 
@@ -553,6 +591,26 @@ class AlertManager:
         msg += f"\n<i>Orphan detection protects against stuck positions</i>"
         await self._send(msg)
 
+    async def send_slippage_alert(
+        self,
+        pair: str,
+        expected_price: float,
+        fill_price: float,
+        slippage_pct: float,
+        position_type: str = "",
+        exchange: str = "",
+    ) -> None:
+        """Alert for abnormal exit fill slippage."""
+        emoji = "\U0001f6a8" if slippage_pct >= 2.0 else "\u26a0\ufe0f"
+        msg = (
+            f"{emoji} <b>SLIPPAGE ALERT</b>\n\n"
+            f"<code>{pair}</code> {position_type.upper()} exit on {exchange}\n"
+            f"Expected: <code>${expected_price:,.2f}</code>\n"
+            f"Filled: <code>${fill_price:,.2f}</code>\n"
+            f"Slippage: <code>{slippage_pct:.2f}%</code>"
+        )
+        await self._send(msg)
+
     async def send_text(self, text: str) -> None:
         """Send a raw text message (for ad-hoc alerts)."""
         await self._send(text)
@@ -575,6 +633,7 @@ class AlertManager:
         cmd_map = {
             "pause": ("\u23f8", "BOT PAUSED"),
             "resume": ("\u25b6\ufe0f", "BOT RESUMED"),
+            "force_resume": ("\u25b6\ufe0f", "BOT FORCE RESUMED"),
             "force_strategy": ("\U0001f500", "STRATEGY FORCED"),
             "update_config": ("\u2699\ufe0f", "CONFIG UPDATED"),
             "update_pair_config": ("\U0001f9e0", "SENTINEL CONFIG"),

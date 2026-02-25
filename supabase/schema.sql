@@ -65,7 +65,11 @@ create table if not exists public.trades (
     current_price   numeric(20,8),                     -- latest price seen by bot
     peak_pnl        numeric(10,4),                     -- highest P&L % reached
     stop_loss       numeric(20,8),                     -- current stop loss price
-    take_profit     numeric(20,8)                      -- current take profit price
+    take_profit     numeric(20,8),                     -- current take profit price
+
+    -- Slippage tracking (v3.4)
+    slippage_pct    numeric(10,4),                     -- fill vs expected price slippage %
+    slippage_flag   boolean not null default false      -- true when slippage > 2% (anomalous)
 );
 
 -- Indexes: timestamp range scans, filtering by status/strategy/pair

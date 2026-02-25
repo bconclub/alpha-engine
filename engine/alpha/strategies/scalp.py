@@ -1525,6 +1525,14 @@ class ScalpStrategy(BaseStrategy):
         elif self._market_regime == "TRENDING_DOWN":
             required_long = max(required_long, 4)  # longing against trend = 4/4
 
+        # ── 15m TREND GATE — don't fight the bigger picture ──────────
+        # Counter-trend entries need 4/4 signals. RSI override (<30/>70)
+        # still bypasses this (checked later, before signal gate).
+        if trend_15m == "bullish":
+            required_short = max(required_short, 4)  # shorting into bullish 15m = 4/4
+        elif trend_15m == "bearish":
+            required_long = max(required_long, 4)  # longing into bearish 15m = 4/4
+
         # WEAK momentum in SIDEWAYS already requires 4/4 signals (line above).
         # No hard skip — 4/4 is sufficient protection. Let strong setups through.
 
@@ -1777,6 +1785,27 @@ class ScalpStrategy(BaseStrategy):
             strength = max(len(bear_signals), 2)
             self._last_signal_breakdown = _build_breakdown()
             return ("short", reason, True, strength)
+
+        # ── TREND_CONFLICT: log when 15m gate specifically blocks a counter-trend entry ──
+        if (trend_15m == "bearish" and mom_direction == "long"
+                and len(bull_signals) >= 3 and len(bull_signals) < required_long):
+            self.logger.info(
+                "[%s] TREND_CONFLICT: %d/4 LONG signals but 15m bearish — need %d/4 or RSI<%d override",
+                self.pair, len(bull_signals), required_long, self.RSI_OVERRIDE_LONG,
+            )
+            self._skip_reason = f"TREND_CONFLICT (LONG {len(bull_signals)}/4 vs 15m bearish)"
+            self._last_signal_breakdown = _build_breakdown()
+            return None
+
+        if (trend_15m == "bullish" and mom_direction == "short"
+                and len(bear_signals) >= 3 and len(bear_signals) < required_short):
+            self.logger.info(
+                "[%s] TREND_CONFLICT: %d/4 SHORT signals but 15m bullish — need %d/4 or RSI>%d override",
+                self.pair, len(bear_signals), required_short, self.RSI_OVERRIDE_SHORT,
+            )
+            self._skip_reason = f"TREND_CONFLICT (SHORT {len(bear_signals)}/4 vs 15m bullish)"
+            self._last_signal_breakdown = _build_breakdown()
+            return None
 
         # ── Check required signals (LONG) — trend-weighted ────────────────
         # NO fee filter — if 2/4 signals fire, ENTER. The signal system IS the filter.
@@ -2246,6 +2275,19 @@ class ScalpStrategy(BaseStrategy):
             # RSI crossing 70 in a long is trend strength, not reversal.
             # Ratchet floor handles profit protection.
 
+            # DEAD_MOMENTUM: confirmed dead momentum + losing + held >60s → cut losses
+            # Don't wait for SL when the setup has clearly failed.
+            if reversal_reason and pnl_pct < 0 and hold_seconds > 60:
+                if not self._reversal_exit_logged:
+                    self._reversal_exit_logged = True
+                    self.logger.info(
+                        "DEAD_MOMENTUM: %s pnl=%+.2f%% hold=%ds mom=%.3f%% — "
+                        "cutting loss, setup failed (%s)",
+                        self.pair, pnl_pct, int(hold_seconds),
+                        momentum_60s, reversal_reason,
+                    )
+                return self._do_exit(current_price, pnl_pct, side, "DEAD_MOMENTUM", hold_seconds)
+
             # If confirmed reversal AND in profit → exit
             if reversal_reason and pnl_pct >= self.REVERSAL_MIN_PROFIT_PCT:
                 if not self._reversal_exit_logged:
@@ -2459,7 +2501,8 @@ class ScalpStrategy(BaseStrategy):
         # Fee minimum only applies to discretionary exits, NOT protective exits.
         # TRAIL/BREAKEVEN/RATCHET protect profit — blocking them turns winners into losers.
         _PROTECTED_EXIT_TYPES = {"SL", "TRAIL", "BREAKEVEN", "PROFIT_LOCK",
-                                 "HARD_TP", "HARD_TP_10PCT", "RATCHET", "SAFETY"}
+                                 "HARD_TP", "HARD_TP_10PCT", "RATCHET", "SAFETY",
+                                 "DEAD_MOMENTUM"}
         clean_type = exit_type.replace("WS-", "")
         if clean_type not in _PROTECTED_EXIT_TYPES and self.entry_price > 0:
             if self.is_futures:

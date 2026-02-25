@@ -60,7 +60,11 @@ create table if not exists public.trades (
                   check (position_type in ('spot', 'long', 'short')),
 
     -- Exchange reference
-    order_id      text
+    order_id      text,
+
+    -- Slippage tracking (v3.4)
+    slippage_pct    numeric(10,4),
+    slippage_flag   boolean not null default false
 );
 
 -- Indexes
@@ -507,6 +511,10 @@ alter table public.bot_status add column if not exists shorting_enabled      boo
 alter table public.bot_status add column if not exists leverage              integer not null default 1;
 alter table public.bot_status add column if not exists active_strategy_count integer not null default 0;
 alter table public.bot_status add column if not exists uptime_seconds        integer not null default 0;
+
+-- ── trades: slippage tracking (v3.4) ──
+alter table public.trades add column if not exists slippage_pct  numeric(10,4);
+alter table public.trades add column if not exists slippage_flag boolean not null default false;
 
 -- ── Indexes (all IF NOT EXISTS — safe to re-run) ──
 create index if not exists idx_strategy_log_exchange   on public.strategy_log (exchange);

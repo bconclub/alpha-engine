@@ -125,6 +125,8 @@ class TradingConfig:
 
     starting_capital: float = field(default_factory=lambda: _env_float("STARTING_CAPITAL", 10.0))
     max_loss_daily_pct: float = field(default_factory=lambda: _env_float("MAX_LOSS_DAILY_PCT", 20.0))
+    max_loss_daily_hard_pct: float = field(default_factory=lambda: _env_float("MAX_LOSS_DAILY_HARD_PCT", 30.0))
+    loss_cooldown_minutes: int = field(default_factory=lambda: int(_env_float("LOSS_COOLDOWN_MINUTES", 30)))
     max_position_pct: float = field(default_factory=lambda: _env_float("MAX_POSITION_PCT", 80.0))
     max_total_exposure_pct: float = 90.0  # with $12, need most of it working
     max_concurrent_positions: int = 3     # 3 scalp positions max
