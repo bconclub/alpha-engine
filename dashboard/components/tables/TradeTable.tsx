@@ -1066,7 +1066,7 @@ export default function TradeTable({ trades }: TradeTableProps) {
         </div>
         <div
           ref={tableScrollRef}
-          className="overflow-x-auto scrollbar-visible"
+          className="overflow-auto max-h-[78vh] scrollbar-visible"
           onScroll={() => {
             if (topScrollRef.current && tableScrollRef.current) {
               topScrollRef.current.scrollLeft = tableScrollRef.current.scrollLeft;
@@ -1074,17 +1074,17 @@ export default function TradeTable({ trades }: TradeTableProps) {
           }}
         >
           <table className="w-full min-w-[2100px] text-sm">
-            {/* Header */}
-            <thead>
-              <tr className="bg-zinc-900/50">
+            {/* Header — sticky top so it stays visible on vertical scroll */}
+            <thead className="sticky top-0 z-30">
+              <tr className="bg-zinc-900">
                 {COLUMNS.map((col) => (
                   <th
                     key={col.key}
                     onClick={() => handleSort(col.key)}
                     className={cn(
-                      'cursor-pointer select-none whitespace-nowrap px-4 py-3 text-xs font-medium uppercase tracking-wider text-zinc-400 transition-colors hover:text-zinc-200',
+                      'cursor-pointer select-none whitespace-nowrap px-4 py-3 text-xs font-medium uppercase tracking-wider text-zinc-400 transition-colors hover:text-zinc-200 bg-zinc-900',
                       col.align === 'right' ? 'text-right' : 'text-left',
-                      STICKY_COLS[col.key] && `sticky ${STICKY_COLS[col.key]} z-20 bg-zinc-900`,
+                      STICKY_COLS[col.key] && `sticky ${STICKY_COLS[col.key]} z-40 bg-zinc-900`,
                       col.key === LAST_STICKY_COL && 'border-r border-zinc-700',
                     )}
                   >
