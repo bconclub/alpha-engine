@@ -69,7 +69,7 @@ class AlphaBot:
 
         # Strategy enable/disable flags (toggled from dashboard)
         self._scalp_enabled: bool = True
-        self._options_enabled: bool = config.delta.options_enabled
+        self._options_enabled: bool = True
 
         # Exchange enable/disable flags (toggled from dashboard)
         self._bybit_enabled: bool = True
@@ -1888,11 +1888,8 @@ class AlphaBot:
                 self.risk_manager.capital = last.get("capital", config.trading.starting_capital)
                 logger.info("Restored state from DB -- capital: $%.2f (legacy)", self.risk_manager.capital)
 
-            # Restore dashboard toggle state for options_scalp
-            db_options = last.get("options_scalp_enabled")
-            if db_options is not None:
-                self._options_enabled = bool(db_options)
-                logger.info("Restored options_scalp_enabled=%s from DB", self._options_enabled)
+            # options_scalp always starts enabled; dashboard toggle still works at runtime
+            logger.info("options_scalp_enabled=True (hardcoded, dashboard toggle still works at runtime)")
 
             # Restore exchange toggle state
             for ex_name in ("bybit", "delta", "kraken"):
