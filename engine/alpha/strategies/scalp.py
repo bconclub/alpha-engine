@@ -2503,8 +2503,11 @@ class ScalpStrategy(BaseStrategy):
             # Check 2: momentum dying (below 0.02% absolute — truly dead)
             if not reversal_reason and abs(momentum_60s) < self.MOMENTUM_DYING_PCT:
                 # MOMENTUM_FADE: dying + in profit → confirm via timer, then exit.
+                # Trail handles winners — MOMENTUM_FADE only fires on un-trailed positions.
                 # Trend-aligned trades get extra patience (pauses are legs, not death).
-                if pnl_pct > 0.05:
+                if (self._trailing_active or self._trail_stop_price > 0) and pnl_pct > 0.05:
+                    pass  # trail is managing this trade — don't interfere
+                elif pnl_pct > 0.05:
                     trend_15m = self._get_15m_trend()
                     trend_aligned = (
                         (side == "long" and trend_15m == "bullish")
