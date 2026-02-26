@@ -422,64 +422,63 @@ class AlphaBot:
             logger.exception("[STARTUP] Affordability check failed — continuing")
 
         # ── Build structured status for startup message ────────────────
-        _exchanges: list[dict] = []
-        _issues: list[str] = []
-        for name, ex_obj, bal, enabled, pairs_list in [
-            ("Delta", self.delta, delta_bal, self._delta_enabled, self.delta_pairs),
-            ("Kraken", self.kraken, kraken_bal, self._kraken_enabled, self.kraken_pairs),
-            ("Bybit", self.bybit, bybit_bal, self._bybit_enabled, self.bybit_pairs),
-            ("Binance", self.binance, binance_bal, True, self.pairs),
-        ]:
-            entry: dict = {"name": name, "enabled": enabled}
-            if not enabled:
-                _exchanges.append(entry)
-                continue
-            if ex_obj is None:
-                entry["connected"] = False
-                entry["error"] = "no API key"
-                _exchanges.append(entry)
-                continue
-            entry["connected"] = bal is not None
-            entry["balance"] = bal
-            if bal is None:
-                entry["error"] = "balance fetch failed"
-                _issues.append(f"{name} balance fetch failed")
-            elif bal < 1.0 and pairs_list:
-                _issues.append(f"{name} needs deposit (${bal:.2f})")
-            _exchanges.append(entry)
-
-        leverage = config.bybit.leverage or config.delta.leverage or config.kraken.leverage or 1
-        scalp_pairs = len(self._scalp_strategies)
-        _strategies: list[dict] = []
-        if self._scalp_enabled:
-            _strategies.append({
-                "name": "Scalp",
-                "active": scalp_pairs > 0,
-                "detail": f"{leverage}x, {scalp_pairs} pairs",
-                "reason": "no pairs configured" if scalp_pairs == 0 else "",
-            })
-        else:
-            _strategies.append({"name": "Scalp", "active": False, "reason": "disabled"})
-
-        if self._options_enabled and self._delta_enabled:
-            opts_count = len(self._options_strategies)
-            _strategies.append({
-                "name": "Options",
-                "active": opts_count > 0,
-                "detail": f"{opts_count} pairs",
-                "reason": "no pairs" if opts_count == 0 else "",
-            })
-        else:
-            reason = "disabled" if not self._options_enabled else "delta exchange disabled"
-            _strategies.append({"name": "Options", "active": False, "reason": reason})
-
-        # Survival mode warning
-        min_comfortable = 20.0
-        if total_capital < min_comfortable and total_capital > 0:
-            _issues.append(f"Survival mode (${total_capital:.2f} < ${min_comfortable:.0f})")
-
-        # Notify — ALWAYS send startup message even if balance checks failed above
         try:
+            _exchanges: list[dict] = []
+            _issues: list[str] = []
+            for name, ex_obj, bal, enabled, pairs_list in [
+                ("Delta", self.delta, delta_bal, self._delta_enabled, self.delta_pairs),
+                ("Kraken", self.kraken, kraken_bal, self._kraken_enabled, self.kraken_pairs),
+                ("Bybit", self.bybit, bybit_bal, self._bybit_enabled, self.bybit_pairs),
+                ("Binance", self.binance, binance_bal, True, self.pairs),
+            ]:
+                entry: dict = {"name": name, "enabled": enabled}
+                if not enabled:
+                    _exchanges.append(entry)
+                    continue
+                if ex_obj is None:
+                    entry["connected"] = False
+                    entry["error"] = "no API key"
+                    _exchanges.append(entry)
+                    continue
+                entry["connected"] = bal is not None
+                entry["balance"] = bal
+                if bal is None:
+                    entry["error"] = "balance fetch failed"
+                    _issues.append(f"{name} balance fetch failed")
+                elif bal < 1.0 and pairs_list:
+                    _issues.append(f"{name} needs deposit (${bal:.2f})")
+                _exchanges.append(entry)
+
+            leverage = config.bybit.leverage or config.delta.leverage or config.kraken.leverage or 1
+            scalp_pairs = len(self._scalp_strategies)
+            _strategies: list[dict] = []
+            if self._scalp_enabled:
+                _strategies.append({
+                    "name": "Scalp",
+                    "active": scalp_pairs > 0,
+                    "detail": f"{leverage}x, {scalp_pairs} pairs",
+                    "reason": "no pairs configured" if scalp_pairs == 0 else "",
+                })
+            else:
+                _strategies.append({"name": "Scalp", "active": False, "reason": "disabled"})
+
+            if self._options_enabled and self._delta_enabled:
+                opts_count = len(self._options_strategies)
+                _strategies.append({
+                    "name": "Options",
+                    "active": opts_count > 0,
+                    "detail": f"{opts_count} pairs",
+                    "reason": "no pairs" if opts_count == 0 else "",
+                })
+            else:
+                reason = "disabled" if not self._options_enabled else "delta exchange disabled"
+                _strategies.append({"name": "Options", "active": False, "reason": reason})
+
+            # Survival mode warning
+            min_comfortable = 20.0
+            if total_capital < min_comfortable and total_capital > 0:
+                _issues.append(f"Survival mode (${total_capital:.2f} < ${min_comfortable:.0f})")
+
             await self.alerts.send_bot_started(
                 capital=total_capital,
                 exchanges=_exchanges,
@@ -487,7 +486,15 @@ class AlphaBot:
                 issues=_issues,
             )
         except Exception:
-            logger.exception("[STARTUP] Failed to send startup message")
+            logger.exception("[STARTUP] Failed to build/send startup message — sending fallback")
+            try:
+                from alpha.utils import get_version as _gv
+                await self.alerts._send(
+                    f"\U0001f7e2 <b>ALPHA v{_gv()} — LIVE</b>\n"
+                    f"\U0001f4b0 <code>${total_capital:,.2f}</code>"
+                )
+            except Exception:
+                logger.exception("[STARTUP] Even fallback startup message failed")
 
         # Register shutdown signals
         self._running = True
