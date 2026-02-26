@@ -206,17 +206,17 @@ function compareTrades(a: Trade, b: Trade, key: string, dir: SortDirection): num
 function getExitReasonColor(reason: string): string {
   const upper = reason.toUpperCase();
   // Green: profit exits
-  if (['TRAIL', 'TP', 'HARD_TP', 'TP_EXCHANGE', 'PROFIT_LOCK'].includes(upper)) return 'text-emerald-400';
+  if (['TRAIL', 'OPT_TRAIL', 'TP', 'HARD_TP', 'TP_EXCHANGE', 'PROFIT_LOCK', 'OPT_RATCHET'].includes(upper)) return 'text-emerald-400';
   // Blue: manual
   if (upper === 'MANUAL') return 'text-blue-400';
   // Red: stop loss
-  if (upper === 'SL' || upper === 'SL_EXCHANGE') return 'text-red-400';
+  if (['SL', 'SL_EXCHANGE', 'OPT_SL'].includes(upper)) return 'text-red-400';
   // Yellow: conditional exits
-  if (['REVERSAL', 'PULLBACK', 'DECAY', 'DECAY_EMERGENCY', 'MOMENTUM_FADE', 'DEAD_MOMENTUM', 'SPOT_PULLBACK', 'SPOT_DECAY', 'SPOT_BREAKEVEN'].includes(upper)) return 'text-yellow-400';
+  if (['REVERSAL', 'OPT_REVERSAL', 'PULLBACK', 'DECAY', 'DECAY_EMERGENCY', 'MOMENTUM_FADE', 'OPT_MOMENTUM_FADE', 'DEAD_MOMENTUM', 'OPT_DEAD_MOMENTUM', 'SPOT_PULLBACK', 'SPOT_DECAY', 'SPOT_BREAKEVEN'].includes(upper)) return 'text-yellow-400';
   // Orange: external/phantom
   if (upper === 'PHANTOM' || upper === 'POSITION_GONE' || upper === 'CLOSED_BY_EXCHANGE') return 'text-orange-400';
   // Gray: neutral exits
-  if (['FLAT', 'TIMEOUT', 'BREAKEVEN', 'SAFETY', 'DUST', 'ORPHAN', 'EXPIRY'].includes(upper)) return 'text-zinc-500';
+  if (['FLAT', 'TIMEOUT', 'OPT_TIMEOUT', 'BREAKEVEN', 'SAFETY', 'DUST', 'ORPHAN', 'EXPIRY'].includes(upper)) return 'text-zinc-500';
   return 'text-zinc-500';
 }
 
@@ -225,7 +225,9 @@ function parseExitReason(reason?: string | null): string | null {
   if (!reason) return null;
   const upper = reason.toUpperCase().trim();
   // Check from most specific to least (HARD_TP before TP)
-  const keywords = ['HARD_TP', 'PROFIT_LOCK', 'DEAD_MOMENTUM', 'MOMENTUM_FADE',
+  const keywords = ['OPT_MOMENTUM_FADE', 'OPT_DEAD_MOMENTUM', 'OPT_TIMEOUT',
+    'OPT_SL', 'OPT_TRAIL', 'OPT_RATCHET', 'OPT_REVERSAL',
+    'HARD_TP', 'PROFIT_LOCK', 'DEAD_MOMENTUM', 'MOMENTUM_FADE',
     'DECAY_EMERGENCY', 'MANUAL_CLOSE', 'SPOT_PULLBACK', 'SPOT_DECAY', 'SPOT_BREAKEVEN',
     'TRAIL', 'TP', 'SL', 'FLAT', 'TIMEOUT', 'BREAKEVEN', 'REVERSAL', 'PULLBACK',
     'DECAY', 'SAFETY', 'EXPIRY'];

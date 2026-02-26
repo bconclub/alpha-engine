@@ -3,19 +3,23 @@
 PHILOSOPHY: Options are the safest momentum play. Max loss = premium paid.
 No leverage, no liquidation. When scalp sees 4/4 momentum, buy the option.
 
-Entry: 4-of-4 momentum signals from scalp strategy (trending regime only)
+Entry: 3-of-4+ momentum signals from scalp strategy (trending regime only)
        Bullish → buy CALL, Bearish → buy PUT
+       15m trend conflict gate: no CALLs in bearish, no PUTs in bullish (RSI override)
        Pullback entry: wait up to 30s for 5% premium dip before buying
        1 contract per trade, nearest affordable strike (ATM or up to 3 OTM)
        Minimum 0.25% momentum required
 
 Exit:
-  - TP: 30% premium gain
+  - Ratchet floor: lock profit at (5→2, 10→5, 20→12, 50→35, 100→70)%
   - SL: 30% premium loss (always active, even in Phase 1)
+  - Momentum Fade: profitable + momentum < 0.02% for 15s → exit (min 60s hold)
+  - Dead Momentum: losing + momentum dead 45s + held 3min → exit
+  - TP: 30% premium gain
   - Trailing: activates at +15%, trails 5% behind peak
   - Pullback: exit if lost 40% of peak gain (when peak was 8%+)
   - Decay: exit if was +10%+ and faded to +3%
-  - Timeout: close after 10 minutes (theta kills options)
+  - Timeout: close after 5 minutes (theta kills options)
   - Time: close 2 hours before expiry
   - Signal reversal: close if opposite momentum fires
   - Phase 1 (first 30s): only SL fires — no TP/trail/pullback/decay
@@ -57,7 +61,7 @@ class OptionsScalpStrategy(BaseStrategy):
     """Buy CALLs/PUTs on strong momentum signals from the scalp strategy.
 
     Reads the scalp strategy's `last_signal_state` dict every 10 seconds.
-    Only enters on 3-of-4 or 4-of-4 signals. Max loss = premium paid.
+    Only enters on 3-of-4+ signals with 15m trend alignment. Max loss = premium paid.
     """
 
     name = StrategyName.OPTIONS_SCALP
@@ -80,7 +84,7 @@ class OptionsScalpStrategy(BaseStrategy):
     MIN_PREMIUM_USD = 0.01               # Skip illiquid < $0.01
 
     # ── Entry ─────────────────────────────────────────────────────
-    MIN_SIGNAL_STRENGTH = 4              # 4-of-4 required (was 3 — too many weak entries)
+    MIN_SIGNAL_STRENGTH = 3              # 3-of-4 required (was 4 — 3/4+ signals enough)
     SIGNAL_STALENESS_SEC = 15            # Signal must be < 15s old (was 30 — stale entries)
     CONTRACTS_PER_TRADE = 1              # 1 contract per trade
     MIN_MOMENTUM_PCT = 0.25             # Skip if |momentum_60s| < 0.25%
@@ -99,8 +103,28 @@ class OptionsScalpStrategy(BaseStrategy):
     PULLBACK_EXIT_PCT = 40.0             # Exit if lost 40% of peak gain (was 50 — too aggressive)
     PULLBACK_ACTIVATE_PCT = 8.0          # Pullback only fires after +8% peak (was 5 — let winners breathe)
     DECAY_THRESHOLD_PCT = 3.0            # Exit if was +10%+ and faded to +3%
-    TIMEOUT_MINUTES = 10                 # Options timeout (was 15 — too long, theta bleeds)
+    TIMEOUT_MINUTES = 5                  # Options timeout (was 10 — theta kills, 5min enough)
     PHASE1_HANDS_OFF_SEC = 30            # Only SL fires in first 30s after fill
+
+    # ── Momentum fade — premium profitable but momentum dying ────────
+    OPT_MOM_FADE_THRESHOLD = 0.02        # momentum < 0.02% = dying
+    OPT_MOM_FADE_CONFIRM_SEC = 15        # hold 15s below threshold to confirm
+    OPT_MOM_FADE_MIN_HOLD = 60           # min 60s in position before fade can fire
+    OPT_MOM_FADE_TREND_HOLD = 90         # trend-aligned: need 90s hold
+    OPT_MOM_FADE_TREND_CONFIRM = 20      # trend-aligned: need 20s confirm
+
+    # ── Dead momentum — momentum dead + losing + held too long ───────
+    OPT_DEAD_MOM_CONFIRM_SEC = 45        # 45s of dead momentum
+    OPT_DEAD_MOM_MIN_HOLD = 180          # min 3min hold before dead fires
+
+    # ── Ratchet floor table: (peak_pct, locked_floor_pct) ────────────
+    OPT_RATCHET_FLOOR_TABLE = [
+        (5.0, 2.0),
+        (10.0, 5.0),
+        (20.0, 12.0),
+        (50.0, 35.0),
+        (100.0, 70.0),
+    ]
 
     # ── Position limits ───────────────────────────────────────────
     MAX_OPTION_POSITIONS = 1             # 1 option at a time
@@ -176,6 +200,12 @@ class OptionsScalpStrategy(BaseStrategy):
 
         # Position verification ticker (every 3rd tick = ~30s)
         self._position_verify_tick: int = 0
+
+        # Momentum fade / dead momentum timers
+        self._opt_mom_fade_since: float | None = None
+        self._opt_mom_dying_since: float | None = None
+        # Ratchet profit floor
+        self._opt_ratchet_floor: float = 0.0
 
     # ==================================================================
     # ACTIVITY LOGGING
@@ -702,7 +732,7 @@ class OptionsScalpStrategy(BaseStrategy):
                 )
             return []
 
-        # 3. Check signal strength (4-of-4 required)
+        # 3. Check signal strength (3-of-4 required)
         if strength < self.MIN_SIGNAL_STRENGTH:
             # Log WEAK every ~60s (6 ticks × 10s = 60s), not every 10s
             if strength >= 1 and self._tick_count % 6 == 0:
@@ -728,6 +758,46 @@ class OptionsScalpStrategy(BaseStrategy):
 
         # 4. Determine option type
         option_type = "call" if side == "long" else "put"
+
+        # 4b. 15m trend conflict gate — don't buy CALLs in bearish, PUTs in bullish
+        if self._scalp:
+            trend_15m = self._scalp._get_15m_trend()
+            rsi_val = signal_state.get("rsi")
+            if option_type == "call" and trend_15m == "bearish":
+                # RSI override: extreme oversold (< 25) allows CALL in bearish
+                if rsi_val is not None and rsi_val < 25:
+                    self.logger.info(
+                        "[%s] OPTIONS 15m bearish but RSI=%.1f < 25 — CALL override",
+                        self.pair, rsi_val,
+                    )
+                else:
+                    self.logger.info(
+                        "[%s] OPTIONS 15m BEARISH — skipping CALL (RSI=%.1f)",
+                        self.pair, rsi_val or 0,
+                    )
+                    await self._log_skip(
+                        f"{self.pair} — OPTIONS SKIP: 15m bearish, no CALL",
+                        {"trend": trend_15m, "rsi": rsi_val, "option_type": option_type},
+                    )
+                    return []
+            elif option_type == "put" and trend_15m == "bullish":
+                # RSI override: extreme overbought (> 75) allows PUT in bullish
+                if rsi_val is not None and rsi_val > 75:
+                    self.logger.info(
+                        "[%s] OPTIONS 15m bullish but RSI=%.1f > 75 — PUT override",
+                        self.pair, rsi_val,
+                    )
+                else:
+                    self.logger.info(
+                        "[%s] OPTIONS 15m BULLISH — skipping PUT (RSI=%.1f)",
+                        self.pair, rsi_val or 0,
+                    )
+                    await self._log_skip(
+                        f"{self.pair} — OPTIONS SKIP: 15m bullish, no PUT",
+                        {"trend": trend_15m, "rsi": rsi_val, "option_type": option_type},
+                    )
+                    return []
+
         self.logger.info(
             "[%s] OPTIONS SIGNAL READY: %s %d/4 — checking chain/premium",
             self.pair, option_type.upper(), strength,
@@ -1065,23 +1135,39 @@ class OptionsScalpStrategy(BaseStrategy):
         )]
 
     # ==================================================================
+    # RATCHET FLOOR
+    # ==================================================================
+
+    def _update_opt_ratchet_floor(self, pnl_pct: float) -> None:
+        """Ratchet profit floor — one-way lock based on premium peak."""
+        for threshold, floor in self.OPT_RATCHET_FLOOR_TABLE:
+            if pnl_pct >= threshold and floor > self._opt_ratchet_floor:
+                self.logger.info(
+                    "[%s] RATCHET FLOOR ↑ pnl +%.1f%% ≥ %+.0f%% → floor locked at +%.1f%%",
+                    self.option_symbol, pnl_pct, threshold, floor,
+                )
+                self._opt_ratchet_floor = floor
+
+    # ==================================================================
     # EXIT LOGIC
     # ==================================================================
 
     async def _check_option_exit(self) -> list[Signal]:
         """Check exit conditions for open option position.
 
-        Phase 1 (first 30s after fill): only SL fires — no TP/trail/pullback/decay.
+        Phase 1 (first 30s after fill): only SL fires.
         After Phase 1:
         1. Expiry: Close 2 hours before expiry
-        2. SL: -30% premium drop (always active)
-        3. TP: +30% premium gain
-        4. Trailing: activates at +15%, trails 5% behind peak
-        5. Pullback: exit if lost 40% of peak gain (when peak was 8%+)
-        6. Decay: exit if was +10%+ and faded to +3%
-        7. Timeout: close after 10 minutes
-        8. Signal reversal: opposite 4/4 momentum
-        9. Position verification every ~30s via fetch_positions
+        2. Ratchet floor: lock profit floor as premium rises
+        3. SL: -30% premium drop (always active)
+        4. Momentum Fade: profitable + momentum dying → exit
+        5. Dead Momentum: losing + momentum dead 45s + held 3min → exit
+        6. TP: +30% premium gain
+        7. Trailing: activates at +15%, trails 5% behind peak
+        8. Pullback: exit if lost 40% of peak gain (when peak was 8%+)
+        9. Decay: exit if was +10%+ and faded to +3%
+        10. Timeout: close after 5 minutes
+        11. Signal reversal: opposite momentum
         """
         if not self.in_position or not self.option_symbol:
             return []
@@ -1177,20 +1263,83 @@ class OptionsScalpStrategy(BaseStrategy):
                 )
                 return await self._do_option_exit(current_premium, premium_change_pct, "EXPIRY_CLOSE")
 
-        # ── 2. STOP LOSS: -20% premium drop (always active, even Phase 1)
+        # ── Ratchet floor update (always, before any exit checks) ─────
+        self._update_opt_ratchet_floor(premium_change_pct)
+
+        # ── 2a. RATCHET EXIT: premium fell below locked floor ─────────
+        if self._opt_ratchet_floor > 0 and premium_change_pct < self._opt_ratchet_floor:
+            self.logger.info(
+                "[%s] OPT_RATCHET — pnl +%.1f%% fell below floor +%.1f%%",
+                self.option_symbol, premium_change_pct, self._opt_ratchet_floor,
+            )
+            return await self._do_option_exit(current_premium, premium_change_pct, "OPT_RATCHET")
+
+        # ── 2b. STOP LOSS: -30% premium drop (always active, even Phase 1)
         if premium_change_pct <= -self.SL_PREMIUM_LOSS_PCT:
             self.logger.info(
                 "[%s] OPTION SL — premium %+.1f%% ($%.4f → $%.4f)",
                 self.option_symbol, premium_change_pct,
                 self.entry_premium, current_premium,
             )
-            return await self._do_option_exit(current_premium, premium_change_pct, "SL")
+            return await self._do_option_exit(current_premium, premium_change_pct, "OPT_SL")
 
         # ── Phase 1 hands-off: only SL fires in first 30s ────────────
         if in_phase1:
             return []
 
-        # ── 3. TAKE PROFIT: +30% premium gain ────────────────────────
+        # ── 3. MOMENTUM FADE: profitable + momentum dying ─────────────
+        momentum_60s = 0.0
+        if self._scalp and hasattr(self._scalp, "last_signal_state"):
+            ss = self._scalp.last_signal_state
+            if ss:
+                momentum_60s = abs(ss.get("momentum_60s", 0) or 0)
+
+        if hold_seconds >= self.OPT_MOM_FADE_MIN_HOLD and premium_change_pct > 0:
+            if momentum_60s < self.OPT_MOM_FADE_THRESHOLD:
+                now_m = time.monotonic()
+                if self._opt_mom_fade_since is None:
+                    self._opt_mom_fade_since = now_m
+                # Trend-aligned positions get longer leash
+                trend = self._scalp._get_15m_trend() if self._scalp else "neutral"
+                trend_aligned = (
+                    (self.option_side == "call" and trend == "bullish")
+                    or (self.option_side == "put" and trend == "bearish")
+                )
+                if trend_aligned:
+                    confirm_sec = self.OPT_MOM_FADE_TREND_CONFIRM
+                    min_hold = self.OPT_MOM_FADE_TREND_HOLD
+                else:
+                    confirm_sec = self.OPT_MOM_FADE_CONFIRM_SEC
+                    min_hold = self.OPT_MOM_FADE_MIN_HOLD
+
+                elapsed = now_m - self._opt_mom_fade_since
+                if elapsed >= confirm_sec and hold_seconds >= min_hold:
+                    self.logger.info(
+                        "[%s] OPT_MOMENTUM_FADE — profitable +%.1f%% but mom=%.4f%% dead %.0fs (aligned=%s)",
+                        self.option_symbol, premium_change_pct, momentum_60s,
+                        elapsed, trend_aligned,
+                    )
+                    return await self._do_option_exit(current_premium, premium_change_pct, "OPT_MOMENTUM_FADE")
+            else:
+                self._opt_mom_fade_since = None
+
+        # ── 4. DEAD MOMENTUM: losing + momentum dead + held too long ──
+        if hold_seconds >= self.OPT_DEAD_MOM_MIN_HOLD and premium_change_pct < 0:
+            if momentum_60s < self.OPT_MOM_FADE_THRESHOLD:
+                now_m = time.monotonic()
+                if self._opt_mom_dying_since is None:
+                    self._opt_mom_dying_since = now_m
+                dead_elapsed = now_m - self._opt_mom_dying_since
+                if dead_elapsed >= self.OPT_DEAD_MOM_CONFIRM_SEC:
+                    self.logger.info(
+                        "[%s] OPT_DEAD_MOMENTUM — losing %.1f%% + mom dead %.0fs + held %ds",
+                        self.option_symbol, premium_change_pct, dead_elapsed, int(hold_seconds),
+                    )
+                    return await self._do_option_exit(current_premium, premium_change_pct, "OPT_DEAD_MOMENTUM")
+            else:
+                self._opt_mom_dying_since = None
+
+        # ── 5. TAKE PROFIT: +30% premium gain ────────────────────────
         if premium_change_pct >= self.TP_PREMIUM_GAIN_PCT:
             self.logger.info(
                 "[%s] OPTION TP — premium +%.1f%% ($%.4f → $%.4f)",
@@ -1199,14 +1348,14 @@ class OptionsScalpStrategy(BaseStrategy):
             )
             return await self._do_option_exit(current_premium, premium_change_pct, "TP")
 
-        # ── 4. TRAILING activation at +10% ───────────────────────────
+        # ── 6. TRAILING activation at +15% ───────────────────────────
         if premium_change_pct >= self.TRAILING_ACTIVATE_PCT and not self._trailing_active:
             self._trailing_active = True
             self.logger.info(
                 "[%s] OPTION TRAIL ON at +%.1f%%", self.option_symbol, premium_change_pct,
             )
 
-        # ── 5. TRAILING STOP: 5% below peak premium ─────────────────
+        # ── 7. TRAILING STOP: 5% below peak premium ─────────────────
         if self._trailing_active:
             trail_floor = self.highest_premium * (1 - self.TRAILING_DISTANCE_PCT / 100)
             if current_premium <= trail_floor:
@@ -1215,7 +1364,7 @@ class OptionsScalpStrategy(BaseStrategy):
                     "[%s] OPTION TRAIL HIT — peak=$%.4f floor=$%.4f now=$%.4f",
                     self.option_symbol, self.highest_premium, trail_floor, current_premium,
                 )
-                return await self._do_option_exit(current_premium, final_pct, "TRAIL")
+                return await self._do_option_exit(current_premium, final_pct, "OPT_TRAIL")
 
         # ── 6. PULLBACK: exit if lost 40% of peak gain (peak was 8%+)
         if peak_pnl_pct >= self.PULLBACK_ACTIVATE_PCT and premium_change_pct > 0:
@@ -1235,14 +1384,14 @@ class OptionsScalpStrategy(BaseStrategy):
             )
             return await self._do_option_exit(current_premium, premium_change_pct, "DECAY")
 
-        # ── 8. TIMEOUT: close after 15 minutes ───────────────────────
+        # ── 8. TIMEOUT: close after 5 minutes ────────────────────────
         if hold_seconds >= self.TIMEOUT_MINUTES * 60:
             self.logger.info(
                 "[%s] OPTION TIMEOUT — held %dm (limit %dm) at %+.1f%%",
                 self.option_symbol, int(hold_seconds / 60),
                 self.TIMEOUT_MINUTES, premium_change_pct,
             )
-            return await self._do_option_exit(current_premium, premium_change_pct, "TIMEOUT")
+            return await self._do_option_exit(current_premium, premium_change_pct, "OPT_TIMEOUT")
 
         # ── 9. SIGNAL REVERSAL ────────────────────────────────────────
         if self._scalp and hasattr(self._scalp, "last_signal_state"):
@@ -1266,7 +1415,7 @@ class OptionsScalpStrategy(BaseStrategy):
                             new_side, premium_change_pct,
                         )
                         return await self._do_option_exit(
-                            current_premium, premium_change_pct, "REVERSAL",
+                            current_premium, premium_change_pct, "OPT_REVERSAL",
                         )
 
         return []
@@ -1298,6 +1447,11 @@ class OptionsScalpStrategy(BaseStrategy):
              "pnl_pct": round(pnl_pct, 2), "pnl_usd": round(pnl_usd, 4),
              "strike": self.strike_price, "symbol": self.option_symbol},
         )
+
+        # Reset momentum / ratchet state
+        self._opt_mom_fade_since = None
+        self._opt_mom_dying_since = None
+        self._opt_ratchet_floor = 0.0
 
         # Stats
         if pnl_pct >= 0:
@@ -1597,6 +1751,10 @@ class OptionsScalpStrategy(BaseStrategy):
             self._last_known_premium = fill_price
             self._trailing_active = False
             self._consecutive_ticker_failures = 0
+            # Reset momentum / ratchet state on entry
+            self._opt_mom_fade_since = None
+            self._opt_mom_dying_since = None
+            self._opt_ratchet_floor = 0.0
             self.strike_price = signal.metadata.get("strike", 0)
             expiry_str = signal.metadata.get("expiry")
             if expiry_str:

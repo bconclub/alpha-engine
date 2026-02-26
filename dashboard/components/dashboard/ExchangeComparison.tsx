@@ -12,9 +12,9 @@ import {
 import type { Exchange } from '@/lib/types';
 
 const exchangeSubtitles: Record<Exchange, string> = {
-  binance: '(Spot)',
-  delta: '(Options)',
-  bybit: '(Futures)',
+  binance: '',
+  delta: '',
+  bybit: '',
 };
 
 export function ExchangeComparison() {

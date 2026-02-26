@@ -211,7 +211,6 @@ export function LiveStatusBar() {
                 bybitConnected && !isStale ? 'bg-[#00c853] animate-pulse' : 'bg-red-500',
               )} />
               <span className="text-[10px] font-semibold text-[#f7a600] truncate">BYBIT</span>
-              <span className="text-[8px] text-zinc-500">Perp</span>
             </div>
             {bybitBalance > 0 ? (
               <span className="font-mono text-sm text-white">{formatCurrency(bybitBalance)}</span>
@@ -232,7 +231,6 @@ export function LiveStatusBar() {
                 deltaConnected && !isStale ? 'bg-[#00c853] animate-pulse' : 'bg-red-500',
               )} />
               <span className="text-[10px] font-semibold text-[#00d2ff] truncate">DELTA</span>
-              <span className="text-[8px] text-zinc-500">Opts</span>
             </div>
             {deltaBalance > 0 ? (
               <span className="font-mono text-sm text-white">{formatCurrency(deltaBalance)}</span>
@@ -377,7 +375,6 @@ export function LiveStatusBar() {
                 )}
               />
               <span className="text-sm font-semibold text-[#f7a600]">BYBIT</span>
-              <span className="text-[10px] text-zinc-500">(Futures)</span>
             </div>
             {bybitBalance > 0 ? (
               <div className="flex items-baseline gap-2 min-w-0 flex-wrap">
@@ -405,7 +402,6 @@ export function LiveStatusBar() {
                 )}
               />
               <span className="text-sm font-semibold text-[#00d2ff]">DELTA</span>
-              <span className="text-[10px] text-zinc-500">(Options)</span>
             </div>
             {deltaBalance > 0 ? (
               <div className="flex items-baseline gap-2 min-w-0 flex-wrap">

@@ -181,19 +181,27 @@ class AlphaBot:
             bybit_pairs=self.bybit_pairs if self.bybit else None,
         )
 
-        # Register scalp strategies — Bybit futures (primary)
-        if self.bybit:
-            for pair in self.bybit_pairs:
+        # Register scalp strategies — Bybit futures — DISABLED FOR NOW
+        # if self.bybit:
+        #     for pair in self.bybit_pairs:
+        #         self._scalp_strategies[pair] = ScalpStrategy(
+        #             pair, self.executor, self.risk_manager,
+        #             exchange=self.bybit,
+        #             is_futures=True,
+        #             market_analyzer=self.bybit_analyzer,
+        #             exchange_id="bybit",
+        #         )
+
+        # Register scalp strategies — Delta futures (primary)
+        if self.delta:
+            for pair in self.delta_pairs:
                 self._scalp_strategies[pair] = ScalpStrategy(
                     pair, self.executor, self.risk_manager,
-                    exchange=self.bybit,
+                    exchange=self.delta,
                     is_futures=True,
-                    market_analyzer=self.bybit_analyzer,
-                    exchange_id="bybit",
+                    market_analyzer=self.delta_analyzer,
+                    exchange_id="delta",
                 )
-
-        # Delta futures scalp — DISABLED (Bybit is now primary)
-        # Delta is options-only. Kept for rollback if needed.
 
         # Register scalp strategies — Binance spot — DISABLED FOR NOW
         # if self.binance and self.pairs:
@@ -206,22 +214,27 @@ class AlphaBot:
         #         )
 
         # Options overlay — buy CALLs/PUTs on 3/4+ scalp signals
-        # Options pairs are Delta format (BTC/USD:USD), signals come from Bybit (BTC/USDT:USDT)
+        # Options use Delta exchange, signals come from Delta scalp strategies
         if self.delta and self.delta_options and self._options_enabled:
             for pair in config.delta.options_pairs:
-                # Map Delta options pair to Bybit scalp strategy via base asset
+                # Map options pair to Delta scalp strategy via base asset
                 base = pair.split("/")[0]
-                bybit_pair = next((p for p in self.bybit_pairs if p.startswith(f"{base}/")), None)
-                scalp = self._scalp_strategies.get(bybit_pair) if bybit_pair else None
+                scalp = self._scalp_strategies.get(pair)
                 if scalp is None:
-                    logger.warning("Options pair %s — no matching Bybit scalp strategy", pair)
+                    # Try matching by base asset
+                    scalp = next(
+                        (s for p, s in self._scalp_strategies.items() if p.startswith(f"{base}/")),
+                        None,
+                    )
+                if scalp is None:
+                    logger.warning("Options pair %s — no matching Delta scalp strategy", pair)
                     continue
                 self._options_strategies[pair] = OptionsScalpStrategy(
                     pair, self.executor, self.risk_manager,
                     options_exchange=self.delta_options,
                     futures_exchange=self.delta,
                     scalp_strategy=scalp,
-                    market_analyzer=self.bybit_analyzer or self.delta_analyzer,
+                    market_analyzer=self.delta_analyzer,
                     db=self.db,
                 )
 
@@ -2636,17 +2649,36 @@ class AlphaBot:
                 "entry_price": entry_px,
             }
 
+        # ── Step 1b: Normalize exchange symbols to ccxt unified format ──
+        # Delta fetch_positions() may return native format (ETHUSD) or ccxt (ETH/USD:USD).
+        # Build a lookup: native symbol → ccxt symbol for strategy matching.
+        _native_to_ccxt: dict[str, str] = {}
+        for ccxt_pair in self.delta_pairs:
+            # BTC/USD:USD → BTCUSD
+            native = ccxt_pair.replace("/", "").replace(":USD", "")
+            _native_to_ccxt[native] = ccxt_pair
+            _native_to_ccxt[ccxt_pair] = ccxt_pair  # identity
+
+        def _resolve_pair(sym: str) -> str:
+            """Resolve exchange symbol to ccxt pair format."""
+            return _native_to_ccxt.get(sym, sym)
+
         # ── Step 2: Check ALL exchange positions against bot state ──────
-        # Check EVERY position the exchange reports (not just configured pairs)
-        all_checked_pairs = set(self.delta_pairs) | set(exchange_positions.keys())
+        # Normalize all exchange position keys to ccxt format
+        normalized_positions: dict[str, dict[str, Any]] = {}
+        for sym, data in exchange_positions.items():
+            resolved = _resolve_pair(sym)
+            normalized_positions[resolved] = data
+
+        all_checked_pairs = set(self.delta_pairs) | set(normalized_positions.keys())
 
         for pair in all_checked_pairs:
-            # Skip options positions — managed by OptionsScalpStrategy, not futures scalp
+            # Skip options positions — managed by OptionsScalpStrategy
             if is_option_symbol(pair):
                 logger.debug("Skipping options position in orphan check: %s", pair)
                 continue
 
-            epos = exchange_positions.get(pair)
+            epos = normalized_positions.get(pair)
             scalp = self._scalp_strategies.get(pair)
 
             if epos and scalp and scalp.in_position:
@@ -2738,6 +2770,31 @@ class AlphaBot:
                         restored = True
 
                 if not restored:
+                    # ── SAFETY: check DB one more time for ANY open trade ────
+                    # Prevents orphan-closing positions that were JUST opened
+                    # (race between strategy open and reconciliation cycle)
+                    any_open = None
+                    if self.db.is_connected:
+                        any_open = await self.db.get_open_trade(pair=pair, exchange="delta")
+                    if any_open and any_open.get("status") == "open":
+                        logger.info(
+                            "ORPHAN SKIP: %s has open DB trade (id=%s) — NOT closing",
+                            pair, any_open.get("order_id", "?"),
+                        )
+                        # Try to restore into strategy if scalp exists
+                        if scalp:
+                            db_price = float(any_open.get("entry_price", 0) or 0) or entry_px
+                            scalp.in_position = True
+                            scalp.position_side = side
+                            scalp.entry_price = db_price
+                            scalp.entry_amount = contracts
+                            scalp.entry_time = time.monotonic()
+                            logger.warning(
+                                "ORPHAN→RESTORE: %s %s %.0f ct @ $%.2f — forced restore from DB",
+                                pair, side, contracts, db_price,
+                            )
+                        continue
+
                     # ── CASE 1: True ORPHAN — no DB trade, close it ────────
                     logger.warning(
                         "ORPHAN DETECTED: %s %s %.0f contracts @ $%.2f — "
@@ -2808,7 +2865,9 @@ class AlphaBot:
         for pair, scalp in self._scalp_strategies.items():
             if not scalp.in_position or not scalp.is_futures:
                 continue
-            epos = exchange_positions.get(pair)
+            if getattr(scalp, "_exchange_id", "delta") != "delta":
+                continue  # skip non-Delta strategies
+            epos = normalized_positions.get(pair)
             if not epos:
                 # ── TIME GUARDS: don't phantom-clear legitimate trades ──
                 # Guard 1: position opened < 5 min ago — give it time to settle
