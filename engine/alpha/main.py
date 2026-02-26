@@ -143,7 +143,15 @@ class AlphaBot:
 
         # Immediate startup ping — proves Telegram is working before anything else runs
         try:
-            await self.alerts._send(f"\U0001f7e2 <b>ALPHA v{version}</b> starting...")
+            logger.info(
+                "[STARTUP] Telegram state: bot=%s chat_id=%s connected=%s",
+                bool(self.alerts._bot), bool(self.alerts._chat_id), self.alerts.is_connected,
+            )
+            if self.alerts.is_connected:
+                await self.alerts._send(f"\U0001f7e2 <b>ALPHA v{version}</b> starting...")
+                logger.info("[STARTUP] Early Telegram ping sent OK")
+            else:
+                logger.error("[STARTUP] Telegram NOT connected — no startup message will be sent")
         except Exception:
             logger.exception("[STARTUP] Early Telegram ping failed")
 
@@ -485,12 +493,17 @@ class AlphaBot:
             if total_capital < min_comfortable and total_capital > 0:
                 _issues.append(f"Survival mode (${total_capital:.2f} < ${min_comfortable:.0f})")
 
+            logger.info(
+                "[STARTUP] Sending status report: exchanges=%d strategies=%d issues=%d capital=$%.2f",
+                len(_exchanges), len(_strategies), len(_issues), total_capital,
+            )
             await self.alerts.send_bot_started(
                 capital=total_capital,
                 exchanges=_exchanges,
                 strategies=_strategies,
                 issues=_issues,
             )
+            logger.info("[STARTUP] Status report sent OK")
         except Exception:
             logger.exception("[STARTUP] Failed to build/send startup message — sending fallback")
             try:
