@@ -2807,11 +2807,18 @@ class ScalpStrategy(BaseStrategy):
         if self._market_regime == "CHOPPY":
             return
 
-        # ── Compute velocity windows ─────────────────────────────────
-        recent = [(t, p) for t, p in ticks if now - t <= 5.0]
-        prior = [(t, p) for t, p in ticks if 5.0 < now - t <= 10.0]
+        # ── Tick density check: pair must have real activity ──────────
+        # Require 8+ ticks in last 10s to prove pair is liquid/moving.
+        # Sparse ticks on dead pairs create fake "acceleration" from noise.
+        ticks_10s = [(t, p) for t, p in ticks if now - t <= 10.0]
+        if len(ticks_10s) < 8:
+            return
 
-        if len(recent) < 2 or len(prior) < 2:
+        # ── Compute velocity windows ─────────────────────────────────
+        recent = [(t, p) for t, p in ticks_10s if now - t <= 5.0]
+        prior = [(t, p) for t, p in ticks_10s if now - t > 5.0]
+
+        if len(recent) < 3 or len(prior) < 2:
             return
 
         velocity_5s = (recent[-1][1] - recent[0][1]) / recent[0][1] * 100
