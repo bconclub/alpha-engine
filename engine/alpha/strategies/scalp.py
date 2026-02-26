@@ -2567,16 +2567,33 @@ class ScalpStrategy(BaseStrategy):
 
             # DEAD_MOMENTUM: confirmed dead momentum + losing + held >3min → cut losses
             # Don't wait for SL when the setup has clearly failed.
-            if reversal_reason and pnl_pct < 0 and hold_seconds > self.DEAD_MOM_MIN_HOLD:
+            # Skip if: profitable, peak was significant (>0.15%), or trail is active.
+            _dm_trail_active = self._trailing_active or self._trail_stop_price > 0
+            _dm_peak_significant = self._peak_unrealized_pnl >= 0.15
+            if (
+                reversal_reason
+                and pnl_pct <= 0
+                and not _dm_peak_significant
+                and not _dm_trail_active
+                and hold_seconds > self.DEAD_MOM_MIN_HOLD
+            ):
                 if not self._reversal_exit_logged:
                     self._reversal_exit_logged = True
                     self.logger.info(
-                        "DEAD_MOMENTUM: %s pnl=%+.2f%% hold=%ds mom=%.3f%% — "
+                        "DEAD_MOMENTUM: %s pnl=%+.2f%% peak=%.2f%% hold=%ds mom=%.3f%% — "
                         "cutting loss, setup failed (%s)",
-                        self.pair, pnl_pct, int(hold_seconds),
-                        momentum_60s, reversal_reason,
+                        self.pair, pnl_pct, self._peak_unrealized_pnl,
+                        int(hold_seconds), momentum_60s, reversal_reason,
                     )
                 return self._do_exit(current_price, pnl_pct, side, "DEAD_MOMENTUM", hold_seconds)
+            elif reversal_reason and (_dm_peak_significant or _dm_trail_active) and pnl_pct <= 0:
+                if not self._reversal_exit_logged:
+                    self.logger.debug(
+                        "DEAD_MOM_SKIP: %s pnl=%+.2f%% peak=%.2f%% trail=%s — "
+                        "letting trail/ratchet handle exit",
+                        self.pair, pnl_pct, self._peak_unrealized_pnl,
+                        _dm_trail_active,
+                    )
 
             # If confirmed reversal AND in profit → exit
             if reversal_reason and pnl_pct >= self.REVERSAL_MIN_PROFIT_PCT:
