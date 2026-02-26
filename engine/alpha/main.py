@@ -141,6 +141,12 @@ class AlphaBot:
         await self._auto_changelog(version)
         await self.alerts.connect()
 
+        # Immediate startup ping — proves Telegram is working before anything else runs
+        try:
+            await self.alerts._send(f"\U0001f7e2 <b>ALPHA v{version}</b> starting...")
+        except Exception:
+            logger.exception("[STARTUP] Early Telegram ping failed")
+
         # Restore state from DB if available
         await self._restore_state()
 
