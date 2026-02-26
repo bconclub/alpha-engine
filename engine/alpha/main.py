@@ -1146,6 +1146,7 @@ class AlphaBot:
             logger.warning("[STATUS] get_trade_stats failed — using defaults")
             trade_stats = {"total_pnl": 0, "win_rate": 0, "total_trades": 0}
 
+        logger.info("DB_WRITE options_scalp_enabled=%s (type=%s)", self._options_enabled, type(self._options_enabled).__name__)
         status = {
             "total_pnl": trade_stats["total_pnl"],
             "daily_pnl": rm.daily_pnl,
@@ -1177,7 +1178,7 @@ class AlphaBot:
             "uptime_seconds": int(time.monotonic() - self._start_time) if self._start_time else 0,
             # Strategy toggles
             "scalp_enabled": self._scalp_enabled,
-            "options_scalp_enabled": self._options_enabled,
+            "options_scalp_enabled": self._options_enabled,  # DEBUG: logged below
             # Exchange toggles
             "bybit_enabled": self._bybit_enabled,
             "delta_enabled": self._delta_enabled,
@@ -1344,6 +1345,7 @@ class AlphaBot:
                         await asyncio.gather(*tasks, return_exceptions=True)
                     result_msg = f"Scalp {'enabled' if enabled else 'disabled'}"
                 elif strategy == "options_scalp":
+                    logger.info("OPTIONS_DEBUG: dashboard toggle setting _options_enabled=%s (was %s)", enabled, self._options_enabled)
                     self._options_enabled = enabled
                     tasks = []
                     if enabled:
