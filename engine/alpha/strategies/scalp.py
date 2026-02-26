@@ -2914,12 +2914,53 @@ class ScalpStrategy(BaseStrategy):
             available = self.risk_manager.get_available_capital(self._exchange_id)
             total_scalp = len(self.risk_manager.open_positions)
 
+            # ── Pre-flight checks ────────────────────────────────────────
+            exchange_capital = self.risk_manager.get_exchange_capital(self._exchange_id)
+            self.logger.info(
+                "[%s] ACCEL_SIZE: avail=$%.2f exch_cap=$%.2f exch=%s strength=%d "
+                "price=$%.2f open=%d atr=%.4f%% sl=%.2f%%",
+                self.pair, available, exchange_capital, self._exchange_id,
+                signal_strength, price, total_scalp,
+                self._last_atr_pct, self._sl_pct,
+            )
+
+            if not available or available <= 0:
+                self.logger.warning(
+                    "[%s] ACCEL skip — no capital on %s ($%.2f)",
+                    self.pair, self._exchange_id, available or 0,
+                )
+                return
+
+            # BTC/ETH need significant capital for 1 contract at leverage
+            if self._base_asset in ("BTC", "ETH") and exchange_capital < 50:
+                self.logger.info(
+                    "[%s] ACCEL skip — %s needs $50+ for 1 contract (have $%.2f)",
+                    self.pair, self._base_asset, exchange_capital,
+                )
+                return
+
+            # Ensure SL is set (ATR may not be computed yet before first candle scan)
+            if self._sl_pct <= 0 or self._last_atr_pct <= 0:
+                fallback_sl = self.PAIR_SL_FLOOR.get(self._base_asset, 0.35)
+                fallback_tp = self.PAIR_TP_FLOOR.get(self._base_asset, 1.50)
+                self.logger.info(
+                    "[%s] ACCEL using fallback SL/TP (no ATR yet): SL=%.2f%% TP=%.2f%%",
+                    self.pair, fallback_sl, fallback_tp,
+                )
+                self._sl_pct = fallback_sl
+                self._tp_pct = fallback_tp
+
             amount = self._calculate_position_size_dynamic(
                 price, available, signal_strength, total_scalp,
                 momentum_60s=velocity,
             )
             if amount is None:
-                self.logger.warning("[%s] ACCEL entry skipped — sizing returned None", self.pair)
+                self.logger.warning(
+                    "[%s] ACCEL skip — sizing=None (exch_cap=$%.2f avail=$%.2f "
+                    "price=$%.2f lev=%dx sl=%.2f%%)",
+                    self.pair, exchange_capital, available,
+                    price, self._trade_leverage, self._sl_pct,
+                )
                 return
 
             # Build and execute signal (market order for speed)
