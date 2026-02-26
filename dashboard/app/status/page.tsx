@@ -165,6 +165,27 @@ export default function StatusPage() {
     }
   }, [scalpEnabled, optionsEnabled, showFeedback]);
 
+  const [toggleLoading, setToggleLoading] = useState<string | null>(null);
+
+  const handleExchangeToggle = useCallback(async (exchange: string) => {
+    const client = getSupabase();
+    if (!client) return;
+    const key = `${exchange}_enabled` as keyof typeof botStatus;
+    const currentlyEnabled = (botStatus as any)?.[key] ?? true;
+    setToggleLoading(exchange);
+    try {
+      await client.from('bot_commands').insert({
+        command: 'toggle_exchange',
+        params: { exchange, enabled: !currentlyEnabled },
+      });
+      showFeedback('success', `${exchange.charAt(0).toUpperCase() + exchange.slice(1)} ${currentlyEnabled ? 'disabled' : 'enabled'}`);
+    } catch {
+      showFeedback('error', 'Failed to toggle exchange');
+    } finally {
+      setToggleLoading(null);
+    }
+  }, [botStatus, showFeedback]);
+
   // -- "Why No Trades?" lines --
   const pairLines = useMemo(() => {
     if (!diag?.pairs) return [];
@@ -347,64 +368,54 @@ export default function StatusPage() {
         )}
       </div>
 
-      {/* ═══ D. DIAGNOSTICS ═══ */}
+      {/* ═══ D. EXCHANGE TOGGLES ═══ */}
       <div className="bg-[#0d1117] border border-zinc-800 rounded-xl p-4">
-        <h2 className="text-xs font-medium text-zinc-400 uppercase tracking-wider mb-3">Diagnostics</h2>
-        <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-8 gap-y-2">
-          <DiagRow label="State">
-            <span className={cn('font-medium', botStatus.bot_state === 'running' ? 'text-[#00c853]' : 'text-[#ff1744]')}>
-              {(botStatus.bot_state ?? 'unknown').toUpperCase()}
-            </span>
-          </DiagRow>
-          <DiagRow label="Bybit Balance">
-            <span>${diag?.balance?.bybit?.toFixed(2) ?? '—'}</span>
-            {' '}
-            <span className={cn('text-[9px]', diag?.balance?.bybit_min_trade ? 'text-[#00c853]' : 'text-[#ff1744]')}>
-              {diag?.balance?.bybit_min_trade ? '✓' : '✗'}
-            </span>
-          </DiagRow>
-          <DiagRow label="Delta Balance">
-            <span>${diag?.balance?.delta?.toFixed(2) ?? '—'}</span>
-            {' '}
-            <span className={cn('text-[9px]', diag?.balance?.delta_min_trade ? 'text-[#00c853]' : 'text-[#ff1744]')}>
-              {diag?.balance?.delta_min_trade ? '✓' : '✗'}
-            </span>
-          </DiagRow>
-          <DiagRow label="Binance Balance">
-            <span>${diag?.balance?.binance?.toFixed(2) ?? '—'}</span>
-            {' '}
-            <span className={cn('text-[9px]', diag?.balance?.binance_min_trade ? 'text-[#00c853]' : 'text-[#ff1744]')}>
-              {diag?.balance?.binance_min_trade ? '✓' : '✗'}
-            </span>
-          </DiagRow>
-          <DiagRow label="Positions">
-            {diag?.positions?.open ?? '?'} / {diag?.positions?.max ?? '?'}
-          </DiagRow>
-          <DiagRow label="Uptime">
-            {formatUptime(botStatus.uptime_seconds)}
-          </DiagRow>
-          <DiagRow label="Last Scan">
-            {diag ? `${diag.last_scan_ago_s}s ago` : '—'}
-          </DiagRow>
-          <DiagRow label="Market Regime">
-            <Badge color={
-              botStatus.market_regime === 'CHOPPY' ? 'red'
-              : botStatus.market_regime?.startsWith('TRENDING') ? 'green'
-              : 'zinc'
-            }>
-              {botStatus.market_regime ?? '—'}
-            </Badge>
-          </DiagRow>
+        <h2 className="text-xs font-medium text-zinc-400 uppercase tracking-wider mb-3">Exchanges</h2>
+        <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+          {([
+            { id: 'bybit', name: 'BYBIT', color: 'text-[#f7a600]', connected: botStatus.bybit_connected, balance: botStatus.bybit_balance, enabled: (botStatus as any).bybit_enabled ?? true },
+            { id: 'delta', name: 'DELTA', color: 'text-[#00d2ff]', connected: botStatus.delta_connected, balance: botStatus.delta_balance, enabled: (botStatus as any).delta_enabled ?? true },
+            { id: 'kraken', name: 'KRAKEN', color: 'text-[#7B61FF]', connected: botStatus.kraken_connected, balance: botStatus.kraken_balance, enabled: (botStatus as any).kraken_enabled ?? true },
+          ]).map((ex) => (
+            <div
+              key={ex.id}
+              className={cn(
+                'border rounded-lg px-3 py-2.5 transition-colors',
+                ex.enabled ? 'bg-zinc-900/50 border-zinc-700' : 'bg-zinc-900/20 border-zinc-800/50 opacity-50',
+              )}
+            >
+              <div className="flex items-center justify-between mb-1.5">
+                <div className="flex items-center gap-1.5">
+                  <span className={cn('w-1.5 h-1.5 rounded-full shrink-0', ex.connected ? 'bg-[#00c853] animate-pulse' : 'bg-red-500')} />
+                  <span className={cn('text-xs font-semibold', ex.color)}>{ex.name}</span>
+                </div>
+                <button
+                  onClick={() => handleExchangeToggle(ex.id)}
+                  disabled={toggleLoading === ex.id}
+                  className={cn(
+                    'relative inline-flex h-5 w-9 items-center rounded-full transition-colors duration-200 shrink-0',
+                    ex.enabled ? 'bg-emerald-500' : 'bg-zinc-700',
+                    toggleLoading === ex.id && 'opacity-50',
+                  )}
+                >
+                  <span className={cn(
+                    'inline-block h-3 w-3 rounded-full bg-white transition-transform duration-200',
+                    ex.enabled ? 'translate-x-5' : 'translate-x-1',
+                    toggleLoading === ex.id && 'animate-pulse',
+                  )} />
+                </button>
+              </div>
+              <div className="flex items-center justify-between">
+                <span className="text-[11px] font-mono text-zinc-300">
+                  {(ex.balance ?? 0) > 0 ? `$${Number(ex.balance).toFixed(2)}` : '—'}
+                </span>
+                <span className={cn('text-[9px] font-mono', ex.enabled ? 'text-emerald-400/70' : 'text-zinc-600')}>
+                  {ex.enabled ? 'ON' : 'OFF'}
+                </span>
+              </div>
+            </div>
+          ))}
         </div>
-        {/* Open position pairs */}
-        {diag?.positions?.pairs && diag.positions.pairs.length > 0 && (
-          <div className="flex flex-wrap gap-1 mt-3 pt-3 border-t border-zinc-800/50">
-            <span className="text-[10px] text-zinc-500 mr-1">Open:</span>
-            {diag.positions.pairs.map((p: string) => (
-              <Badge key={p} color="amber">{extractBase(p)}</Badge>
-            ))}
-          </div>
-        )}
       </div>
 
       {/* ═══ E. STRATEGY TOGGLES ═══ */}
