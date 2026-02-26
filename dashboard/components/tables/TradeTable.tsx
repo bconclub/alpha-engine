@@ -56,6 +56,7 @@ interface TradeTableProps {
 const STRATEGIES: Strategy[] = ['scalp', 'options_scalp'];
 const EXCHANGES: { label: string; value: Exchange | 'All' }[] = [
   { label: 'All', value: 'All' },
+  { label: 'Bybit', value: 'bybit' },
   { label: 'Delta', value: 'delta' },
 ];
 const POSITION_TYPES: { label: string; value: PositionType | 'All' }[] = [

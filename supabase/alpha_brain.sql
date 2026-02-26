@@ -77,6 +77,11 @@ do $$ begin
         for insert to anon, authenticated with check (true);
 exception when duplicate_object then null; end $$;
 
--- Realtime
-alter publication supabase_realtime add table public.changelog;
-alter publication supabase_realtime add table public.alpha_analysis;
+-- Realtime (idempotent — skip if already added)
+do $$ begin
+    alter publication supabase_realtime add table public.changelog;
+exception when duplicate_object then null; end $$;
+
+do $$ begin
+    alter publication supabase_realtime add table public.alpha_analysis;
+exception when duplicate_object then null; end $$;

@@ -356,6 +356,13 @@ export default function StatusPage() {
               {(botStatus.bot_state ?? 'unknown').toUpperCase()}
             </span>
           </DiagRow>
+          <DiagRow label="Bybit Balance">
+            <span>${diag?.balance?.bybit?.toFixed(2) ?? '—'}</span>
+            {' '}
+            <span className={cn('text-[9px]', diag?.balance?.bybit_min_trade ? 'text-[#00c853]' : 'text-[#ff1744]')}>
+              {diag?.balance?.bybit_min_trade ? '✓' : '✗'}
+            </span>
+          </DiagRow>
           <DiagRow label="Delta Balance">
             <span>${diag?.balance?.delta?.toFixed(2) ?? '—'}</span>
             {' '}

@@ -32,6 +32,10 @@ logger = setup_logger("price_feed")
 DELTA_WS_URL = "wss://socket.india.delta.exchange"
 DELTA_WS_URL_TESTNET = "wss://socket-ind.testnet.deltaex.org"
 
+# Bybit WS (USDT-settled linear perpetuals)
+BYBIT_WS_URL = "wss://stream.bybit.com/v5/public/linear"
+BYBIT_WS_URL_TESTNET = "wss://stream-testnet.bybit.com/v5/public/linear"
+
 # Reconnect backoff
 RECONNECT_MIN_SEC = 2
 RECONNECT_MAX_SEC = 60
@@ -70,6 +74,28 @@ def _delta_symbol_to_ccxt(symbol: str, pairs: list[str]) -> str | None:
     return None
 
 
+def _ccxt_to_bybit_symbol(pair: str) -> str:
+    """Convert ccxt pair format to Bybit WS symbol.
+
+    'BTC/USDT:USDT' → 'BTCUSDT'
+    'ETH/USDT:USDT' → 'ETHUSDT'
+    """
+    base = pair.split("/")[0]
+    return f"{base}USDT"
+
+
+def _bybit_symbol_to_ccxt(symbol: str, pairs: list[str]) -> str | None:
+    """Convert Bybit WS symbol back to ccxt pair format.
+
+    'BTCUSDT' → 'BTC/USDT:USDT' (matching from known pairs list)
+    """
+    base = symbol.replace("USDT", "")
+    for pair in pairs:
+        if pair.startswith(f"{base}/"):
+            return pair
+    return None
+
+
 class PriceFeed:
     """Real-time price feed via WebSocket for instant exit checks.
 
@@ -85,14 +111,18 @@ class PriceFeed:
         strategies: dict[str, ScalpStrategy],
         binance_exchange: Any = None,
         delta_pairs: list[str] | None = None,
+        bybit_pairs: list[str] | None = None,
         binance_pairs: list[str] | None = None,
         delta_testnet: bool = False,
+        bybit_testnet: bool = False,
     ) -> None:
         self._strategies = strategies
         self._binance_exchange = binance_exchange
         self._delta_pairs = delta_pairs or []
+        self._bybit_pairs = bybit_pairs or []
         self._binance_pairs = binance_pairs or []
         self._delta_testnet = delta_testnet
+        self._bybit_testnet = bybit_testnet
 
         # Price cache
         self.price_cache: dict[str, float] = {}
@@ -110,19 +140,26 @@ class PriceFeed:
 
         # Stats
         self._delta_updates = 0
+        self._bybit_updates = 0
         self._binance_updates = 0
         self._exit_checks = 0
         self._delta_messages_total = 0
         self._delta_messages_parsed = 0
+        self._bybit_messages_total = 0
+        self._bybit_messages_parsed = 0
         self._last_stats_log = 0.0
 
     async def start(self) -> None:
         """Start WS feeds as background tasks."""
         self._running = True
         logger.info(
-            "PriceFeed starting — Delta: %d pairs, Binance: %d pairs",
-            len(self._delta_pairs), len(self._binance_pairs),
+            "PriceFeed starting — Bybit: %d pairs, Delta: %d pairs, Binance: %d pairs",
+            len(self._bybit_pairs), len(self._delta_pairs), len(self._binance_pairs),
         )
+
+        if self._bybit_pairs:
+            task = asyncio.create_task(self._bybit_ws_loop())
+            self._tasks.append(task)
 
         if self._delta_pairs:
             task = asyncio.create_task(self._delta_ws_loop())
@@ -172,6 +209,8 @@ class PriceFeed:
 
         if source == "delta":
             self._delta_updates += 1
+        elif source == "bybit":
+            self._bybit_updates += 1
         else:
             self._binance_updates += 1
 
@@ -372,6 +411,94 @@ class PriceFeed:
                 logger.warning("Delta WS parse error: %s — raw: %s", e, raw[:200])
 
     # ══════════════════════════════════════════════════════════════════
+    # BYBIT — raw aiohttp WS (v5 public linear)
+    # ══════════════════════════════════════════════════════════════════
+
+    async def _bybit_ws_loop(self) -> None:
+        """Connect to Bybit WS and subscribe to ticker updates."""
+        ws_url = BYBIT_WS_URL_TESTNET if self._bybit_testnet else BYBIT_WS_URL
+        symbols = [_ccxt_to_bybit_symbol(p) for p in self._bybit_pairs]
+        backoff = RECONNECT_MIN_SEC
+
+        while self._running:
+            try:
+                logger.info("Bybit WS connecting to %s — symbols: %s", ws_url, symbols)
+                async with aiohttp.ClientSession() as session:
+                    async with session.ws_connect(ws_url, heartbeat=20) as ws:
+                        logger.info("Bybit WS connected")
+                        backoff = RECONNECT_MIN_SEC
+
+                        # Subscribe to tickers for all pairs
+                        subscribe_msg = {
+                            "op": "subscribe",
+                            "args": [f"tickers.{s}" for s in symbols],
+                        }
+                        await ws.send_json(subscribe_msg)
+                        logger.info("Bybit WS subscribed to tickers: %s", symbols)
+
+                        async for msg in ws:
+                            if not self._running:
+                                break
+                            if msg.type == aiohttp.WSMsgType.TEXT:
+                                self._handle_bybit_message(msg.data)
+                            elif msg.type in (aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.ERROR):
+                                logger.warning("Bybit WS closed/error: %s", msg.type)
+                                break
+
+            except asyncio.CancelledError:
+                break
+            except Exception:
+                logger.exception("Bybit WS error — reconnecting in %ds", backoff)
+
+            if self._running:
+                await asyncio.sleep(backoff)
+                backoff = min(backoff * 2, RECONNECT_MAX_SEC)
+
+    def _handle_bybit_message(self, raw: str) -> None:
+        """Parse Bybit WS ticker message.
+
+        Bybit v5 ticker format:
+        {
+            "topic": "tickers.BTCUSDT",
+            "type": "snapshot" | "delta",
+            "data": {
+                "symbol": "BTCUSDT",
+                "lastPrice": "67000.00",
+                "markPrice": "67010.50",
+                ...
+            },
+            "ts": 1234567890123
+        }
+        """
+        self._bybit_messages_total += 1
+        try:
+            data = json.loads(raw)
+            topic = data.get("topic", "")
+
+            if topic.startswith("tickers."):
+                ticker_data = data.get("data", {})
+                if isinstance(ticker_data, dict):
+                    symbol = ticker_data.get("symbol", "")
+                    # Prefer markPrice for futures, fallback to lastPrice
+                    price_str = ticker_data.get("markPrice") or ticker_data.get("lastPrice")
+                    if symbol and price_str:
+                        price = float(price_str)
+                        pair = _bybit_symbol_to_ccxt(symbol, self._bybit_pairs)
+                        if pair:
+                            self._bybit_messages_parsed += 1
+                            self._on_price_update(pair, price, "bybit")
+                return
+
+            # Skip subscription acks, pong responses
+            op = data.get("op", "")
+            if op in ("subscribe", "pong", ""):
+                return
+
+        except (json.JSONDecodeError, ValueError, KeyError) as e:
+            if self._bybit_messages_total <= 3:
+                logger.warning("Bybit WS parse error: %s — raw: %s", e, raw[:200])
+
+    # ══════════════════════════════════════════════════════════════════
     # BINANCE — ccxt.pro watch_ticker
     # ══════════════════════════════════════════════════════════════════
 
@@ -426,21 +553,29 @@ class PriceFeed:
                     parse_pct = (self._delta_messages_parsed / self._delta_messages_total) * 100
                     parse_tag = f" delta_parse={self._delta_messages_parsed}/{self._delta_messages_total}({parse_pct:.0f}%)"
 
+                bybit_tag = ""
+                if self._bybit_messages_total > 0:
+                    bybit_pct = (self._bybit_messages_parsed / self._bybit_messages_total) * 100
+                    bybit_tag = f" bybit_parse={self._bybit_messages_parsed}/{self._bybit_messages_total}({bybit_pct:.0f}%)"
+
                 wake_tag = f" wake_alerts={self._wake_alerts}" if self._wake_alerts > 0 else ""
                 logger.info(
-                    "PriceFeed stats — Delta: %d updates, Binance: %d updates, "
-                    "exit_checks: %d, cached: %d pairs%s%s%s",
-                    self._delta_updates, self._binance_updates,
-                    self._exit_checks, cached, parse_tag, wake_tag, stale_tag,
+                    "PriceFeed stats — Bybit: %d, Delta: %d, Binance: %d updates, "
+                    "exit_checks: %d, cached: %d pairs%s%s%s%s",
+                    self._bybit_updates, self._delta_updates, self._binance_updates,
+                    self._exit_checks, cached, parse_tag, bybit_tag, wake_tag, stale_tag,
                 )
 
                 # Reset counters
                 self._delta_updates = 0
+                self._bybit_updates = 0
                 self._binance_updates = 0
                 self._exit_checks = 0
                 self._wake_alerts = 0
                 self._delta_messages_total = 0
                 self._delta_messages_parsed = 0
+                self._bybit_messages_total = 0
+                self._bybit_messages_parsed = 0
 
             except asyncio.CancelledError:
                 break

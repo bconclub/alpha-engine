@@ -1,6 +1,6 @@
 """Alpha — main entry point. Multi-pair, multi-exchange concurrent orchestrator.
 
-Supports Binance (spot) and Delta Exchange India (futures) in parallel.
+Supports Bybit (futures), Binance (spot), and Delta Exchange India (options) in parallel.
 """
 
 from __future__ import annotations
@@ -40,18 +40,22 @@ class AlphaBot:
         self.kucoin: ccxt.Exchange | None = None
         self.delta: ccxt.Exchange | None = None
         self.delta_options: ccxt.Exchange | None = None  # Delta options exchange
+        self.bybit: ccxt.Exchange | None = None          # Bybit futures exchange
         self.db = Database()
         self.alerts = AlertManager()
         self.risk_manager = RiskManager()
         self.executor: TradeExecutor | None = None
         self.analyzer: MarketAnalyzer | None = None
         self.delta_analyzer: MarketAnalyzer | None = None
+        self.bybit_analyzer: MarketAnalyzer | None = None
         # strategy_selector DISABLED — all pairs use scalp only
 
         # Multi-pair: Binance spot
         self.pairs: list[str] = config.trading.pairs
-        # Delta futures pairs
+        # Delta futures pairs (options only now)
         self.delta_pairs: list[str] = config.delta.pairs
+        # Bybit futures pairs (primary)
+        self.bybit_pairs: list[str] = config.bybit.pairs
 
         # Scalp overlay strategies: pair -> ScalpStrategy (run independently)
         self._scalp_strategies: dict[str, ScalpStrategy] = {}
@@ -87,8 +91,12 @@ class AlphaBot:
 
     @property
     def all_pairs(self) -> list[str]:
-        """All tracked pairs across both exchanges."""
-        return self.pairs + (self.delta_pairs if self.delta else [])
+        """All tracked pairs across all exchanges."""
+        return (
+            self.pairs
+            + (self.bybit_pairs if self.bybit else [])
+            + (self.delta_pairs if self.delta else [])
+        )
 
     async def start(self) -> None:
         """Initialize all components and start the main loop."""
@@ -108,8 +116,10 @@ class AlphaBot:
         logger.info("  ALPHA v%s — Multi-Exchange Scalping Agent", version)
         logger.info("  BINANCE (spot): %s (1x, long-only, SL=2%%, TP=3%%, Trail@1.5%%/0.8%%)",
                      ", ".join(self.pairs))
-        logger.info("  DELTA (futures): %s, %dx leverage",
-                     ", ".join(self.delta_pairs), config.delta.leverage)
+        logger.info("  BYBIT (futures): %s, %dx leverage",
+                     ", ".join(self.bybit_pairs), config.bybit.leverage)
+        logger.info("  DELTA (options): %s",
+                     ", ".join(config.delta.options_pairs) if config.delta.options_enabled else "disabled")
         logger.info("  Entry: 11-signal arsenal Gate=3/4 RSI=35/65 Override=30/70 +VWAP+BBSQZ+LIQSWEEP+FVG+VOLDIV")
         logger.info("  Soul: Momentum is everything. Speed wins. Never idle.")
         logger.info("=" * 60)
@@ -136,7 +146,7 @@ class AlphaBot:
 
         self.risk_manager.record_close = _tracked_record_close  # type: ignore[assignment]
 
-        # Build components — both Binance (spot) and Delta (futures)
+        # Build components — Binance (spot) + Bybit (futures) + Delta (options)
         self.executor = TradeExecutor(
             self.binance,  # type: ignore[arg-type]
             db=self.db,
@@ -144,6 +154,7 @@ class AlphaBot:
             delta_exchange=self.delta,
             risk_manager=self.risk_manager,
             options_exchange=self.delta_options,
+            bybit_exchange=self.bybit,
         )
 
         # Binance analyzer for spot pairs
@@ -156,23 +167,33 @@ class AlphaBot:
             self.delta_analyzer = MarketAnalyzer(
                 self.delta, pair=self.delta_pairs[0] if self.delta_pairs else None,
             )
+
+        if self.bybit and self.bybit_pairs:
+            self.bybit_analyzer = MarketAnalyzer(
+                self.bybit, pair=self.bybit_pairs[0],
+            )
         # strategy_selector DISABLED — scalp-only, no dynamic strategy switching
 
-        # Load market limits for both exchanges
+        # Load market limits for all exchanges
         await self.executor.load_market_limits(
             self.pairs,  # Binance spot pairs
             delta_pairs=self.delta_pairs if self.delta else None,
+            bybit_pairs=self.bybit_pairs if self.bybit else None,
         )
 
-        # Register scalp strategies — Delta futures (with 15m trend filter)
-        if self.delta:
-            for pair in self.delta_pairs:
+        # Register scalp strategies — Bybit futures (primary)
+        if self.bybit:
+            for pair in self.bybit_pairs:
                 self._scalp_strategies[pair] = ScalpStrategy(
                     pair, self.executor, self.risk_manager,
-                    exchange=self.delta,
+                    exchange=self.bybit,
                     is_futures=True,
-                    market_analyzer=self.delta_analyzer,
+                    market_analyzer=self.bybit_analyzer,
+                    exchange_id="bybit",
                 )
+
+        # Delta futures scalp — DISABLED (Bybit is now primary)
+        # Delta is options-only. Kept for rollback if needed.
 
         # Register scalp strategies — Binance spot — DISABLED FOR NOW
         # if self.binance and self.pairs:
@@ -185,18 +206,22 @@ class AlphaBot:
         #         )
 
         # Options overlay — buy CALLs/PUTs on 3/4+ scalp signals
+        # Options pairs are Delta format (BTC/USD:USD), signals come from Bybit (BTC/USDT:USDT)
         if self.delta and self.delta_options and self._options_enabled:
             for pair in config.delta.options_pairs:
-                if pair not in self._scalp_strategies:
-                    logger.warning("Options pair %s not in scalp strategies — skipping", pair)
+                # Map Delta options pair to Bybit scalp strategy via base asset
+                base = pair.split("/")[0]
+                bybit_pair = next((p for p in self.bybit_pairs if p.startswith(f"{base}/")), None)
+                scalp = self._scalp_strategies.get(bybit_pair) if bybit_pair else None
+                if scalp is None:
+                    logger.warning("Options pair %s — no matching Bybit scalp strategy", pair)
                     continue
-                scalp = self._scalp_strategies.get(pair)
                 self._options_strategies[pair] = OptionsScalpStrategy(
                     pair, self.executor, self.risk_manager,
                     options_exchange=self.delta_options,
                     futures_exchange=self.delta,
                     scalp_strategy=scalp,
-                    market_analyzer=self.delta_analyzer,
+                    market_analyzer=self.bybit_analyzer or self.delta_analyzer,
                     db=self.db,
                 )
 
@@ -241,9 +266,11 @@ class AlphaBot:
             self._price_feed = PriceFeed(
                 strategies=self._scalp_strategies,
                 binance_exchange=binance_ws_exchange,
-                delta_pairs=self.delta_pairs,
-                binance_pairs=[],  # Binance disabled for now
+                delta_pairs=self.delta_pairs if self.delta else [],
+                bybit_pairs=self.bybit_pairs if self.bybit else [],
+                binance_pairs=[],  # Binance spot WS disabled for now
                 delta_testnet=config.delta.testnet,
+                bybit_testnet=config.bybit.testnet,
             )
 
             # Register momentum wake callbacks — WS detects sharp moves and
@@ -273,10 +300,12 @@ class AlphaBot:
         # Fetch live exchange balances → per-exchange capital for trade sizing
         binance_bal: float | None = None
         delta_bal: float | None = None
+        bybit_bal: float | None = None
         try:
             binance_bal = await self._fetch_portfolio_usd(self.binance)
             delta_bal = await self._fetch_portfolio_usd(self.delta) if self.delta else None
-            self.risk_manager.update_exchange_balances(binance_bal, delta_bal)
+            bybit_bal = await self._fetch_portfolio_usd(self.bybit) if self.bybit else None
+            self.risk_manager.update_exchange_balances(binance_bal, delta_bal, bybit_bal)
         except Exception:
             logger.exception("[STARTUP] Failed to fetch exchange balances — continuing with defaults")
 
@@ -341,6 +370,7 @@ class AlphaBot:
             await self.alerts.send_bot_started(
                 self.all_pairs, total_capital,
                 binance_balance=binance_bal, delta_balance=delta_bal,
+                bybit_balance=bybit_bal,
             )
         except Exception:
             logger.exception("[STARTUP] Failed to send startup message")
@@ -358,9 +388,9 @@ class AlphaBot:
 
         # Keep running
         logger.info(
-            "Bot running — Binance %d spot + Delta %d futures (%dx) — Ctrl+C to stop",
-            len(self.pairs), len(self.delta_pairs) if self.delta else 0,
-            config.delta.leverage,
+            "Bot running — Bybit %d futures (%dx) + Delta options — Ctrl+C to stop",
+            len(self.bybit_pairs) if self.bybit else 0,
+            config.bybit.leverage,
         )
         try:
             while self._running:
@@ -411,6 +441,8 @@ class AlphaBot:
             await self.delta.close()
         if self.delta_options:
             await self.delta_options.close()
+        if self.bybit:
+            await self.bybit.close()
 
         logger.info("Shutdown complete")
 
@@ -745,9 +777,10 @@ class AlphaBot:
         # Fetch live exchange balances
         binance_bal = await self._fetch_portfolio_usd(self.binance)
         delta_bal = await self._fetch_portfolio_usd(self.delta) if self.delta else None
+        bybit_bal = await self._fetch_portfolio_usd(self.bybit) if self.bybit else None
 
         # Capital = sum of actual exchange balances
-        total_capital = (binance_bal or 0) + (delta_bal or 0)
+        total_capital = (binance_bal or 0) + (delta_bal or 0) + (bybit_bal or 0)
 
         await self.alerts.send_daily_summary(
             total_trades=total,
@@ -799,9 +832,10 @@ class AlphaBot:
             # Fetch live exchange balances (includes held assets)
             binance_bal = await self._fetch_portfolio_usd(self.binance)
             delta_bal = await self._fetch_portfolio_usd(self.delta) if self.delta else None
+            bybit_bal = await self._fetch_portfolio_usd(self.bybit) if self.bybit else None
 
             # Capital = sum of actual exchange balances
-            total_capital = (binance_bal or 0) + (delta_bal or 0)
+            total_capital = (binance_bal or 0) + (delta_bal or 0) + (bybit_bal or 0)
 
             # Cross-check positions against exchange: verify we actually hold coins
             verified_positions = await self._verify_positions_against_exchange()
@@ -934,7 +968,8 @@ class AlphaBot:
         # Fetch exchange balances and update per-exchange capital
         binance_bal = await self._fetch_portfolio_usd(self.binance)
         delta_bal = await self._fetch_portfolio_usd(self.delta) if self.delta else None
-        rm.update_exchange_balances(binance_bal, delta_bal)
+        bybit_bal = await self._fetch_portfolio_usd(self.bybit) if self.bybit else None
+        rm.update_exchange_balances(binance_bal, delta_bal, bybit_bal)
 
         # Fetch raw INR balance for dashboard display
         delta_balance_inr = None
@@ -977,11 +1012,13 @@ class AlphaBot:
             "binance_balance": binance_bal,
             "delta_balance": delta_bal,
             "delta_balance_inr": delta_balance_inr,
+            "bybit_balance": bybit_bal,
             "binance_connected": self.binance is not None and binance_bal is not None,
             "delta_connected": self.delta is not None and delta_bal is not None,
+            "bybit_connected": self.bybit is not None and bybit_bal is not None,
             "bot_state": bot_state,
-            "shorting_enabled": config.delta.enable_shorting,
-            "leverage": config.delta.leverage,
+            "shorting_enabled": config.bybit.enable_shorting,
+            "leverage": config.bybit.leverage,
             "active_strategy_count": active_count,
             "uptime_seconds": int(time.monotonic() - self._start_time) if self._start_time else 0,
             # Strategy toggles
@@ -1039,8 +1076,10 @@ class AlphaBot:
                 "balance": {
                     "delta": round(delta_bal, 2) if delta_bal else None,
                     "binance": round(binance_bal, 2) if binance_bal else None,
+                    "bybit": round(bybit_bal, 2) if bybit_bal else None,
                     "delta_min_trade": bool(delta_bal and delta_bal >= 5),
                     "binance_min_trade": bool(binance_bal and binance_bal >= 6),
+                    "bybit_min_trade": bool(bybit_bal and bybit_bal >= 1),
                 },
                 "pairs": {},
             }
@@ -1636,15 +1675,17 @@ class AlphaBot:
             # Restore per-exchange balances if available
             binance_bal = last.get("binance_balance")
             delta_bal = last.get("delta_balance")
-            if binance_bal is not None or delta_bal is not None:
+            bybit_bal = last.get("bybit_balance")
+            if binance_bal is not None or delta_bal is not None or bybit_bal is not None:
                 self.risk_manager.update_exchange_balances(
                     float(binance_bal) if binance_bal else None,
                     float(delta_bal) if delta_bal else None,
+                    float(bybit_bal) if bybit_bal else None,
                 )
                 logger.info(
-                    "Restored state from DB -- Binance=$%.2f, Delta=$%.2f, Total=$%.2f",
+                    "Restored state from DB -- Binance=$%.2f, Delta=$%.2f, Bybit=$%.2f, Total=$%.2f",
                     self.risk_manager.binance_capital, self.risk_manager.delta_capital,
-                    self.risk_manager.capital,
+                    self.risk_manager.bybit_capital, self.risk_manager.capital,
                 )
             else:
                 # Fallback to single capital field
@@ -1667,6 +1708,7 @@ class AlphaBot:
 
         For each open trade:
         - Spot (Binance): check if we still hold the base asset (> $1 worth)
+        - Futures (Bybit): check via fetch_positions() for real coin holdings
         - Futures (Delta): check via fetch_positions() for real contract holdings
         If position no longer exists, mark trade as closed in DB.
         If it does exist, register it with the risk manager.
@@ -1743,6 +1785,31 @@ class AlphaBot:
         except Exception as e:
             logger.warning("Could not fetch options positions on startup: %s", e)
 
+        # Fetch Bybit positions via fetch_positions() — actual open positions
+        bybit_positions: dict[str, dict[str, Any]] = {}
+        try:
+            if self.bybit:
+                positions = await self.bybit.fetch_positions()
+                for pos in positions:
+                    contracts = float(pos.get("contracts", 0) or 0)
+                    if contracts != 0:
+                        symbol = pos.get("symbol", "")
+                        side = "long" if contracts > 0 else "short"
+                        entry_px = float(pos.get("entryPrice", 0) or 0)
+                        bybit_positions[symbol] = {
+                            "side": side,
+                            "amount": abs(contracts),
+                            "entry_price": entry_px,
+                        }
+                        logger.info(
+                            "Found open Bybit position: %s %s %.6f coins @ $%.2f",
+                            symbol, side, abs(contracts), entry_px,
+                        )
+                if not bybit_positions:
+                    logger.info("No open Bybit positions on exchange")
+        except Exception as e:
+            logger.error("Failed to fetch Bybit positions on startup: %s", e)
+
         restored = 0
         closed = 0
 
@@ -1776,6 +1843,30 @@ class AlphaBot:
                         )
                 elif held > 0:
                     position_exists = True
+            elif exchange_id == "bybit":
+                # Bybit futures: verify against actual Bybit positions
+                bybit_pos = bybit_positions.get(pair)
+                if bybit_pos:
+                    position_exists = True
+                    db_entry_price = float(trade.get("entry_price", 0) or 0)
+                    exchange_entry_price = bybit_pos["entry_price"]
+                    amount = bybit_pos["amount"]
+                    position_type = bybit_pos["side"]
+                    if db_entry_price > 0:
+                        entry_price = db_entry_price
+                    elif exchange_entry_price > 0:
+                        entry_price = exchange_entry_price
+                    logger.info(
+                        "Bybit position %s verified: %s %.6f coins | "
+                        "entry=$%.2f (DB) vs $%.2f (exchange) — using DB",
+                        pair, position_type, amount, db_entry_price, exchange_entry_price,
+                    )
+                else:
+                    logger.info(
+                        "Bybit position %s NOT found on exchange — was closed externally",
+                        pair,
+                    )
+                    position_exists = False
             elif exchange_id == "delta":
                 # Options trades: check options_positions (separate exchange)
                 if is_option_symbol(pair):
@@ -2143,7 +2234,12 @@ class AlphaBot:
         Returns None on any failure (caller should handle gracefully).
         """
         try:
-            exchange = self.delta if exchange_id == "delta" else self.binance
+            if exchange_id == "bybit":
+                exchange = self.bybit
+            elif exchange_id == "delta":
+                exchange = self.delta
+            else:
+                exchange = self.binance
             if exchange:
                 ticker = await exchange.fetch_ticker(pair)
                 return float(ticker.get("last", 0) or 0) or None
@@ -2178,6 +2274,11 @@ class AlphaBot:
         This is the #1 safety net. Runs on startup AND every 60 seconds.
         """
         try:
+            await self._reconcile_bybit_positions()
+        except Exception:
+            logger.exception("Orphan reconciliation failed (Bybit)")
+
+        try:
             await self._reconcile_delta_positions()
         except Exception:
             logger.exception("Orphan reconciliation failed (Delta)")
@@ -2209,6 +2310,294 @@ class AlphaBot:
                 self.risk_manager.record_close(pair, 0.0)
         except Exception:
             logger.exception("Ghost sweep failed")
+
+    async def _reconcile_bybit_positions(self) -> None:
+        """Reconcile Bybit positions with bot memory.
+
+        Same pattern as Delta reconciliation but simpler:
+        - Bybit amounts are in coins (no contract conversion)
+        - No options to worry about
+
+        CASE 1 (ORPHAN): Exchange has position, bot doesn't → CLOSE immediately
+        CASE 2 (PHANTOM): Bot thinks position exists, exchange doesn't → clear state
+        CASE 3 (RESTORE): Exchange has position, DB has trade → restore strategy
+        """
+        if not self.bybit:
+            return
+
+        # ── Step 1: Fetch ALL open positions from Bybit ──────────────
+        try:
+            positions = await self.bybit.fetch_positions()
+        except Exception:
+            logger.debug("Failed to fetch Bybit positions for reconciliation")
+            return
+
+        # Build map: symbol → {side, amount, entry_price}
+        exchange_positions: dict[str, dict[str, Any]] = {}
+        for pos in positions:
+            contracts = float(pos.get("contracts", 0) or 0)
+            if contracts == 0:
+                continue
+            symbol = pos.get("symbol", "")
+            side = "long" if contracts > 0 else "short"
+            entry_px = float(pos.get("entryPrice", 0) or 0)
+            exchange_positions[symbol] = {
+                "side": side,
+                "amount": abs(contracts),
+                "entry_price": entry_px,
+            }
+
+        # ── Step 2: Check ALL exchange positions against bot state ────
+        all_checked_pairs = set(self.bybit_pairs) | set(exchange_positions.keys())
+
+        for pair in all_checked_pairs:
+            epos = exchange_positions.get(pair)
+            scalp = self._scalp_strategies.get(pair)
+
+            if epos and scalp and scalp.in_position:
+                continue  # ALL GOOD
+
+            if epos and (not scalp or not scalp.in_position):
+                side = epos["side"]
+                amount = epos["amount"]
+                entry_px = epos["entry_price"]
+
+                # ── CASE 3: Try to RESTORE from DB before closing ────
+                restored = False
+                if scalp and self.db.is_connected:
+                    open_trade = await self.db.get_open_trade(
+                        pair=pair, exchange="bybit",
+                    )
+                    if open_trade and open_trade.get("status") == "open":
+                        db_entry_price = float(open_trade.get("entry_price", 0) or 0)
+                        restore_price = db_entry_price if db_entry_price > 0 else entry_px
+
+                        scalp.in_position = True
+                        scalp.position_side = side
+                        scalp.entry_price = restore_price
+                        scalp.entry_amount = amount
+                        scalp.highest_since_entry = restore_price
+                        scalp.lowest_since_entry = restore_price
+
+                        opened_at_str = open_trade.get("opened_at")
+                        if opened_at_str:
+                            try:
+                                from datetime import datetime, timezone
+                                if isinstance(opened_at_str, str):
+                                    opened_at_str = opened_at_str.replace("Z", "+00:00")
+                                    opened_dt = datetime.fromisoformat(opened_at_str)
+                                else:
+                                    opened_dt = opened_at_str
+                                seconds_ago = max(0, (datetime.now(timezone.utc) - opened_dt).total_seconds())
+                                scalp.entry_time = time.monotonic() - seconds_ago
+                            except Exception:
+                                scalp.entry_time = time.monotonic()
+                        else:
+                            scalp.entry_time = time.monotonic()
+
+                        current_price = await self._get_current_price(pair, "bybit")
+                        if current_price and current_price > 0:
+                            current_pnl = scalp._calc_pnl_pct(current_price)
+                            if side == "long":
+                                scalp.highest_since_entry = max(restore_price, current_price)
+                            else:
+                                scalp.lowest_since_entry = min(restore_price, current_price)
+                            scalp._peak_unrealized_pnl = max(0, current_pnl)
+                            if current_pnl >= scalp.TRAILING_ACTIVATE_PCT:
+                                scalp._trailing_active = True
+                                scalp._update_trail_stop()
+                                logger.info(
+                                    "RESTORE: %s already at +%.2f%% — trailing activated",
+                                    pair, current_pnl,
+                                )
+                        else:
+                            current_price = entry_px
+                            current_pnl = 0.0
+
+                        logger.warning(
+                            "RESTORED: %s %s %.6f coins @ $%.2f (DB) — "
+                            "current $%.2f — PnL %+.2f%%",
+                            pair, side, amount, restore_price,
+                            current_price, current_pnl,
+                        )
+                        try:
+                            await self.alerts.send_orphan_alert(
+                                pair=pair, side=side, contracts=amount,
+                                action="RESTORED INTO BOT",
+                                detail=f"Entry: ${restore_price:.2f} (DB) — current ${current_price:.2f} — PnL {current_pnl:+.2f}%",
+                            )
+                        except Exception:
+                            pass
+                        restored = True
+
+                if not restored:
+                    # ── CASE 1: True ORPHAN — close it ─────────────────
+                    logger.warning(
+                        "ORPHAN DETECTED: %s %s %.6f coins @ $%.2f — "
+                        "NOT in bot memory! CLOSING",
+                        pair, side, amount, entry_px,
+                    )
+                    try:
+                        await self.alerts.send_orphan_alert(
+                            pair=pair, side=side, contracts=amount,
+                            action="CLOSING AT MARKET",
+                            detail=f"Entry: ${entry_px:.2f} — not in bot memory or DB",
+                        )
+                    except Exception:
+                        pass
+
+                    try:
+                        close_side = "sell" if side == "long" else "buy"
+                        await self.bybit.create_order(
+                            pair, "market", close_side, amount,
+                            params={"reduceOnly": True},
+                        )
+                        logger.info(
+                            "ORPHAN CLOSED: %s %s %.6f coins at market",
+                            pair, side, amount,
+                        )
+
+                        if self.db.is_connected:
+                            open_trade = await self.db.get_open_trade(
+                                pair=pair, exchange="bybit",
+                            )
+                            if open_trade:
+                                try:
+                                    ticker = await self.bybit.fetch_ticker(pair)
+                                    exit_price = float(ticker.get("last", 0) or 0) or entry_px
+                                except Exception:
+                                    exit_price = entry_px
+                                trade_lev = open_trade.get("leverage", config.bybit.leverage) or 1
+                                pnl, pnl_pct = calc_pnl(
+                                    entry_px, exit_price, amount,
+                                    side, trade_lev,
+                                    "bybit", pair,
+                                )
+                                order_id = open_trade.get("order_id", "")
+                                if order_id:
+                                    await self.db.close_trade(
+                                        order_id, exit_price, pnl, pnl_pct,
+                                        reason="orphan_closed",
+                                        exit_reason="ORPHAN",
+                                    )
+                                    logger.info("Orphan DB trade %s closed: P&L=%.2f%%", pair, pnl_pct)
+
+                    except Exception:
+                        logger.exception(
+                            "Failed to close orphan %s — MANUAL INTERVENTION NEEDED", pair,
+                        )
+                        try:
+                            await self.alerts.send_orphan_alert(
+                                pair=pair, side=side, contracts=amount,
+                                action="CLOSE FAILED — MANUAL CLOSE NEEDED",
+                                detail="Auto-close failed. Close manually on Bybit!",
+                            )
+                        except Exception:
+                            pass
+
+        # ── Step 3: Check for PHANTOM positions (bot has, exchange doesn't) ──
+        now = time.monotonic()
+        for pair, scalp in self._scalp_strategies.items():
+            if not scalp.in_position or not scalp.is_futures:
+                continue
+            if getattr(scalp, "_exchange_id", "delta") != "bybit":
+                continue  # skip non-Bybit strategies
+            epos = exchange_positions.get(pair)
+            if not epos:
+                if scalp.entry_time > 0:
+                    hold_seconds = now - scalp.entry_time
+                    if hold_seconds < 300:
+                        logger.debug(
+                            "PHANTOM SKIP: %s — opened %.0fs ago (< 5min)", pair, hold_seconds,
+                        )
+                        continue
+                if scalp._last_position_exit > 0:
+                    since_exit = now - scalp._last_position_exit
+                    if since_exit < 30:
+                        logger.debug(
+                            "PHANTOM SKIP: %s — trade closed %.0fs ago (< 30s)", pair, since_exit,
+                        )
+                        continue
+
+                logger.warning(
+                    "PHANTOM DETECTED: %s — bot thinks %s @ $%.2f "
+                    "but Bybit has NO position! Clearing.",
+                    pair, scalp.position_side, scalp.entry_price,
+                )
+                try:
+                    await self.alerts.send_orphan_alert(
+                        pair=pair,
+                        side=scalp.position_side or "unknown",
+                        contracts=scalp.entry_amount,
+                        action="PHANTOM CLEARED",
+                        detail=f"Bot thought {scalp.position_side} @ ${scalp.entry_price:.2f} but Bybit has nothing",
+                    )
+                except Exception:
+                    pass
+
+                scalp.in_position = False
+                scalp.position_side = None
+                scalp.entry_price = 0.0
+                scalp.entry_amount = 0.0
+                scalp._last_position_exit = now
+                scalp._phantom_cooldown_until = now + 60
+                ScalpStrategy._live_pnl.pop(pair, None)
+
+                phantom_pnl_for_rm = 0.0
+                if self.db.is_connected:
+                    open_trade = await self.db.get_open_trade(
+                        pair=pair, exchange="bybit", strategy="scalp",
+                    )
+                    if open_trade:
+                        order_id = open_trade.get("order_id", "")
+                        entry_px = float(open_trade.get("entry_price", 0) or 0)
+                        trade_lev = open_trade.get("leverage", config.bybit.leverage) or 1
+                        pos_type = open_trade.get("position_type", "long")
+                        phantom_amount = open_trade.get("amount", 0)
+                        phantom_exit = entry_px
+
+                        try:
+                            recent_trades = await self.bybit.fetch_my_trades(pair, limit=20)
+                            if recent_trades:
+                                close_side = "sell" if pos_type == "long" else "buy"
+                                closing_fills = [
+                                    t for t in recent_trades if t.get("side") == close_side
+                                ]
+                                if closing_fills:
+                                    last_fill = closing_fills[-1]
+                                    fill_price = float(last_fill.get("price", 0) or 0)
+                                    if fill_price > 0:
+                                        phantom_exit = fill_price
+                                        phantom_reason = "CLOSED_BY_EXCHANGE"
+                        except Exception as e:
+                            logger.debug("Could not fetch trade history for %s: %s", pair, e)
+
+                        if phantom_exit == entry_px:
+                            try:
+                                ticker = await self.bybit.fetch_ticker(pair)
+                                phantom_exit = float(ticker.get("last", 0) or 0) or entry_px
+                            except Exception:
+                                pass
+
+                        phantom_pnl, phantom_pnl_pct = calc_pnl(
+                            entry_px, phantom_exit, phantom_amount,
+                            pos_type, trade_lev, "bybit", pair,
+                        )
+                        phantom_pnl_for_rm = phantom_pnl
+                        phantom_reason = "phantom_cleared"
+                        phantom_exit_reason = "PHANTOM"
+                        if order_id:
+                            await self.db.close_trade(
+                                order_id, phantom_exit, phantom_pnl, phantom_pnl_pct,
+                                reason=phantom_reason,
+                                exit_reason=phantom_exit_reason,
+                            )
+                        logger.info(
+                            "Phantom trade %s closed: exit=$%.2f pnl=$%.4f (%.2f%%)",
+                            pair, phantom_exit, phantom_pnl, phantom_pnl_pct,
+                        )
+
+                self.risk_manager.record_close(pair, phantom_pnl_for_rm)
 
     async def _reconcile_delta_positions(self) -> None:
         """Reconcile Delta Exchange positions with bot memory.
@@ -2921,6 +3310,36 @@ class AlphaBot:
         else:
             self.delta_pairs = []  # no Delta pairs if no credentials
             logger.info("Delta credentials not set -- futures disabled")
+
+        # Bybit (primary futures exchange)
+        if config.bybit.api_key:
+            bybit_session = aiohttp.ClientSession(
+                connector=aiohttp.TCPConnector(
+                    resolver=aiohttp.resolver.ThreadedResolver(), ssl=True,
+                )
+            )
+            self.bybit = ccxt.bybit({
+                "apiKey": config.bybit.api_key,
+                "secret": config.bybit.secret,
+                "enableRateLimit": True,
+                "options": {"defaultType": "linear"},
+                "session": bybit_session,
+            })
+            if config.bybit.testnet:
+                self.bybit.set_sandbox_mode(True)
+            if config.bybit.leverage > 20:
+                logger.warning(
+                    "!!! LEVERAGE IS %dx — max supported is 20x !!! "
+                    "Set BYBIT_LEVERAGE=20 in .env",
+                    config.bybit.leverage,
+                )
+            logger.info(
+                "Bybit initialized (futures enabled, testnet=%s, leverage=%dx)",
+                config.bybit.testnet, config.bybit.leverage,
+            )
+        else:
+            self.bybit_pairs = []
+            logger.info("Bybit credentials not set -- futures disabled")
 
     async def _fetch_portfolio_usd(
         self, exchange: ccxt.Exchange | None,

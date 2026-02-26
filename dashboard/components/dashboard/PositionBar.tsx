@@ -11,7 +11,7 @@ import { formatNumber, cn } from '@/lib/utils';
 // Constants
 // ---------------------------------------------------------------------------
 
-export const TRAIL_ACTIVATION_PCT = 0.30; // must match engine TRAILING_ACTIVATE_PCT
+export const TRAIL_ACTIVATION_PCT = 0.15; // must match engine TRAIL_TIER_TABLE first tier
 export const DEFAULT_SL_PCT = 0.25;       // must match engine STOP_LOSS_PCT fallback
 
 // ---------------------------------------------------------------------------

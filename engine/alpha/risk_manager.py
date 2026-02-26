@@ -56,6 +56,7 @@ class RiskManager:
         # Per-exchange capital: strategies size off their own exchange balance
         self.binance_capital: float = 0.0
         self.delta_capital: float = 0.0
+        self.bybit_capital: float = 0.0
 
         self.open_positions: list[Position] = []
         self._pair_entry_ts: dict[str, float] = {}  # pair -> last entry approval time
@@ -68,22 +69,28 @@ class RiskManager:
         self._pause_reason: str = ""
         self._force_resumed = False  # bypass win-rate breaker until next win
 
-    def update_exchange_balances(self, binance: float | None, delta: float | None) -> None:
+    def update_exchange_balances(
+        self, binance: float | None, delta: float | None, bybit: float | None = None,
+    ) -> None:
         """Update per-exchange capital from live balance fetches."""
         if binance is not None:
             self.binance_capital = binance
         if delta is not None:
             self.delta_capital = delta
-        self.capital = self.binance_capital + self.delta_capital
+        if bybit is not None:
+            self.bybit_capital = bybit
+        self.capital = self.binance_capital + self.delta_capital + self.bybit_capital
         logger.info(
-            "Balances updated: Binance=$%.2f, Delta=$%.2f, Total=$%.2f",
-            self.binance_capital, self.delta_capital, self.capital,
+            "Balances updated: Binance=$%.2f, Delta=$%.2f, Bybit=$%.2f, Total=$%.2f",
+            self.binance_capital, self.delta_capital, self.bybit_capital, self.capital,
         )
 
     def get_exchange_capital(self, exchange_id: str) -> float:
         """Return total capital for a specific exchange."""
         if exchange_id == "delta":
             return self.delta_capital
+        if exchange_id == "bybit":
+            return self.bybit_capital
         return self.binance_capital
 
     def get_available_capital(self, exchange_id: str) -> float:

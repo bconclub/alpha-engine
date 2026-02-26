@@ -138,6 +138,7 @@ export function getExchangeLabel(exchange: Exchange): string {
   switch (exchange) {
     case 'binance': return 'Binance';
     case 'delta': return 'Delta';
+    case 'bybit': return 'Bybit';
     default: return exchange;
   }
 }
@@ -146,6 +147,7 @@ export function getExchangeColor(exchange: Exchange): string {
   switch (exchange) {
     case 'binance': return '#f0b90b';
     case 'delta': return '#00d2ff';
+    case 'bybit': return '#f7a600';
     default: return '#6b7280';
   }
 }

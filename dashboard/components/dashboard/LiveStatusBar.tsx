@@ -83,6 +83,7 @@ function MiniSparkline({ data, color }: { data: number[]; color: string }) {
 export function LiveStatusBar() {
   const { botStatus, isConnected, pnlByExchange, trades, dailyPnL } = useSupabase();
 
+  const bybitConnected = botStatus?.bybit_connected || (Number(botStatus?.bybit_balance ?? 0) > 0) || isConnected;
   const deltaConnected = botStatus?.delta_connected || (Number(botStatus?.delta_balance ?? 0) > 0) || isConnected;
   const botState = botStatus?.bot_state ?? (isConnected ? 'running' : 'paused');
 
@@ -109,12 +110,14 @@ export function LiveStatusBar() {
     return `${Math.floor(elapsed / 3600)}h ${Math.floor((elapsed % 3600) / 60)}m`;
   }, [regimeSince]);
 
+  const bybitPnl = pnlByExchange.find((e) => e.exchange === 'bybit');
   const deltaPnl = pnlByExchange.find((e) => e.exchange === 'delta');
 
+  const bybitBalance = Number(botStatus?.bybit_balance ?? 0);
   const deltaBalance = Number(botStatus?.delta_balance ?? 0);
   const deltaBalanceInr = botStatus?.delta_balance_inr;
 
-  const totalCapital = deltaBalance > 0 ? deltaBalance : (botStatus?.capital || 0);
+  const totalCapital = bybitBalance > 0 ? bybitBalance : (deltaBalance > 0 ? deltaBalance : (botStatus?.capital || 0));
   const inrRate = botStatus?.inr_usd_rate ?? 86.5;
   const capitalInr = Math.round(totalCapital * inrRate);
 
@@ -200,20 +203,20 @@ export function LiveStatusBar() {
 
         {/* Row 1 — Balance cards */}
         <div className="grid grid-cols-2 gap-2">
-          {/* Delta */}
+          {/* Bybit */}
           <div className="bg-zinc-900/50 border border-zinc-800 rounded-lg px-2.5 py-2">
             <div className="flex items-center gap-1 mb-1">
               <span className={cn(
                 'w-1.5 h-1.5 rounded-full shrink-0',
-                deltaConnected && !isStale ? 'bg-[#00c853] animate-pulse' : 'bg-red-500',
+                bybitConnected && !isStale ? 'bg-[#00c853] animate-pulse' : 'bg-red-500',
               )} />
-              <span className="text-[10px] font-semibold text-[#00d2ff] truncate">DELTA</span>
+              <span className="text-[10px] font-semibold text-[#f7a600] truncate">BYBIT</span>
             </div>
-            {deltaBalance > 0 ? (
-              <span className="font-mono text-sm text-white">{formatCurrency(deltaBalance)}</span>
-            ) : deltaPnl ? (
-              <span className={cn('font-mono text-xs', deltaPnl.total_pnl >= 0 ? 'text-[#00c853]' : 'text-[#ff1744]')}>
-                {formatPnL(deltaPnl.total_pnl)}
+            {bybitBalance > 0 ? (
+              <span className="font-mono text-sm text-white">{formatCurrency(bybitBalance)}</span>
+            ) : bybitPnl ? (
+              <span className={cn('font-mono text-xs', bybitPnl.total_pnl >= 0 ? 'text-[#00c853]' : 'text-[#ff1744]')}>
+                {formatPnL(bybitPnl.total_pnl)}
               </span>
             ) : (
               <span className="text-[10px] text-zinc-500">No data</span>
@@ -342,30 +345,27 @@ export function LiveStatusBar() {
       <div className="hidden md:flex md:flex-row md:items-center md:justify-between gap-4">
         {/* Exchange Cards */}
         <div className="flex gap-3 flex-1 min-w-0">
-          {/* Delta Card */}
+          {/* Bybit Card */}
           <div className="flex-1 bg-zinc-900/50 border border-zinc-800 rounded-lg px-4 py-3">
             <div className="flex items-center gap-2 mb-1">
               <span
                 className={cn(
                   'w-2 h-2 rounded-full',
-                  deltaConnected && !isStale ? 'bg-[#00c853] animate-pulse' : 'bg-red-500',
+                  bybitConnected && !isStale ? 'bg-[#00c853] animate-pulse' : 'bg-red-500',
                 )}
               />
-              <span className="text-sm font-semibold text-[#00d2ff]">DELTA</span>
+              <span className="text-sm font-semibold text-[#f7a600]">BYBIT</span>
               <span className="text-[10px] text-zinc-500">(Futures)</span>
             </div>
-            {deltaBalance > 0 ? (
+            {bybitBalance > 0 ? (
               <div className="flex items-baseline gap-2 min-w-0 flex-wrap">
-                <span className="font-mono text-lg text-white truncate">{formatCurrency(deltaBalance)}</span>
-                {deltaBalanceInr != null && (
-                  <span className="text-[10px] text-zinc-500 shrink-0">~{deltaBalanceInr.toLocaleString()}</span>
-                )}
+                <span className="font-mono text-lg text-white truncate">{formatCurrency(bybitBalance)}</span>
               </div>
-            ) : deltaPnl ? (
+            ) : bybitPnl ? (
               <div className="flex items-center gap-2 text-xs">
                 <span className="text-zinc-500">P&L:</span>
-                <span className={cn('font-mono', deltaPnl.total_pnl >= 0 ? 'text-[#00c853]' : 'text-[#ff1744]')}>
-                  {formatPnL(deltaPnl.total_pnl)}
+                <span className={cn('font-mono', bybitPnl.total_pnl >= 0 ? 'text-[#00c853]' : 'text-[#ff1744]')}>
+                  {formatPnL(bybitPnl.total_pnl)}
                 </span>
               </div>
             ) : (
@@ -459,7 +459,7 @@ export function LiveStatusBar() {
               <span className="text-[10px] text-zinc-500 font-mono">{'\u20B9'}{capitalInr.toLocaleString('en-IN')}</span>
             )}
           </div>
-          {deltaBalance > 0 && openPositionCount > 0 && (
+          {(bybitBalance > 0 || deltaBalance > 0) && openPositionCount > 0 && (
             <span className="text-[10px] font-mono text-amber-400">{openPositionCount} open</span>
           )}
           <div className="flex items-center gap-3 mt-1">

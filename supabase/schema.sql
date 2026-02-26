@@ -355,7 +355,13 @@ select
     trail_stop_price,
     current_pnl,
     current_price,
-    peak_pnl
+    peak_pnl,
+    fade_timer_active,
+    fade_elapsed,
+    fade_required,
+    dead_timer_active,
+    dead_elapsed,
+    dead_required
 from   public.trades
 where  status = 'open'
 order  by opened_at desc;

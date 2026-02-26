@@ -353,7 +353,19 @@ select
     entry_price, amount, cost,
     strategy, exchange, leverage, position_type,
     reason, order_id,
-    round((cost * leverage)::numeric, 8) as effective_exposure
+    round((cost * leverage)::numeric, 8) as effective_exposure,
+    stop_loss, take_profit,
+    position_state,
+    trail_stop_price,
+    current_pnl,
+    current_price,
+    peak_pnl,
+    fade_timer_active,
+    fade_elapsed,
+    fade_required,
+    dead_timer_active,
+    dead_elapsed,
+    dead_required
 from   public.trades
 where  status = 'open'
 order  by opened_at desc;

@@ -104,6 +104,35 @@ class DeltaConfig:
 
 
 @dataclass(frozen=True)
+class BybitConfig:
+    api_key: str = field(default_factory=lambda: _env("BYBIT_API_KEY"))
+    secret: str = field(default_factory=lambda: _env("BYBIT_API_SECRET"))
+    testnet: bool = field(default_factory=lambda: _env_bool("BYBIT_TESTNET", False))
+    leverage: int = field(default_factory=lambda: _env_int("BYBIT_LEVERAGE", 20))
+    pairs: list[str] = field(default_factory=lambda: _env_list("BYBIT_PAIRS"))
+    enable_shorting: bool = field(default_factory=lambda: _env_bool("ENABLE_SHORTING", True))
+
+    # Bybit fee structure (no GST — global exchange)
+    taker_fee: float = field(default_factory=lambda: _env_float("BYBIT_TAKER_FEE", 0.00055))  # 0.055% per side
+    maker_fee: float = field(default_factory=lambda: _env_float("BYBIT_MAKER_FEE", 0.0002))   # 0.02% per side
+
+    @property
+    def taker_round_trip(self) -> float:
+        """Round-trip taker fee (both sides): 0.055% × 2 = 0.11%."""
+        return self.taker_fee * 2
+
+    @property
+    def maker_round_trip(self) -> float:
+        """Round-trip maker fee (both sides): 0.02% × 2 = 0.04%."""
+        return self.maker_fee * 2
+
+    @property
+    def mixed_round_trip(self) -> float:
+        """Mixed round-trip: maker entry + taker exit = 0.02% + 0.055% = 0.075%."""
+        return self.maker_fee + self.taker_fee
+
+
+@dataclass(frozen=True)
 class SupabaseConfig:
     url: str = field(default_factory=lambda: _env("SUPABASE_URL"))
     key: str = field(default_factory=lambda: _env("SUPABASE_KEY"))
@@ -159,6 +188,7 @@ class Config:
     binance: BinanceConfig = field(default_factory=BinanceConfig)
     kucoin: KuCoinConfig = field(default_factory=KuCoinConfig)
     delta: DeltaConfig = field(default_factory=DeltaConfig)
+    bybit: BybitConfig = field(default_factory=BybitConfig)
     supabase: SupabaseConfig = field(default_factory=SupabaseConfig)
     telegram: TelegramConfig = field(default_factory=TelegramConfig)
     trading: TradingConfig = field(default_factory=TradingConfig)

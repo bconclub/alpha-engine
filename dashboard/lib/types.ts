@@ -1,4 +1,4 @@
-export type Exchange = 'binance' | 'delta';  // binance kept for historical trade compat
+export type Exchange = 'binance' | 'delta' | 'bybit';
 export type PositionType = 'spot' | 'long' | 'short';
 
 // Strategy values as stored in the database (lowercase)
@@ -119,8 +119,10 @@ export interface BotStatus {
   binance_balance?: number;
   delta_balance?: number;
   delta_balance_inr?: number | null;
+  bybit_balance?: number;
   binance_connected?: boolean;
   delta_connected?: boolean;
+  bybit_connected?: boolean;
   bot_state?: 'running' | 'paused' | 'error';
   uptime_seconds?: number;
   shorting_enabled?: boolean;
@@ -148,8 +150,8 @@ export interface BotStatus {
     paused: { is_paused: boolean; reason: string | null };
     positions: { open: number; max: number; slots_free: number; pairs: string[] };
     balance: {
-      delta: number | null; binance: number | null;
-      delta_min_trade: boolean; binance_min_trade: boolean;
+      delta: number | null; binance: number | null; bybit: number | null;
+      delta_min_trade: boolean; binance_min_trade: boolean; bybit_min_trade: boolean;
     };
     pairs: Record<string, {
       skip_reason: string;
@@ -280,7 +282,7 @@ export interface PnLByPair {
   total_pnl: number;
 }
 
-export type ExchangeFilter = 'all' | 'delta';  // binance removed — Delta only for now
+export type ExchangeFilter = 'all' | 'bybit' | 'delta';
 
 export type ActivityEventType =
   | 'trade_open' | 'trade_close' | 'short_open'

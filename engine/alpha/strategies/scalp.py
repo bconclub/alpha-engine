@@ -63,10 +63,7 @@ ENTRY — TWO-TIER SIGNAL SYSTEM:
     - Counter-momentum (0.15%+) → T1_REJECTED (zero cost)
     - T1 signals fade → T1_EXPIRED (zero cost)
     - 30s timeout → T1_TIMEOUT (zero cost)
-  DYNAMIC LEVERAGE (per-trade based on conviction):
-    - ULTRA 50x: 4/4 signals + momentum >= 0.40% + RSI extreme (<30 or >70)
-    - HIGH 30x: 4/4 + momentum >= 0.30% OR 3/4 + RSI override
-    - STANDARD 20x: all other valid entries (minimum)
+  LEVERAGE: Fixed 20x for all entries (capped — 50x/30x removed for capital safety)
   OVERRIDE: RSI < 30 or > 70 → enter immediately (strong extreme)
   SETUP: Each entry classified by dominant signal pattern
 
@@ -76,8 +73,8 @@ EXIT — 3-PHASE SYSTEM (AGGRESSIVE PROFIT LOCK):
     - EXCEPTION: if peak PnL >= +0.5%, skip to Phase 2 immediately
   PHASE 2 (30s-10 min): WATCH + TRAIL
     - If PnL > +0.30% → breakeven at entry+fees (net breakeven protection)
-    - If PnL > +0.15% → activate trailing (0.15% tight distance)
-    - Trail tiers tightened: +2%=0.40%, +3%=0.50%, +5%=0.75%
+    - If PnL > +0.15% → activate trailing (0.10% tight distance — early lock)
+    - Trail tiers tightened: +2%=0.50%, +3%=0.70%
     - Pullback exit at 30% retracement from peak
   PHASE 3 (10-30 min): TRAIL OR CUT
     - Trailing active → let it trail with tight distance
@@ -261,6 +258,7 @@ class ScalpStrategy(BaseStrategy):
     # When peak crosses a tier, trail_stop_price = peak * (1 - trail_dist/100)
     # SL is max(hard_sl, trail_stop) for longs — only ever tightens.
     TRAIL_TIER_TABLE: list[tuple[float, float]] = [
+        (0.15, 0.10),   # peak +0.15% → trail 0.10% from peak (early lock)
         (0.30, 0.15),   # peak +0.30% → trail 0.15% from peak (keep)
         (0.35, 0.20),   # peak +0.35% → trail 0.20% from peak (keep)
         (0.50, 0.25),   # peak +0.50% → trail 0.25% from peak (keep)
@@ -483,13 +481,18 @@ class ScalpStrategy(BaseStrategy):
         exchange: Any = None,
         is_futures: bool = False,
         market_analyzer: Any = None,
+        exchange_id: str | None = None,
     ) -> None:
         super().__init__(pair, executor, risk_manager)
         self.trade_exchange: ccxt.Exchange | None = exchange
         self.is_futures = is_futures
-        self.leverage: int = min(config.delta.leverage, 50) if is_futures else 1  # CAP at 50x
+        self._exchange_id: str = exchange_id or ("delta" if is_futures else "binance")
+        # Leverage and fees depend on exchange
+        if self._exchange_id == "bybit":
+            self.leverage: int = min(config.bybit.leverage, 20) if is_futures else 1
+        else:
+            self.leverage: int = min(config.delta.leverage, 20) if is_futures else 1
         self.capital_pct: float = self.CAPITAL_PCT_FUTURES if is_futures else self.SPOT_CAPITAL_PCT
-        self._exchange_id: str = "delta" if is_futures else "binance"
         self._market_analyzer = market_analyzer  # for 15m trend direction
 
         base_asset = pair.split("/")[0] if "/" in pair else pair.replace("USD", "").replace(":USD", "")
@@ -615,7 +618,10 @@ class ScalpStrategy(BaseStrategy):
             pos_info = f" | RESTORED {self.position_side} @ ${self.entry_price:.2f}"
         soul_msg = _soul_check("quality")
         # Log fee structure on startup
-        if self._exchange_id == "delta":
+        if self._exchange_id == "bybit":
+            rt_mixed = config.bybit.mixed_round_trip * 100
+            rt_taker = config.bybit.taker_round_trip * 100
+        elif self._exchange_id == "delta":
             rt_mixed = config.delta.mixed_round_trip * 100
             rt_taker = config.delta.taker_round_trip * 100
         else:
@@ -2036,23 +2042,14 @@ class ScalpStrategy(BaseStrategy):
         return None
 
     def _calculate_leverage(self, signal_count: int, momentum_60s: float, rsi_now: float) -> int:
-        """Dynamic leverage based on signal conviction.
+        """Dynamic leverage — capped at 20x for all entries.
 
-        ULTRA (50x): 4/4 signals + momentum >= 0.40% + RSI extreme (<30 or >70)
-        HIGH  (30x): 4/4 signals + momentum >= 0.30%
-                      OR 3/4 signals + RSI override (<30 or >70)
-        STANDARD (20x): everything else that passes entry gate (minimum)
+        50x SL at -0.40% = -20% capital (coin flip to ruin).
+        20x SL at -0.40% = -8% capital (survivable).
         """
         if not self.is_futures:
             return 1
-        abs_mom = abs(momentum_60s)
-        rsi_extreme = rsi_now < 30 or rsi_now > 70
-        if signal_count >= 4 and abs_mom >= 0.40 and rsi_extreme:
-            return 50
-        elif (signal_count >= 4 and abs_mom >= 0.30) or (signal_count >= 3 and rsi_extreme):
-            return 30
-        else:
-            return 20
+        return min(self.leverage, 20)
 
     # ======================================================================
     # EXIT LOGIC — RIDE WINNERS, CUT LOSERS
@@ -2273,7 +2270,7 @@ class ScalpStrategy(BaseStrategy):
                     )
                 # Breakeven safety: if peak was high but we're back near entry
                 if self._peak_unrealized_pnl >= self.MOVE_SL_TO_ENTRY_PCT:
-                    fee_adj = config.delta.mixed_round_trip
+                    fee_adj = config.bybit.mixed_round_trip if self._exchange_id == "bybit" else config.delta.mixed_round_trip
                     if side == "long":
                         be_price = self.entry_price * (1 + fee_adj)
                         at_be = current_price <= be_price
@@ -3391,8 +3388,10 @@ class ScalpStrategy(BaseStrategy):
         gross_pnl = notional * (pnl_pct / 100)
 
         # Fee estimation: maker entry + taker exit (mixed round-trip)
-        # Delta India fees include 18% GST
-        if self._exchange_id == "delta":
+        if self._exchange_id == "bybit":
+            entry_fee_rate = config.bybit.maker_fee    # 0.02% (limit entry, no GST)
+            exit_fee_rate = config.bybit.taker_fee     # 0.055% (market exit, no GST)
+        elif self._exchange_id == "delta":
             entry_fee_rate = config.delta.maker_fee_with_gst   # 0.024% (limit entry)
             exit_fee_rate = config.delta.taker_fee_with_gst    # 0.059% (market exit)
         else:

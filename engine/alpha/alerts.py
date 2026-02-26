@@ -89,6 +89,8 @@ class AlertManager:
         shorting_enabled: bool,
         binance_balance: float | None = None,
         delta_balance: float | None = None,
+        bybit_pairs: list[str] | None = None,
+        bybit_balance: float | None = None,
     ) -> None:
         """Clean startup banner.
 
@@ -100,22 +102,26 @@ class AlertManager:
         🕐 2026-02-16 18:41 IST
         ━━━━━━━━━━━━━━━━━━━━
         """
-        # Clean pair names: "ETH/USD:USD" → "ETH", "BTC/USDT" → "BTC"
+        # Clean pair names: "ETH/USD:USD" → "ETH", "BTC/USDT:USDT" → "BTC"
         all_bases = sorted(
             {p.split("/")[0] if "/" in p else p for p in binance_pairs}
             | {p.split("/")[0] if "/" in p else p for p in delta_pairs}
+            | {p.split("/")[0] if "/" in p else p for p in (bybit_pairs or [])}
         )
         pairs_str = " | ".join(all_bases) if all_bases else "None"
 
         shorting = "Yes" if shorting_enabled else "No"
         now = ist_now().strftime("%Y-%m-%d %H:%M IST")
-        leverage = config.delta.leverage
+        leverage = config.bybit.leverage
         engine_ver = get_version()
+
+        # Primary balance = Bybit (futures), fallback to Delta, then total
+        primary_balance = bybit_balance if bybit_balance is not None else (delta_balance if delta_balance is not None else capital)
 
         msg = (
             f"{LINE}\n"
             f"\U0001f7e2 <b>ALPHA v{engine_ver}</b>\n"
-            f"\U0001f4b0 <code>{format_usd(delta_balance if delta_balance is not None else capital)}</code>\n"
+            f"\U0001f4b0 <code>{format_usd(primary_balance)}</code>\n"
             f"\u26a1 <code>{pairs_str}</code>\n"
             f"\U0001f4aa <code>{leverage}x</code> | Shorting: <code>{shorting}</code>\n"
             f"\U0001f552 <code>{now}</code>\n"
@@ -611,15 +617,18 @@ class AlertManager:
         capital: float,
         binance_balance: float | None = None,
         delta_balance: float | None = None,
+        bybit_balance: float | None = None,
     ) -> None:
         """Routes to send_startup with exchange balances."""
         await self.send_startup(
             capital=capital,
             binance_pairs=config.trading.pairs,
             delta_pairs=config.delta.pairs if config.delta.api_key else [],
-            shorting_enabled=config.delta.enable_shorting,
+            bybit_pairs=config.bybit.pairs if config.bybit.api_key else [],
+            shorting_enabled=config.bybit.enable_shorting,
             binance_balance=binance_balance,
             delta_balance=delta_balance,
+            bybit_balance=bybit_balance,
         )
 
     async def send_bot_stopped(self, reason: str) -> None:

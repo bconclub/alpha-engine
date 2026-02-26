@@ -174,10 +174,12 @@ class TradeExecutor:
         delta_exchange: ccxt.Exchange | None = None,
         risk_manager: Any | None = None,
         options_exchange: ccxt.Exchange | None = None,
+        bybit_exchange: ccxt.Exchange | None = None,
     ) -> None:
         self.exchange = exchange                      # Binance (primary)
         self.delta_exchange = delta_exchange           # Delta (optional, futures)
         self.options_exchange = options_exchange       # Delta options (optional)
+        self.bybit_exchange = bybit_exchange           # Bybit (optional, futures)
         self.db = db  # alpha.db.Database
         self.alerts = alerts  # alpha.alerts.AlertManager
         self.risk_manager = risk_manager              # alpha.risk_manager.RiskManager
@@ -192,6 +194,9 @@ class TradeExecutor:
         # Delta: taker 0.05% + 18% GST = 0.059%, maker 0.02% + 18% GST = 0.024%
         self._delta_taker_fee: float = config.delta.taker_fee_with_gst  # 0.059% per side
         self._delta_maker_fee: float = config.delta.maker_fee_with_gst  # 0.024% per side
+        # Bybit: no GST, raw rates are effective
+        self._bybit_taker_fee: float = config.bybit.taker_fee   # 0.055% per side
+        self._bybit_maker_fee: float = config.bybit.maker_fee   # 0.02% per side
         self._binance_taker_fee: float = 0.001  # default 0.1%
 
     @staticmethod
@@ -203,10 +208,13 @@ class TradeExecutor:
         """Return the correct exchange instance for a signal.
 
         Routes option symbols (-C/-P suffix) to the options exchange,
-        Delta futures to delta_exchange, and everything else to Binance.
+        Bybit futures to bybit_exchange, Delta futures to delta_exchange,
+        and everything else to Binance.
         """
         if self._is_option_symbol(signal.pair) and self.options_exchange:
             return self.options_exchange
+        if signal.exchange_id == "bybit" and self.bybit_exchange:
+            return self.bybit_exchange
         if signal.exchange_id == "delta" and self.delta_exchange:
             return self.delta_exchange
         return self.exchange  # default: Binance
@@ -317,6 +325,34 @@ class TradeExecutor:
                 signal.pair, e,
             )
             # On fetch failure, return the stored amount to avoid blocking exit
+            return signal.amount
+
+    async def _get_bybit_position_size(self, signal: Signal) -> float | None:
+        """Fetch actual position size from Bybit for exit validation.
+
+        Returns the coin amount open on the exchange, or None if
+        no position exists (already closed/liquidated).
+        Bybit uses coin-denominated amounts (not integer contracts).
+        """
+        if not self.bybit_exchange:
+            return None
+        try:
+            positions = await self.bybit_exchange.fetch_positions([signal.pair])
+            for pos in positions:
+                symbol = pos.get("symbol", "")
+                contracts = abs(float(pos.get("contracts", 0) or 0))
+                if symbol == signal.pair and contracts > 0:
+                    logger.info(
+                        "[%s] Bybit position found: %.6f coins (%s)",
+                        signal.pair, contracts, pos.get("side", "?"),
+                    )
+                    return contracts
+            return None
+        except Exception as e:
+            logger.warning(
+                "[%s] Could not fetch Bybit position: %s — using stored amount",
+                signal.pair, e,
+            )
             return signal.amount
 
     async def _mark_position_gone(self, signal: Signal) -> None:
@@ -448,6 +484,7 @@ class TradeExecutor:
 
     async def load_market_limits(
         self, pairs: list[str], delta_pairs: list[str] | None = None,
+        bybit_pairs: list[str] | None = None,
     ) -> None:
         """Pre-load minimum order sizes for all tracked pairs on each exchange."""
         # Binance spot
@@ -509,6 +546,41 @@ class TradeExecutor:
             except Exception:
                 logger.exception("Failed to load Delta market limits")
 
+        # Bybit futures
+        if self.bybit_exchange and bybit_pairs:
+            try:
+                await self.bybit_exchange.load_markets()
+                for pair in bybit_pairs:
+                    market = self.bybit_exchange.markets.get(pair)
+                    if market:
+                        limits = market.get("limits", {})
+                        cost_limits = limits.get("cost", {})
+                        amount_limits = limits.get("amount", {})
+                        self._min_notional[pair] = cost_limits.get("min", 0) or 0
+                        self._min_amount[pair] = amount_limits.get("min", 0) or 0
+                        # Bybit: no GST, raw rates are effective
+                        taker = market.get("taker")
+                        maker = market.get("maker")
+                        if taker is not None:
+                            self._bybit_taker_fee = float(taker)
+                        if maker is not None:
+                            self._bybit_maker_fee = float(maker)
+                        logger.debug(
+                            "[%s] Bybit min notional=$%.2f, min amount=%.8f",
+                            pair, self._min_notional[pair], self._min_amount[pair],
+                        )
+                    else:
+                        logger.warning("Market info not found for %s on Bybit", pair)
+                logger.info(
+                    "Bybit fee rates (no GST): taker=%.6f (%.4f%%), maker=%.6f (%.4f%%), "
+                    "RT mixed=%.4f%%",
+                    self._bybit_taker_fee, self._bybit_taker_fee * 100,
+                    self._bybit_maker_fee, self._bybit_maker_fee * 100,
+                    (self._bybit_maker_fee + self._bybit_taker_fee) * 100,
+                )
+            except Exception:
+                logger.exception("Failed to load Bybit market limits")
+
     def _is_exit_order(self, signal: Signal) -> bool:
         """Determine if this signal is closing/exiting an existing position."""
         return signal.reduce_only or (
@@ -540,7 +612,7 @@ class TradeExecutor:
         # For Delta futures: amount is already leverage-adjusted in the signal,
         # so order_value = notional. Skip min notional for futures — Delta
         # minimums are much lower than Binance's $5.
-        is_futures = signal.exchange_id == "delta" and signal.leverage > 1
+        is_futures = signal.exchange_id in ("delta", "bybit") and signal.leverage > 1
         if is_futures:
             logger.debug(
                 "[%s] Futures order: collateral=$%.2f, notional=$%.2f (skipping min notional check)",
@@ -656,12 +728,40 @@ class TradeExecutor:
                     exchange_id=signal.exchange_id,
                 )
 
-        # ── DELTA FUTURES EXIT: verify actual position on exchange ────────
+        # ── FUTURES EXIT: verify actual position on exchange ────────────
         # Fetch real position size to avoid amount mismatch errors.
         # If position is already gone on exchange, mark closed in DB.
         # Skip for options_scalp — options positions are on a separate exchange,
         # fetch_positions (futures) won't find them.
         is_options = signal.strategy == StrategyName.OPTIONS_SCALP
+
+        # Bybit exit verification (coin amounts, no contract conversion)
+        if is_exit and signal.exchange_id == "bybit" and signal.reduce_only:
+            actual_amount = await self._get_bybit_position_size(signal)
+            if actual_amount is None:
+                logger.warning(
+                    "[%s] No position found on Bybit — marking closed in DB",
+                    signal.pair,
+                )
+                await self._mark_position_gone(signal)
+                return None
+            elif abs(actual_amount - signal.amount) > 1e-8:
+                logger.info(
+                    "[%s] Bybit exit: stored=%.8f, actual=%.8f — using actual",
+                    signal.pair, signal.amount, actual_amount,
+                )
+                signal = Signal(
+                    side=signal.side, price=signal.price,
+                    amount=float(actual_amount),
+                    order_type=signal.order_type, reason=signal.reason,
+                    strategy=signal.strategy, pair=signal.pair,
+                    stop_loss=signal.stop_loss, take_profit=signal.take_profit,
+                    metadata=signal.metadata,
+                    leverage=signal.leverage, position_type=signal.position_type,
+                    reduce_only=signal.reduce_only, exchange_id=signal.exchange_id,
+                )
+
+        # Delta exit verification (integer contracts)
         if is_exit and signal.exchange_id == "delta" and signal.reduce_only and not is_options:
             actual_contracts = await self._get_delta_position_size(signal)
             if actual_contracts is None:
@@ -720,7 +820,7 @@ class TradeExecutor:
         exchange = self._get_exchange(signal)
 
         # Log with collateral and notional for clarity
-        is_futures = signal.leverage > 1 and signal.exchange_id == "delta"
+        is_futures = signal.leverage > 1 and signal.exchange_id in ("delta", "bybit")
         notional = signal.price * signal.amount
         collateral = notional / signal.leverage if is_futures else notional
 
@@ -767,7 +867,7 @@ class TradeExecutor:
         _exit_reason = _extract_exit_reason(signal.reason) if is_exit else ""
         _use_limit_exit = (
             is_exit
-            and signal.exchange_id == "delta"
+            and signal.exchange_id in ("delta", "bybit")
             and _exit_reason not in _URGENT_EXITS
         )
         limit_order_id: str | None = None  # track limit order for recovery in market retry
@@ -805,7 +905,10 @@ class TradeExecutor:
                     # Before cancelling, verify position still exists on exchange.
                     # The limit order may have filled between our fetch_order and now,
                     # or the order status might be stale.
-                    pos_check = await self._get_delta_position_size(signal)
+                    if signal.exchange_id == "bybit":
+                        pos_check = await self._get_bybit_position_size(signal)
+                    else:
+                        pos_check = await self._get_delta_position_size(signal)
                     if pos_check is None:
                         # Position is GONE — the limit order DID fill (or was liquidated).
                         # Re-fetch the order to get actual fill price.
@@ -1048,7 +1151,9 @@ class TradeExecutor:
             cost = notional / signal.leverage if is_futures else notional
 
             # Calculate entry fee for storage
-            if signal.exchange_id == "delta":
+            if signal.exchange_id == "bybit":
+                entry_fee_rate = self._bybit_taker_fee
+            elif signal.exchange_id == "delta":
                 entry_fee_rate = self._delta_taker_fee  # entries are always taker (market)
             else:
                 entry_fee_rate = self._binance_taker_fee
@@ -1150,7 +1255,11 @@ class TradeExecutor:
             exchange_id = open_trade.get("exchange", signal.exchange_id)
 
             # Determine fee rates for this trade
-            if exchange_id == "delta":
+            if exchange_id == "bybit":
+                entry_order_type = open_trade.get("order_type", "market")
+                entry_fee_rate = self._bybit_maker_fee if entry_order_type == "limit" else self._bybit_taker_fee
+                exit_fee_rate = self._bybit_taker_fee
+            elif exchange_id == "delta":
                 entry_order_type = open_trade.get("order_type", "market")
                 entry_fee_rate = self._delta_maker_fee if entry_order_type == "limit" else self._delta_taker_fee
                 exit_fee_rate = self._delta_taker_fee  # exits always market
