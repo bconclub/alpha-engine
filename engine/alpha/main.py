@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import datetime as _dt
+import os
 import signal
 import sys
 import time
@@ -996,6 +997,12 @@ class AlphaBot:
 
     async def _save_status(self) -> None:
         """Persist bot state to Supabase for crash recovery + dashboard display."""
+        try:
+            await self._save_status_inner()
+        except Exception:
+            logger.exception("[STATUS] _save_status failed — dashboard may show stale data")
+
+    async def _save_status_inner(self) -> None:
         rm = self.risk_manager
 
         # Build per-pair info (scalp + options overlays)
@@ -1021,10 +1028,17 @@ class AlphaBot:
         last = self.analyzer.last_analysis if self.analyzer else None
 
         # Fetch exchange balances and update per-exchange capital
-        binance_bal = await self._fetch_portfolio_usd(self.binance)
-        delta_bal = await self._fetch_portfolio_usd(self.delta) if self.delta else None
-        bybit_bal = await self._fetch_portfolio_usd(self.bybit) if self.bybit else None
-        kraken_bal = await self._fetch_portfolio_usd(self.kraken) if self.kraken else None
+        binance_bal: float | None = None
+        delta_bal: float | None = None
+        bybit_bal: float | None = None
+        kraken_bal: float | None = None
+        try:
+            binance_bal = await self._fetch_portfolio_usd(self.binance)
+            delta_bal = await self._fetch_portfolio_usd(self.delta) if self.delta else None
+            bybit_bal = await self._fetch_portfolio_usd(self.bybit) if self.bybit else None
+            kraken_bal = await self._fetch_portfolio_usd(self.kraken) if self.kraken else None
+        except Exception:
+            logger.exception("[STATUS] Balance fetch failed — saving status with partial data")
         rm.update_exchange_balances(binance_bal, delta_bal, bybit_bal, kraken_bal)
 
         # Fetch raw INR balance for dashboard display
@@ -1048,7 +1062,11 @@ class AlphaBot:
 
         # Query ACTUAL P&L from trades table (source of truth)
         # Never trust in-memory calculations for dashboard display
-        trade_stats = await self.db.get_trade_stats()
+        try:
+            trade_stats = await self.db.get_trade_stats()
+        except Exception:
+            logger.warning("[STATUS] get_trade_stats failed — using defaults")
+            trade_stats = {"total_pnl": 0, "win_rate": 0, "total_trades": 0}
 
         status = {
             "total_pnl": trade_stats["total_pnl"],
@@ -3972,8 +3990,26 @@ class AlphaBot:
         return rate
 
 
+def _acquire_lockfile() -> Any:
+    """Prevent duplicate bot processes via PID lockfile (Linux/macOS only)."""
+    if sys.platform == "win32":
+        return None
+    import fcntl
+    lock_path = "/tmp/alpha_bot.lock"
+    lock_file = open(lock_path, "w")  # noqa: SIM115
+    try:
+        fcntl.flock(lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        lock_file.write(str(os.getpid()))
+        lock_file.flush()
+        return lock_file  # keep reference so GC doesn't close it
+    except BlockingIOError:
+        print(f"FATAL: Alpha already running (lockfile {lock_path}). Exiting.")
+        sys.exit(1)
+
+
 def main() -> None:
     """Entry point."""
+    _lock = _acquire_lockfile()  # noqa: F841 — must keep reference
     bot = AlphaBot()
     if sys.platform == "win32":
         asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())

@@ -83,9 +83,9 @@ function MiniSparkline({ data, color }: { data: number[]; color: string }) {
 export function LiveStatusBar() {
   const { botStatus, isConnected, pnlByExchange, trades, dailyPnL } = useSupabase();
 
-  const bybitConnected = botStatus?.bybit_connected || (Number(botStatus?.bybit_balance ?? 0) > 0) || isConnected;
-  const deltaConnected = botStatus?.delta_connected || (Number(botStatus?.delta_balance ?? 0) > 0) || isConnected;
-  const krakenConnected = botStatus?.kraken_connected || (Number(botStatus?.kraken_balance ?? 0) > 0) || isConnected;
+  const bybitConnected = botStatus?.bybit_connected || (Number(botStatus?.bybit_balance ?? 0) > 0);
+  const deltaConnected = botStatus?.delta_connected || (Number(botStatus?.delta_balance ?? 0) > 0);
+  const krakenConnected = botStatus?.kraken_connected || (Number(botStatus?.kraken_balance ?? 0) > 0);
   const botState = botStatus?.bot_state ?? (isConnected ? 'running' : 'paused');
 
   // ── Market Regime ──────────────────────────────────────────────
@@ -120,7 +120,8 @@ export function LiveStatusBar() {
   const krakenBalance = Number(botStatus?.kraken_balance ?? 0);
   const deltaBalanceInr = botStatus?.delta_balance_inr;
 
-  const totalCapital = krakenBalance > 0 ? krakenBalance : (bybitBalance > 0 ? bybitBalance : (deltaBalance > 0 ? deltaBalance : (botStatus?.capital || 0)));
+  const exchangeSum = bybitBalance + deltaBalance + krakenBalance;
+  const totalCapital = exchangeSum > 0 ? exchangeSum : (botStatus?.capital || 0);
   const inrRate = botStatus?.inr_usd_rate ?? 86.5;
   const capitalInr = Math.round(totalCapital * inrRate);
 
@@ -191,10 +192,25 @@ export function LiveStatusBar() {
   }, [trades]);
 
   const lastHeartbeat = botStatus?.timestamp;
-  const isStale = useMemo(() => {
-    if (!lastHeartbeat) return true;
-    return Date.now() - new Date(lastHeartbeat).getTime() > 420_000;
+  const [isStale, setIsStale] = useState(true);
+  useEffect(() => {
+    const check = () => {
+      if (!lastHeartbeat) { setIsStale(true); return; }
+      setIsStale(Date.now() - new Date(lastHeartbeat).getTime() > 420_000);
+    };
+    check();
+    const id = setInterval(check, 30_000);
+    return () => clearInterval(id);
   }, [lastHeartbeat]);
+
+  // Human-readable "last updated" label
+  const staleLabel = useMemo(() => {
+    if (!lastHeartbeat) return 'No data';
+    const ago = Math.max(0, Math.floor((Date.now() - new Date(lastHeartbeat).getTime()) / 1000));
+    if (ago < 60) return `${ago}s ago`;
+    if (ago < 3600) return `${Math.floor(ago / 60)}m ago`;
+    return `${Math.floor(ago / 3600)}h ${Math.floor((ago % 3600) / 60)}m ago`;
+  }, [lastHeartbeat, isStale]); // re-evaluate when isStale ticks
 
   const sparkColor = pnlStats.pnl >= 0 ? '#00c853' : '#ff1744';
 
@@ -587,6 +603,9 @@ export function LiveStatusBar() {
               <span className="text-[10px] text-zinc-500">{formatUptime(uptimeSeconds)}</span>
             )}
           </div>
+          {isStale && (
+            <span className="text-[9px] font-mono text-red-400/70">Status: {staleLabel}</span>
+          )}
         </div>
 
         {/* Right: Stats + Clock */}

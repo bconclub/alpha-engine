@@ -317,7 +317,7 @@ class ScalpStrategy(BaseStrategy):
 
     # ── STALE MOMENTUM FILTER ────────────────────────────────────
     STALE_MOM_LOOKBACK_S = 10         # look back 10 seconds for recent momentum
-    STALE_MOM_MIN_PCT = 0.05          # need 0.05% move in last 10s in our direction
+    STALE_MOM_MIN_PCT = 0.08          # need 0.08% move in last 10s in our direction (was 0.05)
 
     # ── Binance SPOT overrides — wider SL/TP/trail for no-leverage spot ──
     SPOT_SL_PCT = 2.0                 # 2% SL for spot (no leverage, needs room)
@@ -473,6 +473,11 @@ class ScalpStrategy(BaseStrategy):
     _pair_last_exit_time_mono: dict[str, float] = {}     # "base_asset:long" → monotonic time of last exit
     _pair_last_exit_price: dict[str, float] = {}         # base_asset → exit price
     _pair_last_exit_time_any: dict[str, float] = {}      # base_asset → monotonic time (any direction)
+    # ── DEAD_MOMENTUM streak cooldown (GPFC #6) ──────────────────────────
+    _pair_dead_streak: dict[str, int] = {}               # "base_asset:side" → consecutive DEAD_MOMENTUM count
+    _pair_dead_cooldown_until: dict[str, float] = {}     # "base_asset:side" → monotonic time cooldown expires
+    DEAD_STREAK_LIMIT = 3                                 # 3 consecutive DEAD exits → cooldown
+    DEAD_STREAK_COOLDOWN_S = 600                          # 10 minute cooldown
 
     # ── Daily expiry (Delta India) ──────────────────────────────────────
     EXPIRY_HOUR_IST = 17
@@ -1257,6 +1262,7 @@ class ScalpStrategy(BaseStrategy):
 
             # ── STALE MOMENTUM: 60s momentum OK but is the move still happening? ──
             # Look back 10s in real-time price feed — if move has stalled, skip entry
+            self._last_momentum_10s = 0.0
             momentum_10s = 0.0
             if len(self._price_history) >= 2:
                 target_time = now - self.STALE_MOM_LOOKBACK_S
@@ -1268,6 +1274,7 @@ class ScalpStrategy(BaseStrategy):
                         break  # deque is chronological, first entry past target = done
                 if price_10s_ago is not None and price_10s_ago > 0:
                     momentum_10s = (current_price - price_10s_ago) / price_10s_ago * 100
+                    self._last_momentum_10s = momentum_10s
 
             stale = False
             if side == "long" and momentum_10s < self.STALE_MOM_MIN_PCT:
@@ -1339,6 +1346,26 @@ class ScalpStrategy(BaseStrategy):
                         **self._last_signal_breakdown,
                     }
                     return signals
+
+            # ── DEAD_MOMENTUM STREAK COOLDOWN: 3 consecutive DEAD exits → 10min pause (GPFC #6) ──
+            dead_cd = ScalpStrategy._pair_dead_cooldown_until.get(dir_key_chk, 0.0)
+            if dead_cd > now:
+                remaining = int(dead_cd - now)
+                self._skip_reason = f"DEAD_STREAK_CD ({dir_key_chk} — {remaining}s left)"
+                if self._tick_count % 12 == 0:
+                    self.logger.info(
+                        "[%s] DEAD_STREAK COOLDOWN — %s blocked for %ds (3+ DEAD_MOMENTUM exits)",
+                        self.pair, dir_key_chk, remaining,
+                    )
+                self.last_signal_state = {
+                    "side": side, "reason": reason,
+                    "strength": signal_strength, "trend_15m": trend_15m,
+                    "rsi": rsi_now, "momentum_60s": momentum_60s, "momentum_30s": momentum_30s,
+                    "current_price": current_price, "timestamp": time.monotonic(),
+                    "skip_reason": self._skip_reason,
+                    **self._last_signal_breakdown,
+                }
+                return signals
 
             # ── PRICE LEVEL MEMORY: skip if price too close to last exit (GPFC C) ──
             last_exit_px = ScalpStrategy._pair_last_exit_price.get(self._base_asset)
@@ -3306,7 +3333,8 @@ class ScalpStrategy(BaseStrategy):
         )
 
         # signals_fired = raw reason string (all signal tags for analysis)
-        signals_fired = reason
+        mom_10s = getattr(self, '_last_momentum_10s', 0.0)
+        signals_fired = f"{reason} | 10s_mom={mom_10s:+.3f}%"
 
         if side == "long":
             sl = price * (1 - self._sl_pct / 100)
@@ -3551,6 +3579,20 @@ class ScalpStrategy(BaseStrategy):
         # Track exit time per direction for declining-momentum filter (GPFC B)
         dir_key_exit = f"{self._base_asset}:{self.position_side or 'long'}"
         ScalpStrategy._pair_last_exit_time_mono[dir_key_exit] = now
+
+        # Track DEAD_MOMENTUM streak per direction (GPFC #6)
+        if exit_type.upper() == "DEAD_MOMENTUM":
+            prev_streak = ScalpStrategy._pair_dead_streak.get(dir_key_exit, 0)
+            ScalpStrategy._pair_dead_streak[dir_key_exit] = prev_streak + 1
+            if prev_streak + 1 >= self.DEAD_STREAK_LIMIT:
+                ScalpStrategy._pair_dead_cooldown_until[dir_key_exit] = now + self.DEAD_STREAK_COOLDOWN_S
+                self.logger.warning(
+                    "[%s] DEAD_STREAK COOLDOWN — %d consecutive DEAD_MOMENTUM on %s, pausing %ds",
+                    self.pair, prev_streak + 1, dir_key_exit, self.DEAD_STREAK_COOLDOWN_S,
+                )
+        else:
+            # Any non-DEAD exit resets the streak
+            ScalpStrategy._pair_dead_streak[dir_key_exit] = 0
 
         hold_sec = int(now - self.entry_time)
         duration = f"{hold_sec // 60}m{hold_sec % 60:02d}s" if hold_sec >= 60 else f"{hold_sec}s"

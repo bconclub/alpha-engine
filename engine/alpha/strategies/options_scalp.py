@@ -684,15 +684,15 @@ class OptionsScalpStrategy(BaseStrategy):
                 )
             return []
 
-        # 1. Market regime gate — only trade in TRENDING
+        # 1. Market regime gate — block CHOPPY, allow TRENDING + SIDEWAYS
         if self._market_analyzer:
             analysis = self._market_analyzer.last_analysis_for(self.pair)
-            if analysis and analysis.condition != MarketCondition.TRENDING:
+            if analysis and analysis.condition == MarketCondition.CHOPPY:
                 now = time.monotonic()
                 if now - self._last_regime_log >= 60:
                     self._last_regime_log = now
                     self.logger.info(
-                        "[%s] OPTIONS REGIME SKIP: %s (need TRENDING)",
+                        "[%s] OPTIONS REGIME SKIP: %s (need non-CHOPPY)",
                         self.pair, analysis.condition.value,
                     )
                 return []
