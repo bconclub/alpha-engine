@@ -275,10 +275,18 @@ create policy "Allow insert for authenticated users"
 -- Enable Supabase Realtime on all 4 tables so the dashboard gets live pushes.
 -- ============================================================================
 
-alter publication supabase_realtime add table public.trades;
-alter publication supabase_realtime add table public.strategy_log;
-alter publication supabase_realtime add table public.bot_status;
-alter publication supabase_realtime add table public.bot_commands;
+do $$ begin
+    alter publication supabase_realtime add table public.trades;
+exception when duplicate_object then null; end $$;
+do $$ begin
+    alter publication supabase_realtime add table public.strategy_log;
+exception when duplicate_object then null; end $$;
+do $$ begin
+    alter publication supabase_realtime add table public.bot_status;
+exception when duplicate_object then null; end $$;
+do $$ begin
+    alter publication supabase_realtime add table public.bot_commands;
+exception when duplicate_object then null; end $$;
 
 
 -- ============================================================================

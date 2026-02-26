@@ -54,6 +54,12 @@ CREATE TABLE IF NOT EXISTS signal_state (
 );
 
 -- Enable realtime for new tables
-ALTER PUBLICATION supabase_realtime ADD TABLE pair_config;
-ALTER PUBLICATION supabase_realtime ADD TABLE setup_config;
-ALTER PUBLICATION supabase_realtime ADD TABLE signal_state;
+do $$ begin
+    alter publication supabase_realtime add table pair_config;
+exception when duplicate_object then null; end $$;
+do $$ begin
+    alter publication supabase_realtime add table setup_config;
+exception when duplicate_object then null; end $$;
+do $$ begin
+    alter publication supabase_realtime add table signal_state;
+exception when duplicate_object then null; end $$;
