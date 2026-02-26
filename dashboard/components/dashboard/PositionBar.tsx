@@ -5,6 +5,7 @@
  * LivePositions (homepage) and TradeTable (trades page).
  */
 
+import React from 'react';
 import { formatNumber, cn } from '@/lib/utils';
 
 // ---------------------------------------------------------------------------
@@ -97,12 +98,26 @@ export function getPositionState(pos: PositionDisplay): PositionState {
   return 'holding_gain';
 }
 
-/** Timer countdown badge for FADE or DEAD momentum */
-function TimerBadge({ type, elapsed, required }: {
+/** Timer countdown badge for FADE or DEAD momentum — live 1s ticker */
+function TimerBadge({ type, elapsed: initialElapsed, required }: {
   type: 'fade' | 'dead';
   elapsed: number;
   required: number;
 }) {
+  // Live countdown: tick every second from the initial elapsed value
+  const [elapsed, setElapsed] = React.useState(initialElapsed);
+
+  React.useEffect(() => {
+    setElapsed(initialElapsed); // sync when new data arrives from Supabase
+  }, [initialElapsed]);
+
+  React.useEffect(() => {
+    const id = setInterval(() => {
+      setElapsed(prev => prev + 1);
+    }, 1000);
+    return () => clearInterval(id);
+  }, []);
+
   const pct = Math.min(100, (elapsed / required) * 100);
   const done = elapsed >= required;
   const isFade = type === 'fade';
@@ -111,7 +126,6 @@ function TimerBadge({ type, elapsed, required }: {
   const textColor = isFade ? 'text-amber-400' : 'text-[#ff1744]';
   const barColor = isFade ? 'bg-amber-400' : 'bg-[#ff1744]';
 
-  // When threshold met → show "EXITING", otherwise show countdown remaining
   const remaining = Math.max(0, required - elapsed);
   const timerLabel = done
     ? 'EXITING'
