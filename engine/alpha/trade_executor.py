@@ -177,11 +177,13 @@ class TradeExecutor:
         risk_manager: Any | None = None,
         options_exchange: ccxt.Exchange | None = None,
         bybit_exchange: ccxt.Exchange | None = None,
+        kraken_exchange: ccxt.Exchange | None = None,
     ) -> None:
         self.exchange = exchange                      # Binance (primary)
         self.delta_exchange = delta_exchange           # Delta (optional, futures)
         self.options_exchange = options_exchange       # Delta options (optional)
         self.bybit_exchange = bybit_exchange           # Bybit (optional, futures)
+        self.kraken_exchange = kraken_exchange         # Kraken (optional, futures)
         self.db = db  # alpha.db.Database
         self.alerts = alerts  # alpha.alerts.AlertManager
         self.risk_manager = risk_manager              # alpha.risk_manager.RiskManager
@@ -199,6 +201,9 @@ class TradeExecutor:
         # Bybit: no GST, raw rates are effective
         self._bybit_taker_fee: float = config.bybit.taker_fee   # 0.055% per side
         self._bybit_maker_fee: float = config.bybit.maker_fee   # 0.02% per side
+        # Kraken: no GST, raw rates are effective
+        self._kraken_taker_fee: float = config.kraken.taker_fee  # 0.05% per side
+        self._kraken_maker_fee: float = config.kraken.maker_fee  # 0.02% per side
         self._binance_taker_fee: float = 0.001  # default 0.1%
 
     @staticmethod
@@ -217,6 +222,8 @@ class TradeExecutor:
             return self.options_exchange
         if signal.exchange_id == "bybit" and self.bybit_exchange:
             return self.bybit_exchange
+        if signal.exchange_id == "kraken" and self.kraken_exchange:
+            return self.kraken_exchange
         if signal.exchange_id == "delta" and self.delta_exchange:
             return self.delta_exchange
         return self.exchange  # default: Binance
@@ -486,7 +493,7 @@ class TradeExecutor:
 
     async def load_market_limits(
         self, pairs: list[str], delta_pairs: list[str] | None = None,
-        bybit_pairs: list[str] | None = None,
+        bybit_pairs: list[str] | None = None, kraken_pairs: list[str] | None = None,
     ) -> None:
         """Pre-load minimum order sizes for all tracked pairs on each exchange."""
         # Binance spot
@@ -582,6 +589,41 @@ class TradeExecutor:
                 )
             except Exception:
                 logger.exception("Failed to load Bybit market limits")
+
+        # Kraken futures
+        if self.kraken_exchange and kraken_pairs:
+            try:
+                await self.kraken_exchange.load_markets()
+                for pair in kraken_pairs:
+                    market = self.kraken_exchange.markets.get(pair)
+                    if market:
+                        limits = market.get("limits", {})
+                        cost_limits = limits.get("cost", {})
+                        amount_limits = limits.get("amount", {})
+                        self._min_notional[pair] = cost_limits.get("min", 0) or 0
+                        self._min_amount[pair] = amount_limits.get("min", 0) or 0
+                        # Kraken: no GST, raw rates are effective
+                        taker = market.get("taker")
+                        maker = market.get("maker")
+                        if taker is not None:
+                            self._kraken_taker_fee = float(taker)
+                        if maker is not None:
+                            self._kraken_maker_fee = float(maker)
+                        logger.debug(
+                            "[%s] Kraken min notional=$%.2f, min amount=%.8f",
+                            pair, self._min_notional[pair], self._min_amount[pair],
+                        )
+                    else:
+                        logger.warning("Market info not found for %s on Kraken", pair)
+                logger.info(
+                    "Kraken fee rates (no GST): taker=%.6f (%.4f%%), maker=%.6f (%.4f%%), "
+                    "RT mixed=%.4f%%",
+                    self._kraken_taker_fee, self._kraken_taker_fee * 100,
+                    self._kraken_maker_fee, self._kraken_maker_fee * 100,
+                    (self._kraken_maker_fee + self._kraken_taker_fee) * 100,
+                )
+            except Exception:
+                logger.exception("Failed to load Kraken market limits")
 
     def _is_exit_order(self, signal: Signal) -> bool:
         """Determine if this signal is closing/exiting an existing position."""
@@ -1155,6 +1197,8 @@ class TradeExecutor:
             # Calculate entry fee for storage
             if signal.exchange_id == "bybit":
                 entry_fee_rate = self._bybit_taker_fee
+            elif signal.exchange_id == "kraken":
+                entry_fee_rate = self._kraken_taker_fee
             elif signal.exchange_id == "delta":
                 entry_fee_rate = self._delta_taker_fee  # entries are always taker (market)
             else:
@@ -1261,6 +1305,10 @@ class TradeExecutor:
                 entry_order_type = open_trade.get("order_type", "market")
                 entry_fee_rate = self._bybit_maker_fee if entry_order_type == "limit" else self._bybit_taker_fee
                 exit_fee_rate = self._bybit_taker_fee
+            elif exchange_id == "kraken":
+                entry_order_type = open_trade.get("order_type", "market")
+                entry_fee_rate = self._kraken_maker_fee if entry_order_type == "limit" else self._kraken_taker_fee
+                exit_fee_rate = self._kraken_taker_fee  # exits always market
             elif exchange_id == "delta":
                 entry_order_type = open_trade.get("order_type", "market")
                 entry_fee_rate = self._delta_maker_fee if entry_order_type == "limit" else self._delta_taker_fee

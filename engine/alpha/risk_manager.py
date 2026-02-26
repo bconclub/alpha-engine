@@ -57,6 +57,7 @@ class RiskManager:
         self.binance_capital: float = 0.0
         self.delta_capital: float = 0.0
         self.bybit_capital: float = 0.0
+        self.kraken_capital: float = 0.0
 
         self.open_positions: list[Position] = []
         self._pair_entry_ts: dict[str, float] = {}  # pair -> last entry approval time
@@ -70,7 +71,8 @@ class RiskManager:
         self._force_resumed = False  # bypass win-rate breaker until next win
 
     def update_exchange_balances(
-        self, binance: float | None, delta: float | None, bybit: float | None = None,
+        self, binance: float | None, delta: float | None,
+        bybit: float | None = None, kraken: float | None = None,
     ) -> None:
         """Update per-exchange capital from live balance fetches."""
         if binance is not None:
@@ -79,10 +81,12 @@ class RiskManager:
             self.delta_capital = delta
         if bybit is not None:
             self.bybit_capital = bybit
-        self.capital = self.binance_capital + self.delta_capital + self.bybit_capital
+        if kraken is not None:
+            self.kraken_capital = kraken
+        self.capital = self.binance_capital + self.delta_capital + self.bybit_capital + self.kraken_capital
         logger.info(
-            "Balances updated: Binance=$%.2f, Delta=$%.2f, Bybit=$%.2f, Total=$%.2f",
-            self.binance_capital, self.delta_capital, self.bybit_capital, self.capital,
+            "Balances updated: Binance=$%.2f, Delta=$%.2f, Bybit=$%.2f, Kraken=$%.2f, Total=$%.2f",
+            self.binance_capital, self.delta_capital, self.bybit_capital, self.kraken_capital, self.capital,
         )
 
     def get_exchange_capital(self, exchange_id: str) -> float:
@@ -91,6 +95,8 @@ class RiskManager:
             return self.delta_capital
         if exchange_id == "bybit":
             return self.bybit_capital
+        if exchange_id == "kraken":
+            return self.kraken_capital
         return self.binance_capital
 
     def get_available_capital(self, exchange_id: str) -> float:

@@ -41,6 +41,7 @@ class AlphaBot:
         self.delta: ccxt.Exchange | None = None
         self.delta_options: ccxt.Exchange | None = None  # Delta options exchange
         self.bybit: ccxt.Exchange | None = None          # Bybit futures exchange
+        self.kraken: ccxt.Exchange | None = None        # Kraken futures exchange
         self.db = Database()
         self.alerts = AlertManager()
         self.risk_manager = RiskManager()
@@ -48,6 +49,7 @@ class AlphaBot:
         self.analyzer: MarketAnalyzer | None = None
         self.delta_analyzer: MarketAnalyzer | None = None
         self.bybit_analyzer: MarketAnalyzer | None = None
+        self.kraken_analyzer: MarketAnalyzer | None = None
         # strategy_selector DISABLED — all pairs use scalp only
 
         # Multi-pair: Binance spot
@@ -56,6 +58,8 @@ class AlphaBot:
         self.delta_pairs: list[str] = config.delta.pairs
         # Bybit futures pairs (primary)
         self.bybit_pairs: list[str] = config.bybit.pairs
+        # Kraken futures pairs
+        self.kraken_pairs: list[str] = config.kraken.pairs
 
         # Scalp overlay strategies: pair -> ScalpStrategy (run independently)
         self._scalp_strategies: dict[str, ScalpStrategy] = {}
@@ -96,6 +100,7 @@ class AlphaBot:
             self.pairs
             + (self.bybit_pairs if self.bybit else [])
             + (self.delta_pairs if self.delta else [])
+            + (self.kraken_pairs if self.kraken else [])
         )
 
     async def start(self) -> None:
@@ -146,7 +151,7 @@ class AlphaBot:
 
         self.risk_manager.record_close = _tracked_record_close  # type: ignore[assignment]
 
-        # Build components — Binance (spot) + Bybit (futures) + Delta (options)
+        # Build components — Binance (spot) + Bybit/Kraken (futures) + Delta (options)
         self.executor = TradeExecutor(
             self.binance,  # type: ignore[arg-type]
             db=self.db,
@@ -155,6 +160,7 @@ class AlphaBot:
             risk_manager=self.risk_manager,
             options_exchange=self.delta_options,
             bybit_exchange=self.bybit,
+            kraken_exchange=self.kraken,
         )
 
         # Binance analyzer for spot pairs
@@ -172,6 +178,11 @@ class AlphaBot:
             self.bybit_analyzer = MarketAnalyzer(
                 self.bybit, pair=self.bybit_pairs[0],
             )
+
+        if self.kraken and self.kraken_pairs:
+            self.kraken_analyzer = MarketAnalyzer(
+                self.kraken, pair=self.kraken_pairs[0],
+            )
         # strategy_selector DISABLED — scalp-only, no dynamic strategy switching
 
         # Load market limits for all exchanges
@@ -179,6 +190,7 @@ class AlphaBot:
             self.pairs,  # Binance spot pairs
             delta_pairs=self.delta_pairs if self.delta else None,
             bybit_pairs=self.bybit_pairs if self.bybit else None,
+            kraken_pairs=self.kraken_pairs if self.kraken else None,
         )
 
         # Register scalp strategies — Bybit futures — DISABLED FOR NOW
@@ -201,6 +213,17 @@ class AlphaBot:
                     is_futures=True,
                     market_analyzer=self.delta_analyzer,
                     exchange_id="delta",
+                )
+
+        # Register scalp strategies — Kraken futures
+        if self.kraken:
+            for pair in self.kraken_pairs:
+                self._scalp_strategies[pair] = ScalpStrategy(
+                    pair, self.executor, self.risk_manager,
+                    exchange=self.kraken,
+                    is_futures=True,
+                    market_analyzer=self.kraken_analyzer,
+                    exchange_id="kraken",
                 )
 
         # Register scalp strategies — Binance spot — DISABLED FOR NOW
@@ -281,9 +304,11 @@ class AlphaBot:
                 binance_exchange=binance_ws_exchange,
                 delta_pairs=self.delta_pairs if self.delta else [],
                 bybit_pairs=self.bybit_pairs if self.bybit else [],
+                kraken_pairs=self.kraken_pairs if self.kraken else [],
                 binance_pairs=[],  # Binance spot WS disabled for now
                 delta_testnet=config.delta.testnet,
                 bybit_testnet=config.bybit.testnet,
+                kraken_testnet=config.kraken.testnet,
             )
 
             # Register momentum wake callbacks — WS detects sharp moves and
@@ -314,11 +339,13 @@ class AlphaBot:
         binance_bal: float | None = None
         delta_bal: float | None = None
         bybit_bal: float | None = None
+        kraken_bal: float | None = None
         try:
             binance_bal = await self._fetch_portfolio_usd(self.binance)
             delta_bal = await self._fetch_portfolio_usd(self.delta) if self.delta else None
             bybit_bal = await self._fetch_portfolio_usd(self.bybit) if self.bybit else None
-            self.risk_manager.update_exchange_balances(binance_bal, delta_bal, bybit_bal)
+            kraken_bal = await self._fetch_portfolio_usd(self.kraken) if self.kraken else None
+            self.risk_manager.update_exchange_balances(binance_bal, delta_bal, bybit_bal, kraken_bal)
         except Exception:
             logger.exception("[STARTUP] Failed to fetch exchange balances — continuing with defaults")
 
@@ -383,7 +410,7 @@ class AlphaBot:
             await self.alerts.send_bot_started(
                 self.all_pairs, total_capital,
                 binance_balance=binance_bal, delta_balance=delta_bal,
-                bybit_balance=bybit_bal,
+                bybit_balance=bybit_bal, kraken_balance=kraken_bal,
             )
         except Exception:
             logger.exception("[STARTUP] Failed to send startup message")
@@ -982,7 +1009,8 @@ class AlphaBot:
         binance_bal = await self._fetch_portfolio_usd(self.binance)
         delta_bal = await self._fetch_portfolio_usd(self.delta) if self.delta else None
         bybit_bal = await self._fetch_portfolio_usd(self.bybit) if self.bybit else None
-        rm.update_exchange_balances(binance_bal, delta_bal, bybit_bal)
+        kraken_bal = await self._fetch_portfolio_usd(self.kraken) if self.kraken else None
+        rm.update_exchange_balances(binance_bal, delta_bal, bybit_bal, kraken_bal)
 
         # Fetch raw INR balance for dashboard display
         delta_balance_inr = None
@@ -1026,9 +1054,11 @@ class AlphaBot:
             "delta_balance": delta_bal,
             "delta_balance_inr": delta_balance_inr,
             "bybit_balance": bybit_bal,
+            "kraken_balance": kraken_bal,
             "binance_connected": self.binance is not None and binance_bal is not None,
             "delta_connected": self.delta is not None and delta_bal is not None,
             "bybit_connected": self.bybit is not None and bybit_bal is not None,
+            "kraken_connected": self.kraken is not None and kraken_bal is not None,
             "bot_state": bot_state,
             "shorting_enabled": config.bybit.enable_shorting,
             "leverage": config.bybit.leverage,
@@ -1090,9 +1120,11 @@ class AlphaBot:
                     "delta": round(delta_bal, 2) if delta_bal else None,
                     "binance": round(binance_bal, 2) if binance_bal else None,
                     "bybit": round(bybit_bal, 2) if bybit_bal else None,
+                    "kraken": round(kraken_bal, 2) if kraken_bal else None,
                     "delta_min_trade": bool(delta_bal and delta_bal >= 5),
                     "binance_min_trade": bool(binance_bal and binance_bal >= 6),
                     "bybit_min_trade": bool(bybit_bal and bybit_bal >= 1),
+                    "kraken_min_trade": bool(kraken_bal and kraken_bal >= 1),
                 },
                 "pairs": {},
             }
@@ -1689,16 +1721,18 @@ class AlphaBot:
             binance_bal = last.get("binance_balance")
             delta_bal = last.get("delta_balance")
             bybit_bal = last.get("bybit_balance")
-            if binance_bal is not None or delta_bal is not None or bybit_bal is not None:
+            kraken_bal = last.get("kraken_balance")
+            if binance_bal is not None or delta_bal is not None or bybit_bal is not None or kraken_bal is not None:
                 self.risk_manager.update_exchange_balances(
                     float(binance_bal) if binance_bal else None,
                     float(delta_bal) if delta_bal else None,
                     float(bybit_bal) if bybit_bal else None,
+                    float(kraken_bal) if kraken_bal else None,
                 )
                 logger.info(
-                    "Restored state from DB -- Binance=$%.2f, Delta=$%.2f, Bybit=$%.2f, Total=$%.2f",
+                    "Restored state from DB -- Binance=$%.2f, Delta=$%.2f, Bybit=$%.2f, Kraken=$%.2f, Total=$%.2f",
                     self.risk_manager.binance_capital, self.risk_manager.delta_capital,
-                    self.risk_manager.bybit_capital, self.risk_manager.capital,
+                    self.risk_manager.bybit_capital, self.risk_manager.kraken_capital, self.risk_manager.capital,
                 )
             else:
                 # Fallback to single capital field
@@ -2249,6 +2283,8 @@ class AlphaBot:
         try:
             if exchange_id == "bybit":
                 exchange = self.bybit
+            elif exchange_id == "kraken":
+                exchange = self.kraken
             elif exchange_id == "delta":
                 exchange = self.delta
             else:
@@ -2295,6 +2331,11 @@ class AlphaBot:
             await self._reconcile_delta_positions()
         except Exception:
             logger.exception("Orphan reconciliation failed (Delta)")
+
+        try:
+            await self._reconcile_kraken_positions()
+        except Exception:
+            logger.exception("Orphan reconciliation failed (Kraken)")
 
         try:
             await self._reconcile_binance_positions()
@@ -2595,6 +2636,292 @@ class AlphaBot:
                         phantom_pnl, phantom_pnl_pct = calc_pnl(
                             entry_px, phantom_exit, phantom_amount,
                             pos_type, trade_lev, "bybit", pair,
+                        )
+                        phantom_pnl_for_rm = phantom_pnl
+                        phantom_reason = "phantom_cleared"
+                        phantom_exit_reason = "PHANTOM"
+                        if order_id:
+                            await self.db.close_trade(
+                                order_id, phantom_exit, phantom_pnl, phantom_pnl_pct,
+                                reason=phantom_reason,
+                                exit_reason=phantom_exit_reason,
+                            )
+                        logger.info(
+                            "Phantom trade %s closed: exit=$%.2f pnl=$%.4f (%.2f%%)",
+                            pair, phantom_exit, phantom_pnl, phantom_pnl_pct,
+                        )
+
+                self.risk_manager.record_close(pair, phantom_pnl_for_rm)
+
+    async def _reconcile_kraken_positions(self) -> None:
+        """Reconcile Kraken positions with bot memory.
+
+        Same pattern as Bybit reconciliation:
+        - Kraken amounts are in coins (no contract conversion)
+
+        CASE 1 (ORPHAN): Exchange has position, bot doesn't → CLOSE immediately
+        CASE 2 (PHANTOM): Bot thinks position exists, exchange doesn't → clear state
+        CASE 3 (RESTORE): Exchange has position, DB has trade → restore strategy
+        """
+        if not self.kraken:
+            return
+
+        # ── Step 1: Fetch ALL open positions from Kraken ──────────────
+        try:
+            positions = await self.kraken.fetch_positions()
+        except Exception:
+            logger.debug("Failed to fetch Kraken positions for reconciliation")
+            return
+
+        # Build map: symbol → {side, amount, entry_price}
+        exchange_positions: dict[str, dict[str, Any]] = {}
+        for pos in positions:
+            contracts = float(pos.get("contracts", 0) or 0)
+            if contracts == 0:
+                continue
+            symbol = pos.get("symbol", "")
+            side = "long" if contracts > 0 else "short"
+            entry_px = float(pos.get("entryPrice", 0) or 0)
+            exchange_positions[symbol] = {
+                "side": side,
+                "amount": abs(contracts),
+                "entry_price": entry_px,
+            }
+
+        # ── Step 2: Check ALL exchange positions against bot state ────
+        all_checked_pairs = set(self.kraken_pairs) | set(exchange_positions.keys())
+
+        for pair in all_checked_pairs:
+            epos = exchange_positions.get(pair)
+            scalp = self._scalp_strategies.get(pair)
+
+            if epos and scalp and scalp.in_position:
+                continue  # ALL GOOD
+
+            if epos and (not scalp or not scalp.in_position):
+                side = epos["side"]
+                amount = epos["amount"]
+                entry_px = epos["entry_price"]
+
+                # ── CASE 3: Try to RESTORE from DB before closing ────
+                restored = False
+                if scalp and self.db.is_connected:
+                    open_trade = await self.db.get_open_trade(
+                        pair=pair, exchange="kraken",
+                    )
+                    if open_trade and open_trade.get("status") == "open":
+                        db_entry_price = float(open_trade.get("entry_price", 0) or 0)
+                        restore_price = db_entry_price if db_entry_price > 0 else entry_px
+
+                        scalp.in_position = True
+                        scalp.position_side = side
+                        scalp.entry_price = restore_price
+                        scalp.entry_amount = amount
+                        scalp.highest_since_entry = restore_price
+                        scalp.lowest_since_entry = restore_price
+
+                        opened_at_str = open_trade.get("opened_at")
+                        if opened_at_str:
+                            try:
+                                from datetime import datetime, timezone
+                                if isinstance(opened_at_str, str):
+                                    opened_at_str = opened_at_str.replace("Z", "+00:00")
+                                    opened_dt = datetime.fromisoformat(opened_at_str)
+                                else:
+                                    opened_dt = opened_at_str
+                                seconds_ago = max(0, (datetime.now(timezone.utc) - opened_dt).total_seconds())
+                                scalp.entry_time = time.monotonic() - seconds_ago
+                            except Exception:
+                                scalp.entry_time = time.monotonic()
+                        else:
+                            scalp.entry_time = time.monotonic()
+
+                        current_price = await self._get_current_price(pair, "kraken")
+                        if current_price and current_price > 0:
+                            current_pnl = scalp._calc_pnl_pct(current_price)
+                            if side == "long":
+                                scalp.highest_since_entry = max(restore_price, current_price)
+                            else:
+                                scalp.lowest_since_entry = min(restore_price, current_price)
+                            scalp._peak_unrealized_pnl = max(0, current_pnl)
+                            if current_pnl >= scalp.TRAILING_ACTIVATE_PCT:
+                                scalp._trailing_active = True
+                                scalp._update_trail_stop()
+                                logger.info(
+                                    "RESTORE: %s already at +%.2f%% — trailing activated",
+                                    pair, current_pnl,
+                                )
+                        else:
+                            current_price = entry_px
+                            current_pnl = 0.0
+
+                        logger.warning(
+                            "RESTORED: %s %s %.6f coins @ $%.2f (DB) — "
+                            "current $%.2f — PnL %+.2f%%",
+                            pair, side, amount, restore_price,
+                            current_price, current_pnl,
+                        )
+                        try:
+                            await self.alerts.send_orphan_alert(
+                                pair=pair, side=side, contracts=amount,
+                                action="RESTORED INTO BOT",
+                                detail=f"Entry: ${restore_price:.2f} (DB) — current ${current_price:.2f} — PnL {current_pnl:+.2f}%",
+                            )
+                        except Exception:
+                            pass
+                        restored = True
+
+                if not restored:
+                    # ── CASE 1: True ORPHAN — close it ─────────────────
+                    logger.warning(
+                        "ORPHAN DETECTED: %s %s %.6f coins @ $%.2f — "
+                        "NOT in bot memory! CLOSING",
+                        pair, side, amount, entry_px,
+                    )
+                    try:
+                        await self.alerts.send_orphan_alert(
+                            pair=pair, side=side, contracts=amount,
+                            action="CLOSING AT MARKET",
+                            detail=f"Entry: ${entry_px:.2f} — not in bot memory or DB",
+                        )
+                    except Exception:
+                        pass
+
+                    try:
+                        close_side = "sell" if side == "long" else "buy"
+                        await self.kraken.create_order(
+                            pair, "market", close_side, amount,
+                            params={"reduceOnly": True},
+                        )
+                        logger.info(
+                            "ORPHAN CLOSED: %s %s %.6f coins at market",
+                            pair, side, amount,
+                        )
+
+                        if self.db.is_connected:
+                            open_trade = await self.db.get_open_trade(
+                                pair=pair, exchange="kraken",
+                            )
+                            if open_trade:
+                                try:
+                                    ticker = await self.kraken.fetch_ticker(pair)
+                                    exit_price = float(ticker.get("last", 0) or 0) or entry_px
+                                except Exception:
+                                    exit_price = entry_px
+                                trade_lev = open_trade.get("leverage", config.kraken.leverage) or 1
+                                pnl, pnl_pct = calc_pnl(
+                                    entry_px, exit_price, amount,
+                                    side, trade_lev,
+                                    "kraken", pair,
+                                )
+                                order_id = open_trade.get("order_id", "")
+                                if order_id:
+                                    await self.db.close_trade(
+                                        order_id, exit_price, pnl, pnl_pct,
+                                        reason="orphan_closed",
+                                        exit_reason="ORPHAN",
+                                    )
+                                    logger.info("Orphan DB trade %s closed: P&L=%.2f%%", pair, pnl_pct)
+
+                    except Exception:
+                        logger.exception(
+                            "Failed to close orphan %s — MANUAL INTERVENTION NEEDED", pair,
+                        )
+                        try:
+                            await self.alerts.send_orphan_alert(
+                                pair=pair, side=side, contracts=amount,
+                                action="CLOSE FAILED — MANUAL CLOSE NEEDED",
+                                detail="Auto-close failed. Close manually on Kraken!",
+                            )
+                        except Exception:
+                            pass
+
+        # ── Step 3: Check for PHANTOM positions (bot has, exchange doesn't) ──
+        now = time.monotonic()
+        for pair, scalp in self._scalp_strategies.items():
+            if not scalp.in_position or not scalp.is_futures:
+                continue
+            if getattr(scalp, "_exchange_id", "delta") != "kraken":
+                continue  # skip non-Kraken strategies
+            epos = exchange_positions.get(pair)
+            if not epos:
+                if scalp.entry_time > 0:
+                    hold_seconds = now - scalp.entry_time
+                    if hold_seconds < 300:
+                        logger.debug(
+                            "PHANTOM SKIP: %s — opened %.0fs ago (< 5min)", pair, hold_seconds,
+                        )
+                        continue
+                if scalp._last_position_exit > 0:
+                    since_exit = now - scalp._last_position_exit
+                    if since_exit < 30:
+                        logger.debug(
+                            "PHANTOM SKIP: %s — trade closed %.0fs ago (< 30s)", pair, since_exit,
+                        )
+                        continue
+
+                logger.warning(
+                    "PHANTOM DETECTED: %s — bot thinks %s @ $%.2f "
+                    "but Kraken has NO position! Clearing.",
+                    pair, scalp.position_side, scalp.entry_price,
+                )
+                try:
+                    await self.alerts.send_orphan_alert(
+                        pair=pair,
+                        side=scalp.position_side or "unknown",
+                        contracts=scalp.entry_amount,
+                        action="PHANTOM CLEARED",
+                        detail=f"Bot thought {scalp.position_side} @ ${scalp.entry_price:.2f} but Kraken has nothing",
+                    )
+                except Exception:
+                    pass
+
+                scalp.in_position = False
+                scalp.position_side = None
+                scalp.entry_price = 0.0
+                scalp.entry_amount = 0.0
+                scalp._last_position_exit = now
+                scalp._phantom_cooldown_until = now + 60
+                ScalpStrategy._live_pnl.pop(pair, None)
+
+                phantom_pnl_for_rm = 0.0
+                if self.db.is_connected:
+                    open_trade = await self.db.get_open_trade(
+                        pair=pair, exchange="kraken", strategy="scalp",
+                    )
+                    if open_trade:
+                        order_id = open_trade.get("order_id", "")
+                        entry_px = float(open_trade.get("entry_price", 0) or 0)
+                        trade_lev = open_trade.get("leverage", config.kraken.leverage) or 1
+                        pos_type = open_trade.get("position_type", "long")
+                        phantom_amount = open_trade.get("amount", 0)
+                        phantom_exit = entry_px
+
+                        try:
+                            recent_trades = await self.kraken.fetch_my_trades(pair, limit=20)
+                            if recent_trades:
+                                close_side = "sell" if pos_type == "long" else "buy"
+                                closing_fills = [
+                                    t for t in recent_trades if t.get("side") == close_side
+                                ]
+                                if closing_fills:
+                                    last_fill = closing_fills[-1]
+                                    fill_price = float(last_fill.get("price", 0) or 0)
+                                    if fill_price > 0:
+                                        phantom_exit = fill_price
+                        except Exception as e:
+                            logger.debug("Could not fetch trade history for %s: %s", pair, e)
+
+                        if phantom_exit == entry_px:
+                            try:
+                                ticker = await self.kraken.fetch_ticker(pair)
+                                phantom_exit = float(ticker.get("last", 0) or 0) or entry_px
+                            except Exception:
+                                pass
+
+                        phantom_pnl, phantom_pnl_pct = calc_pnl(
+                            entry_px, phantom_exit, phantom_amount,
+                            pos_type, trade_lev, "kraken", pair,
                         )
                         phantom_pnl_for_rm = phantom_pnl
                         phantom_reason = "phantom_cleared"
@@ -3399,6 +3726,36 @@ class AlphaBot:
         else:
             self.bybit_pairs = []
             logger.info("Bybit credentials not set -- futures disabled")
+
+        # Kraken Futures (alternative futures exchange)
+        if config.kraken.api_key:
+            kraken_session = aiohttp.ClientSession(
+                connector=aiohttp.TCPConnector(
+                    resolver=aiohttp.resolver.ThreadedResolver(), ssl=True,
+                )
+            )
+            self.kraken = ccxt.krakenfutures({
+                "apiKey": config.kraken.api_key,
+                "secret": config.kraken.secret,
+                "enableRateLimit": True,
+                "options": {"defaultType": "future"},
+                "session": kraken_session,
+            })
+            if config.kraken.testnet:
+                self.kraken.set_sandbox_mode(True)
+            if config.kraken.leverage > 20:
+                logger.warning(
+                    "!!! KRAKEN LEVERAGE IS %dx — max supported is 20x !!! "
+                    "Set KRAKEN_LEVERAGE=20 in .env",
+                    config.kraken.leverage,
+                )
+            logger.info(
+                "Kraken Futures initialized (testnet=%s, leverage=%dx)",
+                config.kraken.testnet, config.kraken.leverage,
+            )
+        else:
+            self.kraken_pairs = []
+            logger.info("Kraken credentials not set -- futures disabled")
 
     async def _fetch_portfolio_usd(
         self, exchange: ccxt.Exchange | None,

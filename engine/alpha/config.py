@@ -133,6 +133,35 @@ class BybitConfig:
 
 
 @dataclass(frozen=True)
+class KrakenConfig:
+    api_key: str = field(default_factory=lambda: _env("KRAKEN_API_KEY"))
+    secret: str = field(default_factory=lambda: _env("KRAKEN_SECRET"))
+    testnet: bool = field(default_factory=lambda: _env_bool("KRAKEN_TESTNET", False))
+    leverage: int = field(default_factory=lambda: _env_int("KRAKEN_LEVERAGE", 20))
+    pairs: list[str] = field(default_factory=lambda: _env_list("KRAKEN_PAIRS"))
+    enable_shorting: bool = field(default_factory=lambda: _env_bool("ENABLE_SHORTING", True))
+
+    # Kraken Futures fee structure (no GST — global exchange)
+    taker_fee: float = field(default_factory=lambda: _env_float("KRAKEN_TAKER_FEE", 0.0005))   # 0.05% per side
+    maker_fee: float = field(default_factory=lambda: _env_float("KRAKEN_MAKER_FEE", 0.0002))   # 0.02% per side
+
+    @property
+    def taker_round_trip(self) -> float:
+        """Round-trip taker fee (both sides): 0.05% × 2 = 0.10%."""
+        return self.taker_fee * 2
+
+    @property
+    def maker_round_trip(self) -> float:
+        """Round-trip maker fee (both sides): 0.02% × 2 = 0.04%."""
+        return self.maker_fee * 2
+
+    @property
+    def mixed_round_trip(self) -> float:
+        """Mixed round-trip: maker entry + taker exit = 0.02% + 0.05% = 0.07%."""
+        return self.maker_fee + self.taker_fee
+
+
+@dataclass(frozen=True)
 class SupabaseConfig:
     url: str = field(default_factory=lambda: _env("SUPABASE_URL"))
     key: str = field(default_factory=lambda: _env("SUPABASE_KEY"))
@@ -189,6 +218,7 @@ class Config:
     kucoin: KuCoinConfig = field(default_factory=KuCoinConfig)
     delta: DeltaConfig = field(default_factory=DeltaConfig)
     bybit: BybitConfig = field(default_factory=BybitConfig)
+    kraken: KrakenConfig = field(default_factory=KrakenConfig)
     supabase: SupabaseConfig = field(default_factory=SupabaseConfig)
     telegram: TelegramConfig = field(default_factory=TelegramConfig)
     trading: TradingConfig = field(default_factory=TradingConfig)

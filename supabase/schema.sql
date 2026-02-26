@@ -164,8 +164,12 @@ create table if not exists public.bot_status (
     binance_balance   numeric(20,8),
     delta_balance     numeric(20,8),
     delta_balance_inr numeric(20,8),
+    bybit_balance     numeric(20,8),
+    kraken_balance    numeric(20,8),
     binance_connected boolean      not null default false,
     delta_connected   boolean      not null default false,
+    bybit_connected   boolean      not null default false,
+    kraken_connected  boolean      not null default false,
 
     -- Bot state
     bot_state         text         not null default 'running'

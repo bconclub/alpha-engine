@@ -36,6 +36,10 @@ DELTA_WS_URL_TESTNET = "wss://socket-ind.testnet.deltaex.org"
 BYBIT_WS_URL = "wss://stream.bybit.com/v5/public/linear"
 BYBIT_WS_URL_TESTNET = "wss://stream-testnet.bybit.com/v5/public/linear"
 
+# Kraken Futures WS (USD-settled perpetuals)
+KRAKEN_WS_URL = "wss://futures.kraken.com/ws/v1"
+KRAKEN_WS_URL_TESTNET = "wss://demo-futures.kraken.com/ws/v1"
+
 # Reconnect backoff
 RECONNECT_MIN_SEC = 2
 RECONNECT_MAX_SEC = 60
@@ -96,6 +100,37 @@ def _bybit_symbol_to_ccxt(symbol: str, pairs: list[str]) -> str | None:
     return None
 
 
+def _ccxt_to_kraken_symbol(pair: str) -> str:
+    """Convert ccxt pair format to Kraken Futures WS symbol.
+
+    'BTC/USD:USD' → 'PF_XBTUSD'
+    'ETH/USD:USD' → 'PF_ETHUSD'
+    """
+    base = pair.split("/")[0]
+    # Kraken uses XBT instead of BTC
+    if base == "BTC":
+        base = "XBT"
+    return f"PF_{base}USD"
+
+
+def _kraken_symbol_to_ccxt(symbol: str, pairs: list[str]) -> str | None:
+    """Convert Kraken Futures WS symbol back to ccxt pair format.
+
+    'PF_XBTUSD' → 'BTC/USD:USD'
+    'PF_ETHUSD' → 'ETH/USD:USD'
+    """
+    if not symbol.startswith("PF_"):
+        return None
+    base = symbol[3:].replace("USD", "")
+    # Kraken uses XBT for BTC
+    if base == "XBT":
+        base = "BTC"
+    for pair in pairs:
+        if pair.startswith(f"{base}/"):
+            return pair
+    return None
+
+
 class PriceFeed:
     """Real-time price feed via WebSocket for instant exit checks.
 
@@ -112,17 +147,21 @@ class PriceFeed:
         binance_exchange: Any = None,
         delta_pairs: list[str] | None = None,
         bybit_pairs: list[str] | None = None,
+        kraken_pairs: list[str] | None = None,
         binance_pairs: list[str] | None = None,
         delta_testnet: bool = False,
         bybit_testnet: bool = False,
+        kraken_testnet: bool = False,
     ) -> None:
         self._strategies = strategies
         self._binance_exchange = binance_exchange
         self._delta_pairs = delta_pairs or []
         self._bybit_pairs = bybit_pairs or []
+        self._kraken_pairs = kraken_pairs or []
         self._binance_pairs = binance_pairs or []
         self._delta_testnet = delta_testnet
         self._bybit_testnet = bybit_testnet
+        self._kraken_testnet = kraken_testnet
 
         # Price cache
         self.price_cache: dict[str, float] = {}
@@ -147,14 +186,17 @@ class PriceFeed:
         self._delta_messages_parsed = 0
         self._bybit_messages_total = 0
         self._bybit_messages_parsed = 0
+        self._kraken_updates = 0
+        self._kraken_messages_total = 0
+        self._kraken_messages_parsed = 0
         self._last_stats_log = 0.0
 
     async def start(self) -> None:
         """Start WS feeds as background tasks."""
         self._running = True
         logger.info(
-            "PriceFeed starting — Bybit: %d pairs, Delta: %d pairs, Binance: %d pairs",
-            len(self._bybit_pairs), len(self._delta_pairs), len(self._binance_pairs),
+            "PriceFeed starting — Bybit: %d pairs, Delta: %d pairs, Kraken: %d pairs, Binance: %d pairs",
+            len(self._bybit_pairs), len(self._delta_pairs), len(self._kraken_pairs), len(self._binance_pairs),
         )
 
         if self._bybit_pairs:
@@ -163,6 +205,10 @@ class PriceFeed:
 
         if self._delta_pairs:
             task = asyncio.create_task(self._delta_ws_loop())
+            self._tasks.append(task)
+
+        if self._kraken_pairs:
+            task = asyncio.create_task(self._kraken_ws_loop())
             self._tasks.append(task)
 
         if self._binance_pairs and self._binance_exchange:
@@ -211,6 +257,8 @@ class PriceFeed:
             self._delta_updates += 1
         elif source == "bybit":
             self._bybit_updates += 1
+        elif source == "kraken":
+            self._kraken_updates += 1
         else:
             self._binance_updates += 1
 
@@ -499,6 +547,99 @@ class PriceFeed:
                 logger.warning("Bybit WS parse error: %s — raw: %s", e, raw[:200])
 
     # ══════════════════════════════════════════════════════════════════
+    # KRAKEN FUTURES — raw aiohttp WS (v1 ticker)
+    # ══════════════════════════════════════════════════════════════════
+
+    async def _kraken_ws_loop(self) -> None:
+        """Connect to Kraken Futures WS and subscribe to ticker updates."""
+        ws_url = KRAKEN_WS_URL_TESTNET if self._kraken_testnet else KRAKEN_WS_URL
+        symbols = [_ccxt_to_kraken_symbol(p) for p in self._kraken_pairs]
+        backoff = RECONNECT_MIN_SEC
+
+        while self._running:
+            try:
+                logger.info("Kraken WS connecting to %s — symbols: %s", ws_url, symbols)
+                async with aiohttp.ClientSession() as session:
+                    async with session.ws_connect(ws_url, heartbeat=30) as ws:
+                        logger.info("Kraken WS connected")
+                        backoff = RECONNECT_MIN_SEC
+
+                        # Subscribe to ticker feed for all pairs
+                        subscribe_msg = {
+                            "event": "subscribe",
+                            "feed": "ticker",
+                            "product_ids": symbols,
+                        }
+                        await ws.send_json(subscribe_msg)
+                        logger.info("Kraken WS subscribed to ticker: %s", symbols)
+
+                        async for msg in ws:
+                            if not self._running:
+                                break
+                            if msg.type == aiohttp.WSMsgType.TEXT:
+                                self._handle_kraken_message(msg.data)
+                            elif msg.type in (aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.ERROR):
+                                logger.warning("Kraken WS closed/error: %s", msg.type)
+                                break
+
+            except asyncio.CancelledError:
+                break
+            except Exception:
+                logger.exception("Kraken WS error — reconnecting in %ds", backoff)
+
+            if self._running:
+                await asyncio.sleep(backoff)
+                backoff = min(backoff * 2, RECONNECT_MAX_SEC)
+
+    def _handle_kraken_message(self, raw: str) -> None:
+        """Parse Kraken Futures WS ticker message.
+
+        Kraken Futures ticker format:
+        {
+            "feed": "ticker",
+            "product_id": "PF_XBTUSD",
+            "bid": 67000.0,
+            "ask": 67010.0,
+            "markPrice": 67005.5,
+            "last": 67003.0,
+            ...
+        }
+
+        Initial snapshot uses feed="ticker_snapshot".
+        """
+        self._kraken_messages_total += 1
+        try:
+            data = json.loads(raw)
+            feed = data.get("feed", "")
+
+            # ── ticker / ticker_snapshot: real-time price updates ──
+            if feed in ("ticker", "ticker_snapshot"):
+                symbol = data.get("product_id", "")
+                price_str = data.get("markPrice") or data.get("last")
+                if symbol and price_str:
+                    price = float(price_str)
+                    pair = _kraken_symbol_to_ccxt(symbol, self._kraken_pairs)
+                    if pair:
+                        self._kraken_messages_parsed += 1
+                        self._on_price_update(pair, price, "kraken")
+                return
+
+            # ── Skip subscription acks, heartbeats, info ──
+            if feed in ("", "heartbeat") or data.get("event") in ("subscribed", "info"):
+                return
+
+            # ── Unknown format: log it once for debugging ──
+            if self._kraken_messages_total <= 5:
+                logger.info(
+                    "Kraken WS unknown feed=%s keys=%s",
+                    feed, list(data.keys())[:10],
+                )
+
+        except (json.JSONDecodeError, ValueError, KeyError) as e:
+            if self._kraken_messages_total <= 3:
+                logger.warning("Kraken WS parse error: %s — raw: %s", e, raw[:200])
+
+    # ══════════════════════════════════════════════════════════════════
     # BINANCE — ccxt.pro watch_ticker
     # ══════════════════════════════════════════════════════════════════
 
@@ -558,17 +699,23 @@ class PriceFeed:
                     bybit_pct = (self._bybit_messages_parsed / self._bybit_messages_total) * 100
                     bybit_tag = f" bybit_parse={self._bybit_messages_parsed}/{self._bybit_messages_total}({bybit_pct:.0f}%)"
 
+                kraken_tag = ""
+                if self._kraken_messages_total > 0:
+                    kraken_pct = (self._kraken_messages_parsed / self._kraken_messages_total) * 100
+                    kraken_tag = f" kraken_parse={self._kraken_messages_parsed}/{self._kraken_messages_total}({kraken_pct:.0f}%)"
+
                 wake_tag = f" wake_alerts={self._wake_alerts}" if self._wake_alerts > 0 else ""
                 logger.info(
-                    "PriceFeed stats — Bybit: %d, Delta: %d, Binance: %d updates, "
-                    "exit_checks: %d, cached: %d pairs%s%s%s%s",
-                    self._bybit_updates, self._delta_updates, self._binance_updates,
-                    self._exit_checks, cached, parse_tag, bybit_tag, wake_tag, stale_tag,
+                    "PriceFeed stats — Bybit: %d, Delta: %d, Kraken: %d, Binance: %d updates, "
+                    "exit_checks: %d, cached: %d pairs%s%s%s%s%s",
+                    self._bybit_updates, self._delta_updates, self._kraken_updates, self._binance_updates,
+                    self._exit_checks, cached, parse_tag, bybit_tag, kraken_tag, wake_tag, stale_tag,
                 )
 
                 # Reset counters
                 self._delta_updates = 0
                 self._bybit_updates = 0
+                self._kraken_updates = 0
                 self._binance_updates = 0
                 self._exit_checks = 0
                 self._wake_alerts = 0
@@ -576,6 +723,8 @@ class PriceFeed:
                 self._delta_messages_parsed = 0
                 self._bybit_messages_total = 0
                 self._bybit_messages_parsed = 0
+                self._kraken_messages_total = 0
+                self._kraken_messages_parsed = 0
 
             except asyncio.CancelledError:
                 break

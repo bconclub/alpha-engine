@@ -280,7 +280,7 @@ function SupabaseProviderInner({ children }: { children: ReactNode }) {
         pair: row.pair,
         eventType,
         description: row.description,
-        exchange: (row.exchange === 'delta' || row.exchange === 'binance') ? row.exchange : undefined,
+        exchange: (row.exchange === 'delta' || row.exchange === 'binance' || row.exchange === 'bybit' || row.exchange === 'kraken') ? row.exchange : undefined,
       });
     }
 
@@ -465,7 +465,7 @@ function SupabaseProviderInner({ children }: { children: ReactNode }) {
           pair: row.pair,
           eventType,
           description: row.description,
-          exchange: (row.exchange === 'delta' || row.exchange === 'binance') ? row.exchange : undefined,
+          exchange: (row.exchange === 'delta' || row.exchange === 'binance' || row.exchange === 'bybit' || row.exchange === 'kraken') ? row.exchange : undefined,
         });
       })
       // Options state realtime (engine upserts every ~30s)

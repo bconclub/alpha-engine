@@ -58,6 +58,7 @@ const EXCHANGES: { label: string; value: Exchange | 'All' }[] = [
   { label: 'All', value: 'All' },
   { label: 'Bybit', value: 'bybit' },
   { label: 'Delta', value: 'delta' },
+  { label: 'Kraken', value: 'kraken' },
 ];
 const POSITION_TYPES: { label: string; value: PositionType | 'All' }[] = [
   { label: 'All', value: 'All' },

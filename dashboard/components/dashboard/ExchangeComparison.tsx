@@ -15,6 +15,7 @@ const exchangeSubtitles: Record<Exchange, string> = {
   binance: '',
   delta: '',
   bybit: '',
+  kraken: '',
 };
 
 export function ExchangeComparison() {

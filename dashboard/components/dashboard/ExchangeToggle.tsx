@@ -8,6 +8,7 @@ const toggleOptions: { label: string; value: ExchangeFilter; activeBorder?: stri
   { label: 'All', value: 'all' },
   { label: 'Bybit', value: 'bybit', activeBorder: 'border-l-2 border-l-[#f7a600]' },
   { label: 'Delta', value: 'delta', activeBorder: 'border-l-2 border-l-[#00d2ff]' },
+  { label: 'Kraken', value: 'kraken', activeBorder: 'border-l-2 border-l-[#7B61FF]' },
 ];
 
 export function ExchangeToggle() {
