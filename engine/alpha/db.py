@@ -246,11 +246,38 @@ class Database:
 
     # ── Bot status ───────────────────────────────────────────────────────────
 
+    # Core columns guaranteed to exist in every bot_status table.
+    # If the full insert fails (e.g. new columns missing from Supabase),
+    # we retry with ONLY these so the dashboard never goes completely stale.
+    _BOT_STATUS_CORE_KEYS = frozenset({
+        "timestamp", "total_pnl", "daily_pnl", "daily_loss_pct", "win_rate",
+        "total_trades", "open_positions", "active_strategy", "market_condition",
+        "capital", "pair", "is_running", "is_paused", "pause_reason",
+        "binance_balance", "delta_balance", "delta_balance_inr",
+        "binance_connected", "delta_connected", "bot_state",
+        "shorting_enabled", "leverage",
+    })
+
     async def save_bot_status(self, status: dict[str, Any]) -> None:
         if not self.is_connected:
             return
         status.setdefault("timestamp", iso_now())
-        await self._insert(self.TABLE_BOT_STATUS, status)
+        try:
+            await self._insert_strict(self.TABLE_BOT_STATUS, status)
+        except Exception:
+            # Full insert failed — likely missing columns in Supabase.
+            # Retry with only core fields so dashboard still gets fresh data.
+            core = {k: v for k, v in status.items() if k in self._BOT_STATUS_CORE_KEYS}
+            logger.warning(
+                "[DB] Full bot_status insert failed — retrying with %d core fields "
+                "(run supabase/fix_schema_cache.sql to fix permanently)",
+                len(core),
+            )
+            try:
+                await self._insert_strict(self.TABLE_BOT_STATUS, core)
+                logger.info("[DB] Core bot_status insert succeeded")
+            except Exception:
+                logger.exception("[DB] Even core bot_status insert failed")
 
     async def get_last_bot_status(self) -> dict[str, Any] | None:
         if not self.is_connected:
@@ -609,13 +636,17 @@ class Database:
 
     async def _insert(self, table: str, data: dict[str, Any]) -> None:
         try:
-            loop = asyncio.get_running_loop()
-            await loop.run_in_executor(
-                None,
-                lambda: self._client.table(table).insert(data).execute(),  # type: ignore[union-attr]
-            )
+            await self._insert_strict(table, data)
         except Exception as e:
             logger.error(
                 "DB INSERT FAILED for %s: %s | pair=%s | %s",
                 table, type(e).__name__, data.get("pair", "?"), e,
             )
+
+    async def _insert_strict(self, table: str, data: dict[str, Any]) -> None:
+        """Insert that re-raises on failure (caller handles retry logic)."""
+        loop = asyncio.get_running_loop()
+        await loop.run_in_executor(
+            None,
+            lambda: self._client.table(table).insert(data).execute(),  # type: ignore[union-attr]
+        )
