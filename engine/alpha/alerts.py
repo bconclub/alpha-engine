@@ -84,58 +84,55 @@ class AlertManager:
     async def send_startup(
         self,
         capital: float,
-        binance_pairs: list[str],
-        delta_pairs: list[str],
-        shorting_enabled: bool,
-        binance_balance: float | None = None,
-        delta_balance: float | None = None,
-        bybit_pairs: list[str] | None = None,
-        bybit_balance: float | None = None,
-        kraken_pairs: list[str] | None = None,
-        kraken_balance: float | None = None,
+        exchanges: list[dict[str, Any]],
+        strategies: list[dict[str, Any]],
+        issues: list[str],
     ) -> None:
-        """Clean startup banner.
-
-        Format:
-        ━━━━━━━━━━━━━━━━━━━━
-        🟢 ALPHA v3.11.3
-        ⚡ BTC | ETH | SOL | XRP
-        💪 20x | Shorting: Yes
-        🕐 2026-02-16 18:41 IST
-        ━━━━━━━━━━━━━━━━━━━━
-        """
-        # Clean pair names: "ETH/USD:USD" → "ETH", "BTC/USDT:USDT" → "BTC"
-        all_bases = sorted(
-            {p.split("/")[0] if "/" in p else p for p in binance_pairs}
-            | {p.split("/")[0] if "/" in p else p for p in delta_pairs}
-            | {p.split("/")[0] if "/" in p else p for p in (bybit_pairs or [])}
-            | {p.split("/")[0] if "/" in p else p for p in (kraken_pairs or [])}
-        )
-        pairs_str = " | ".join(all_bases) if all_bases else "None"
-
-        shorting = "Yes" if shorting_enabled else "No"
-        now = ist_now().strftime("%Y-%m-%d %H:%M IST")
-        leverage = config.bybit.leverage
+        """Status report startup message — shows what's live, broken, or needs attention."""
         engine_ver = get_version()
+        lines: list[str] = [
+            f"\U0001f7e2 <b>ALPHA v{engine_ver} — LIVE</b>",
+            f"\U0001f4b0 <code>{format_usd(capital)}</code>",
+            "",
+            "<b>EXCHANGES</b>",
+        ]
 
-        # Primary balance = Kraken > Bybit > Delta > total
-        primary_balance = (
-            kraken_balance if kraken_balance is not None
-            else bybit_balance if bybit_balance is not None
-            else delta_balance if delta_balance is not None
-            else capital
-        )
+        for ex in exchanges:
+            name = ex["name"]
+            if not ex.get("enabled"):
+                continue  # skip disabled exchanges entirely
+            if ex.get("error"):
+                lines.append(f"\u274c {name} ({ex['error']})")
+            elif ex.get("connected") and ex.get("balance") is not None:
+                bal = ex["balance"]
+                if bal > 0.50:
+                    lines.append(f"\u2705 {name} <code>{format_usd(bal)}</code>")
+                else:
+                    lines.append(f"\u26a0\ufe0f {name} <code>{format_usd(bal)}</code> (no funds)")
+            else:
+                lines.append(f"\u274c {name} (not connected)")
 
-        msg = (
-            f"{LINE}\n"
-            f"\U0001f7e2 <b>ALPHA v{engine_ver}</b>\n"
-            f"\U0001f4b0 <code>{format_usd(primary_balance)}</code>\n"
-            f"\u26a1 <code>{pairs_str}</code>\n"
-            f"\U0001f4aa <code>{leverage}x</code> | Shorting: <code>{shorting}</code>\n"
-            f"\U0001f552 <code>{now}</code>\n"
-            f"{LINE}"
-        )
-        await self._send(msg)
+        lines.append("")
+        lines.append("<b>STRATEGIES</b>")
+        for strat in strategies:
+            name = strat["name"]
+            if strat.get("active"):
+                detail = strat.get("detail", "")
+                lines.append(f"\u2705 {name}" + (f" ({detail})" if detail else ""))
+            else:
+                reason = strat.get("reason", "disabled")
+                lines.append(f"\u274c {name} ({reason})")
+
+        if issues:
+            lines.append("")
+            lines.append("<b>ISSUES</b>")
+            for issue in issues:
+                lines.append(f"\u26a0\ufe0f {issue}")
+        else:
+            lines.append("")
+            lines.append("\u2705 All systems nominal")
+
+        await self._send("\n".join(lines))
 
     # ── 2. MARKET UPDATE (all pairs, grouped by exchange) ──────────────────
 
@@ -621,25 +618,17 @@ class AlertManager:
 
     async def send_bot_started(
         self,
-        pairs: list[str],
         capital: float,
-        binance_balance: float | None = None,
-        delta_balance: float | None = None,
-        bybit_balance: float | None = None,
-        kraken_balance: float | None = None,
+        exchanges: list[dict[str, Any]],
+        strategies: list[dict[str, Any]],
+        issues: list[str],
     ) -> None:
-        """Routes to send_startup with exchange balances."""
+        """Routes to send_startup with structured status data."""
         await self.send_startup(
             capital=capital,
-            binance_pairs=config.trading.pairs,
-            delta_pairs=config.delta.pairs if config.delta.api_key else [],
-            bybit_pairs=config.bybit.pairs if config.bybit.api_key else [],
-            kraken_pairs=config.kraken.pairs if config.kraken.api_key else [],
-            shorting_enabled=config.bybit.enable_shorting or config.kraken.enable_shorting,
-            binance_balance=binance_balance,
-            delta_balance=delta_balance,
-            bybit_balance=bybit_balance,
-            kraken_balance=kraken_balance,
+            exchanges=exchanges,
+            strategies=strategies,
+            issues=issues,
         )
 
     async def send_bot_stopped(self, reason: str) -> None:
