@@ -6,6 +6,42 @@ import { getSupabase } from '@/lib/supabase';
 import { formatCurrency, formatPercentage, cn } from '@/lib/utils';
 
 // ---------------------------------------------------------------------------
+// Toggle Switch component
+// ---------------------------------------------------------------------------
+
+function ToggleSwitch({
+  enabled,
+  loading,
+  onToggle,
+  disabled,
+}: {
+  enabled: boolean;
+  loading: boolean;
+  onToggle: () => void;
+  disabled?: boolean;
+}) {
+  return (
+    <button
+      onClick={onToggle}
+      disabled={disabled || loading}
+      className={cn(
+        'relative inline-flex h-6 w-11 items-center rounded-full transition-colors focus:outline-none',
+        enabled ? 'bg-[#00c853]' : 'bg-zinc-700',
+        (disabled || loading) && 'opacity-50 cursor-not-allowed',
+      )}
+    >
+      <span
+        className={cn(
+          'inline-block h-4 w-4 rounded-full bg-white transition-transform',
+          enabled ? 'translate-x-6' : 'translate-x-1',
+          loading && 'animate-pulse',
+        )}
+      />
+    </button>
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Component
 // ---------------------------------------------------------------------------
 
@@ -15,6 +51,7 @@ export default function SettingsPage() {
   // Loading & feedback state
   const [pauseLoading, setPauseLoading] = useState(false);
   const [resumeLoading, setResumeLoading] = useState(false);
+  const [toggleLoading, setToggleLoading] = useState<string | null>(null);
   const [feedback, setFeedback] = useState<{
     type: 'success' | 'error';
     message: string;
@@ -115,6 +152,78 @@ export default function SettingsPage() {
   const cancelConfirm = useCallback(() => {
     setConfirmAction(null);
   }, []);
+
+  // -- Exchange toggle handler -----------------------------------------------
+
+  const handleToggleExchange = useCallback(async (exchange: string, enabled: boolean) => {
+    setToggleLoading(exchange);
+    try {
+      const { error } = await getSupabase()!.from('bot_commands').insert({
+        command: 'toggle_exchange',
+        params: { exchange, enabled },
+      });
+      if (error) throw error;
+      showFeedback('success', `${exchange.charAt(0).toUpperCase() + exchange.slice(1)} ${enabled ? 'enabled' : 'disabled'}`);
+    } catch (err: unknown) {
+      const message =
+        err instanceof Error ? err.message : 'Failed to toggle exchange';
+      showFeedback('error', message);
+    } finally {
+      setToggleLoading(null);
+    }
+  }, [showFeedback]);
+
+  // -- Strategy toggle handler -----------------------------------------------
+
+  const handleToggleStrategy = useCallback(async (strategy: string, enabled: boolean) => {
+    setToggleLoading(strategy);
+    try {
+      const { error } = await getSupabase()!.from('bot_commands').insert({
+        command: 'toggle_strategy',
+        params: { strategy, enabled },
+      });
+      if (error) throw error;
+      showFeedback('success', `${strategy} ${enabled ? 'enabled' : 'disabled'}`);
+    } catch (err: unknown) {
+      const message =
+        err instanceof Error ? err.message : 'Failed to toggle strategy';
+      showFeedback('error', message);
+    } finally {
+      setToggleLoading(null);
+    }
+  }, [showFeedback]);
+
+  // -- Exchange data ---------------------------------------------------------
+
+  const exchanges = useMemo(() => [
+    {
+      id: 'bybit',
+      name: 'BYBIT',
+      color: 'text-[#f7a600]',
+      connected: botStatus?.bybit_connected ?? false,
+      balance: botStatus?.bybit_balance ?? 0,
+      enabled: botStatus?.bybit_enabled ?? true,
+      type: 'USDT Perpetuals',
+    },
+    {
+      id: 'delta',
+      name: 'DELTA',
+      color: 'text-[#00d2ff]',
+      connected: botStatus?.delta_connected ?? false,
+      balance: botStatus?.delta_balance ?? 0,
+      enabled: botStatus?.delta_enabled ?? true,
+      type: 'USD Futures + Options',
+    },
+    {
+      id: 'kraken',
+      name: 'KRAKEN',
+      color: 'text-[#7B61FF]',
+      connected: botStatus?.kraken_connected ?? false,
+      balance: botStatus?.kraken_balance ?? 0,
+      enabled: botStatus?.kraken_enabled ?? true,
+      type: 'USD Perpetuals',
+    },
+  ], [botStatus]);
 
   // -------------------------------------------------------------------------
   return (
@@ -235,7 +344,110 @@ export default function SettingsPage() {
       </div>
 
       {/* ----------------------------------------------------------------- */}
-      {/* Section 2: Manual Controls                                        */}
+      {/* Section 2: Exchange Controls                                      */}
+      {/* ----------------------------------------------------------------- */}
+      <div className="bg-card border border-zinc-800 rounded-xl p-4 md:p-6">
+        <h2 className="text-sm font-medium text-zinc-400 uppercase tracking-wider mb-4 md:mb-6">
+          Exchange Controls
+        </h2>
+
+        <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+          {exchanges.map((ex) => (
+            <div
+              key={ex.id}
+              className={cn(
+                'border rounded-lg px-4 py-3 transition-colors',
+                ex.enabled
+                  ? 'bg-zinc-900/50 border-zinc-800'
+                  : 'bg-zinc-900/20 border-zinc-800/50 opacity-60',
+              )}
+            >
+              <div className="flex items-center justify-between mb-2">
+                <div className="flex items-center gap-2">
+                  <span
+                    className={cn(
+                      'w-2 h-2 rounded-full shrink-0',
+                      ex.connected ? 'bg-[#00c853] animate-pulse' : 'bg-red-500',
+                    )}
+                  />
+                  <span className={cn('text-sm font-semibold', ex.color)}>{ex.name}</span>
+                </div>
+                <ToggleSwitch
+                  enabled={ex.enabled}
+                  loading={toggleLoading === ex.id}
+                  onToggle={() => handleToggleExchange(ex.id, !ex.enabled)}
+                />
+              </div>
+
+              <div className="text-[10px] text-zinc-500 mb-1">{ex.type}</div>
+
+              {ex.balance > 0 ? (
+                <span className="font-mono text-sm text-white">
+                  {formatCurrency(ex.balance)}
+                </span>
+              ) : (
+                <span className="text-xs text-zinc-600">No balance data</span>
+              )}
+
+              <div className="mt-1.5 text-[10px] font-mono">
+                {ex.connected ? (
+                  <span className="text-[#00c853]/70">Connected</span>
+                ) : (
+                  <span className="text-zinc-600">Disconnected</span>
+                )}
+                <span className="text-zinc-700 mx-1">&middot;</span>
+                <span className={ex.enabled ? 'text-[#00c853]/70' : 'text-zinc-600'}>
+                  {ex.enabled ? 'Trading ON' : 'Trading OFF'}
+                </span>
+              </div>
+            </div>
+          ))}
+        </div>
+      </div>
+
+      {/* ----------------------------------------------------------------- */}
+      {/* Section 3: Strategy Controls                                      */}
+      {/* ----------------------------------------------------------------- */}
+      <div className="bg-card border border-zinc-800 rounded-xl p-4 md:p-6">
+        <h2 className="text-sm font-medium text-zinc-400 uppercase tracking-wider mb-4 md:mb-6">
+          Strategy Controls
+        </h2>
+
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+          {/* Scalp Strategy */}
+          <div className="flex items-center justify-between border border-zinc-800 rounded-lg px-4 py-3 bg-zinc-900/50">
+            <div>
+              <span className="text-sm font-medium text-white">Scalp</span>
+              <div className="text-[10px] text-zinc-500 mt-0.5">
+                11-signal momentum scalping (primary)
+              </div>
+            </div>
+            <ToggleSwitch
+              enabled={botStatus?.scalp_enabled ?? true}
+              loading={toggleLoading === 'scalp'}
+              onToggle={() => handleToggleStrategy('scalp', !(botStatus?.scalp_enabled ?? true))}
+            />
+          </div>
+
+          {/* Options Strategy */}
+          <div className="flex items-center justify-between border border-zinc-800 rounded-lg px-4 py-3 bg-zinc-900/50">
+            <div>
+              <span className="text-sm font-medium text-white">Options</span>
+              <div className="text-[10px] text-zinc-500 mt-0.5">
+                Delta options buying on 3/4+ signals
+              </div>
+            </div>
+            <ToggleSwitch
+              enabled={botStatus?.options_scalp_enabled ?? false}
+              loading={toggleLoading === 'options_scalp'}
+              onToggle={() => handleToggleStrategy('options_scalp', !(botStatus?.options_scalp_enabled ?? false))}
+            />
+          </div>
+        </div>
+      </div>
+
+      {/* ----------------------------------------------------------------- */}
+      {/* Section 4: Manual Controls                                        */}
       {/* ----------------------------------------------------------------- */}
       <div className="bg-card border border-zinc-800 rounded-xl p-4 md:p-6">
         <h2 className="text-sm font-medium text-zinc-400 uppercase tracking-wider mb-6">

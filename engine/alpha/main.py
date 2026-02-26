@@ -70,6 +70,11 @@ class AlphaBot:
         self._scalp_enabled: bool = True
         self._options_enabled: bool = config.delta.options_enabled
 
+        # Exchange enable/disable flags (toggled from dashboard)
+        self._bybit_enabled: bool = True
+        self._delta_enabled: bool = True
+        self._kraken_enabled: bool = True
+
         # WebSocket price feed for real-time exit checks
         self._price_feed: PriceFeed | None = None
 
@@ -272,16 +277,26 @@ class AlphaBot:
         # ── ORPHAN PROTECTION: close any exchange positions not in bot memory ──
         await self._reconcile_exchange_positions()
 
-        # Start all scalp strategies immediately (they run as parallel overlays)
+        # Start all scalp strategies (gated by exchange enabled flags)
+        _ex_enabled = {"bybit": self._bybit_enabled, "delta": self._delta_enabled, "kraken": self._kraken_enabled}
+        started = 0
         for pair, scalp in self._scalp_strategies.items():
+            ex_id = getattr(scalp, "_exchange_id", "delta")
+            if not _ex_enabled.get(ex_id, True):
+                logger.info("Skipping %s — %s exchange disabled", pair, ex_id)
+                continue
             await scalp.start()
-        logger.info("Scalp overlay started on %d pairs", len(self._scalp_strategies))
+            started += 1
+        logger.info("Scalp overlay started on %d/%d pairs", started, len(self._scalp_strategies))
 
         # Load pair/setup configs from DB → apply to scalp strategies
         await self._load_pair_setup_configs()
 
-        # Start options strategies (run as parallel overlays alongside scalp)
+        # Start options strategies (gated by delta enabled flag)
         for pair, opts in self._options_strategies.items():
+            if not self._delta_enabled:
+                logger.info("Skipping options %s — delta exchange disabled", pair)
+                continue
             await opts.start()
         if self._options_strategies:
             logger.info("Options overlay started on %d pairs", len(self._options_strategies))
@@ -1067,6 +1082,10 @@ class AlphaBot:
             # Strategy toggles
             "scalp_enabled": self._scalp_enabled,
             "options_scalp_enabled": self._options_enabled,
+            # Exchange toggles
+            "bybit_enabled": self._bybit_enabled,
+            "delta_enabled": self._delta_enabled,
+            "kraken_enabled": self._kraken_enabled,
             # INR exchange rate for dashboard display
             "inr_usd_rate": await self._get_inr_usd_rate(),
             # Daily P&L breakdown
@@ -1245,6 +1264,40 @@ class AlphaBot:
                 else:
                     result_msg = f"Unknown strategy: {strategy}"
                 await self.alerts.send_command_confirmation("toggle_strategy", result_msg)
+
+            elif command == "toggle_exchange":
+                exchange = params.get("exchange", "")
+                enabled = params.get("enabled", True)
+                tasks = []
+                if exchange == "bybit":
+                    self._bybit_enabled = enabled
+                elif exchange == "delta":
+                    self._delta_enabled = enabled
+                elif exchange == "kraken":
+                    self._kraken_enabled = enabled
+                else:
+                    result_msg = f"Unknown exchange: {exchange}"
+                    await self.db.mark_command_executed(cmd_id, result_msg)
+                    return
+
+                for pair, scalp in self._scalp_strategies.items():
+                    ex_id = getattr(scalp, "_exchange_id", "delta")
+                    if ex_id == exchange:
+                        if enabled and not scalp.is_active:
+                            tasks.append(scalp.start())
+                        elif not enabled and scalp.is_active:
+                            tasks.append(scalp.stop())
+                # Also handle options strategies for delta
+                if exchange == "delta":
+                    for pair, opts in self._options_strategies.items():
+                        if enabled and not opts.is_active and self._options_enabled:
+                            tasks.append(opts.start())
+                        elif not enabled and opts.is_active:
+                            tasks.append(opts.stop())
+                if tasks:
+                    await asyncio.gather(*tasks, return_exceptions=True)
+                result_msg = f"{exchange.title()} {'enabled' if enabled else 'disabled'} ({len(tasks)} strategies)"
+                await self.alerts.send_command_confirmation("toggle_exchange", result_msg)
 
             elif command == "update_config":
                 if "max_position_pct" in params:
@@ -1744,6 +1797,16 @@ class AlphaBot:
             if db_options is not None:
                 self._options_enabled = bool(db_options)
                 logger.info("Restored options_scalp_enabled=%s from DB", self._options_enabled)
+
+            # Restore exchange toggle state
+            for ex_name in ("bybit", "delta", "kraken"):
+                db_val = last.get(f"{ex_name}_enabled")
+                if db_val is not None:
+                    setattr(self, f"_{ex_name}_enabled", bool(db_val))
+            logger.info(
+                "Restored exchange toggles: bybit=%s delta=%s kraken=%s",
+                self._bybit_enabled, self._delta_enabled, self._kraken_enabled,
+            )
         else:
             logger.info("No previous state found -- starting fresh")
 

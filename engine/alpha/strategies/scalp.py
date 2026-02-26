@@ -278,6 +278,7 @@ class ScalpStrategy(BaseStrategy):
 
     # ── Entry thresholds — 3-of-4 with 15m trend soft weight ────────────
     MOMENTUM_MIN_PCT = 0.08           # Level 5/10 — 0.08%+ move in 60s (was 0.20)
+    MOMENTUM_30S_MIN_PCT = 0.06      # 30s window threshold (lower — shorter window)
     VOL_SPIKE_RATIO = 0.6             # Level 5/10 — volume > 0.6x average (was 0.8)
     RSI_EXTREME_LONG = 40             # Level 5/10 — RSI < 40 = oversold → long (was 35)
     RSI_EXTREME_SHORT = 60            # Level 5/10 — RSI > 60 = overbought → short (was 60→65→60)
@@ -430,6 +431,7 @@ class ScalpStrategy(BaseStrategy):
             "RATCHET_FLOOR_TABLE": [[t, f] for t, f in cls.RATCHET_FLOOR_TABLE],
             # Entry thresholds
             "MOMENTUM_MIN_PCT": cls.MOMENTUM_MIN_PCT,
+            "MOMENTUM_30S_MIN_PCT": cls.MOMENTUM_30S_MIN_PCT,
             "VOL_SPIKE_RATIO": cls.VOL_SPIKE_RATIO,
             "RSI_EXTREME_LONG": cls.RSI_EXTREME_LONG,
             "RSI_EXTREME_SHORT": cls.RSI_EXTREME_SHORT,
@@ -466,6 +468,11 @@ class ScalpStrategy(BaseStrategy):
     _pair_post_streak: dict[str, bool] = {}              # base_asset → True if first trade after streak
     _pair_last_reversal_time: dict[str, float] = {}      # base_asset → monotonic time of last REVERSAL exit
     _pair_last_reversal_side: dict[str, str] = {}        # base_asset → side of the REVERSAL exit (blocks same-dir re-entry)
+    # ── Anti-churn filters (GPFC B + C) ─────────────────────────────────
+    _pair_last_entry_momentum: dict[str, float] = {}     # "base_asset:long" → momentum at entry
+    _pair_last_exit_time_mono: dict[str, float] = {}     # "base_asset:long" → monotonic time of last exit
+    _pair_last_exit_price: dict[str, float] = {}         # base_asset → exit price
+    _pair_last_exit_time_any: dict[str, float] = {}      # base_asset → monotonic time (any direction)
 
     # ── Daily expiry (Delta India) ──────────────────────────────────────
     EXPIRY_HOUR_IST = 17
@@ -508,7 +515,8 @@ class ScalpStrategy(BaseStrategy):
             self._tp_pct = self.PAIR_TP_FLOOR.get(base_asset, self.MIN_TP_PCT)
         self._last_atr_pct: float = 0.0  # last computed 1m ATR as % of price
         self._atr_history: deque[float] = deque(maxlen=60)  # rolling ~1hr of ATR samples
-        self._price_history: deque[tuple[float, float]] = deque(maxlen=120)  # (monotonic_time, price) for 10s momentum
+        self._price_history: deque[tuple[float, float]] = deque(maxlen=120)  # (monotonic_time, price) for 10s/30s momentum
+        self._last_entry_momentum: float = 0.0  # strongest momentum at last signal (GPFC B)
         self._high_vol: bool = False  # True when ATR > 1.5x normal
 
         # ── Market regime detection ──────────────────────────────────────
@@ -953,6 +961,15 @@ class ScalpStrategy(BaseStrategy):
             price_1m_ago = float(close.iloc[-2]) if len(close) >= 2 else current_price
             momentum_60s = ((current_price - price_1m_ago) / price_1m_ago * 100) if price_1m_ago > 0 else 0
 
+            # 30-second momentum from real-time price history deque (GPFC A)
+            momentum_30s = 0.0
+            if len(self._price_history) >= 2:
+                now_mono = time.monotonic()
+                for ts, px in reversed(self._price_history):
+                    if now_mono - ts >= 28:  # ~30s ago (within 2s tolerance)
+                        momentum_30s = ((current_price - px) / px * 100) if px > 0 else 0
+                        break
+
             # 2-candle momentum (120 seconds) for trend confirmation
             price_2m_ago = float(close.iloc[-3]) if len(close) >= 3 else price_1m_ago
             momentum_120s = ((current_price - price_2m_ago) / price_2m_ago * 100) if price_2m_ago > 0 else 0
@@ -1206,7 +1223,7 @@ class ScalpStrategy(BaseStrategy):
         if entry is None:
             entry = self._detect_quality_entry(
             current_price, rsi_now, vol_ratio,
-            momentum_60s, momentum_120s, momentum_300s,
+            momentum_60s, momentum_30s, momentum_120s, momentum_300s,
             bb_upper, bb_lower,
             trend_15m,
             widened=is_widened,
@@ -1229,7 +1246,7 @@ class ScalpStrategy(BaseStrategy):
                 "reason": reason,
                 "strength": signal_strength,
                 "rsi": rsi_now,
-                "momentum_60s": momentum_60s,
+                "momentum_60s": momentum_60s, "momentum_30s": momentum_30s,
                 "current_price": current_price,
                 "timestamp": time.monotonic(),
                 **self._last_signal_breakdown,
@@ -1264,7 +1281,7 @@ class ScalpStrategy(BaseStrategy):
                 self.last_signal_state = {
                     "side": side, "reason": reason,
                     "strength": signal_strength, "trend_15m": trend_15m,
-                    "rsi": rsi_now, "momentum_60s": momentum_60s,
+                    "rsi": rsi_now, "momentum_60s": momentum_60s, "momentum_30s": momentum_30s,
                     "current_price": current_price, "timestamp": time.monotonic(),
                     "skip_reason": self._skip_reason,
                     **self._last_signal_breakdown,
@@ -1287,12 +1304,63 @@ class ScalpStrategy(BaseStrategy):
                 self.last_signal_state = {
                     "side": side, "reason": reason,
                     "strength": signal_strength, "trend_15m": trend_15m,
-                    "rsi": rsi_now, "momentum_60s": momentum_60s,
+                    "rsi": rsi_now, "momentum_60s": momentum_60s, "momentum_30s": momentum_30s,
                     "current_price": current_price, "timestamp": time.monotonic(),
                     "skip_reason": self._skip_reason,
                     **self._last_signal_breakdown,
                 }
                 return signals
+
+            # ── DECLINING MOMENTUM: skip if re-entering same pair+dir with weaker momentum (GPFC B) ──
+            dir_key_chk = f"{self._base_asset}:{side}"
+            last_mom = ScalpStrategy._pair_last_entry_momentum.get(dir_key_chk)
+            last_exit_t = ScalpStrategy._pair_last_exit_time_mono.get(dir_key_chk, 0.0)
+            if last_mom is not None and (now - last_exit_t) < 300:  # within 5 min
+                current_mom = max(abs(momentum_60s), abs(momentum_30s))
+                if current_mom < last_mom:
+                    self._skip_reason = (
+                        f"DECLINING_MOM ({side} {self._base_asset} — "
+                        f"last entry MOM:{last_mom:.3f}% now MOM:{current_mom:.3f}%)"
+                    )
+                    if self._tick_count % 12 == 0:
+                        self.logger.info(
+                            "[%s] SKIP: declining momentum %s — last entry MOM:%.3f%% now MOM:%.3f%%",
+                            self.pair, side, last_mom, current_mom,
+                        )
+                    self.last_signal_state = {
+                        "side": side, "reason": reason,
+                        "strength": signal_strength, "trend_15m": trend_15m,
+                        "rsi": rsi_now, "momentum_60s": momentum_60s, "momentum_30s": momentum_30s,
+                        "current_price": current_price, "timestamp": time.monotonic(),
+                        "skip_reason": self._skip_reason,
+                        **self._last_signal_breakdown,
+                    }
+                    return signals
+
+            # ── PRICE LEVEL MEMORY: skip if price too close to last exit (GPFC C) ──
+            last_exit_px = ScalpStrategy._pair_last_exit_price.get(self._base_asset)
+            last_exit_any_t = ScalpStrategy._pair_last_exit_time_any.get(self._base_asset, 0.0)
+            if last_exit_px is not None and last_exit_px > 0 and (now - last_exit_any_t) < 180:  # within 3 min
+                price_diff_pct = abs(current_price - last_exit_px) / last_exit_px * 100
+                if price_diff_pct < 0.10:
+                    self._skip_reason = (
+                        f"PRICE_LEVEL_MEMORY ({self._base_asset} — "
+                        f"exit:${last_exit_px:.2f} now:${current_price:.2f} diff:{price_diff_pct:.3f}%)"
+                    )
+                    if self._tick_count % 12 == 0:
+                        self.logger.info(
+                            "[%s] SKIP: price too close to last exit — exit:$%.2f now:$%.2f diff:%.3f%%",
+                            self.pair, last_exit_px, current_price, price_diff_pct,
+                        )
+                    self.last_signal_state = {
+                        "side": side, "reason": reason,
+                        "strength": signal_strength, "trend_15m": trend_15m,
+                        "rsi": rsi_now, "momentum_60s": momentum_60s, "momentum_30s": momentum_30s,
+                        "current_price": current_price, "timestamp": time.monotonic(),
+                        "skip_reason": self._skip_reason,
+                        **self._last_signal_breakdown,
+                    }
+                    return signals
 
             # ── PER-DIRECTION WIN RATE GATE: losing direction needs 4/4 ──
             dir_key = f"{self._base_asset}:{side}"
@@ -1317,7 +1385,7 @@ class ScalpStrategy(BaseStrategy):
                         self.last_signal_state = {
                             "side": side, "reason": reason,
                             "strength": signal_strength, "trend_15m": trend_15m,
-                            "rsi": rsi_now, "momentum_60s": momentum_60s,
+                            "rsi": rsi_now, "momentum_60s": momentum_60s, "momentum_30s": momentum_30s,
                             "current_price": current_price, "timestamp": time.monotonic(),
                             "skip_reason": self._skip_reason,
                             **self._last_signal_breakdown,
@@ -1342,7 +1410,7 @@ class ScalpStrategy(BaseStrategy):
                 self.last_signal_state = {
                     "side": side, "reason": reason,
                     "strength": signal_strength, "trend_15m": trend_15m,
-                    "rsi": rsi_now, "momentum_60s": momentum_60s,
+                    "rsi": rsi_now, "momentum_60s": momentum_60s, "momentum_30s": momentum_30s,
                     "current_price": current_price, "timestamp": time.monotonic(),
                     "skip_reason": self._skip_reason,
                     **self._last_signal_breakdown,
@@ -1378,7 +1446,7 @@ class ScalpStrategy(BaseStrategy):
                 "strength": signal_strength,
                 "trend_15m": trend_15m,
                 "rsi": rsi_now,
-                "momentum_60s": momentum_60s,
+                "momentum_60s": momentum_60s, "momentum_30s": momentum_30s,
                 "current_price": current_price,
                 "timestamp": time.monotonic(),
                 "skip_reason": "",
@@ -1410,7 +1478,7 @@ class ScalpStrategy(BaseStrategy):
                 "strength": 0,
                 "trend_15m": trend_15m,
                 "rsi": rsi_now,
-                "momentum_60s": momentum_60s,
+                "momentum_60s": momentum_60s, "momentum_30s": momentum_30s,
                 "current_price": current_price,
                 "timestamp": time.monotonic(),
                 "skip_reason": self._skip_reason,
@@ -1499,6 +1567,7 @@ class ScalpStrategy(BaseStrategy):
         rsi_now: float,
         vol_ratio: float,
         momentum_60s: float,
+        momentum_30s: float,
         momentum_120s: float,
         momentum_300s: float,
         bb_upper: float,
@@ -1550,12 +1619,15 @@ class ScalpStrategy(BaseStrategy):
         eff_mom, eff_vol, eff_rsi_l, eff_rsi_s = self._effective_thresholds(widened)
         widen_tag = " WIDE" if widened else ""
 
-        # Direction determined by momentum sign (even below gate, for dashboard)
-        mom_direction = "long" if momentum_60s > 0 else "short"
+        # Direction determined by stronger momentum window (GPFC A: dual 30s/60s)
+        mom_for_dir = momentum_60s if abs(momentum_60s) >= abs(momentum_30s) else momentum_30s
+        mom_direction = "long" if mom_for_dir > 0 else "short"
 
-        # ── MOMENTUM STRENGTH TIERS ─────────────────────────────────────
-        mom_abs = abs(momentum_60s)
-        below_gate = mom_abs < eff_mom
+        # ── MOMENTUM STRENGTH TIERS (use stronger of 30s/60s) ──────────
+        mom_abs = max(abs(momentum_60s), abs(momentum_30s))
+        mom_30s_fire = abs(momentum_30s) >= self.MOMENTUM_30S_MIN_PCT
+        mom_60s_fire = abs(momentum_60s) >= eff_mom
+        below_gate = not mom_30s_fire and not mom_60s_fire
 
         if mom_abs >= 0.20:
             mom_strength = "STRONG"
@@ -1612,8 +1684,8 @@ class ScalpStrategy(BaseStrategy):
             required_short = max(required_short, self.POST_STREAK_STRENGTH)
 
         self.logger.debug(
-            "[%s] MOM %s: %+.3f%% dir=%s req=L%d/S%d regime=%s gate=%s",
-            self.pair, mom_strength, momentum_60s, mom_direction,
+            "[%s] MOM %s: 30s=%+.3f%%/60s=%+.3f%% dir=%s req=L%d/S%d regime=%s gate=%s",
+            self.pair, mom_strength, momentum_30s, momentum_60s, mom_direction,
             required_long, required_short, self._market_regime,
             "PASS" if not below_gate else "BLOCKED",
         )
@@ -1622,11 +1694,13 @@ class ScalpStrategy(BaseStrategy):
         bull_signals: list[str] = []
         bear_signals: list[str] = []
 
-        # 1. Momentum (60s move) — same threshold for both directions
-        if momentum_60s >= eff_mom:
-            bull_signals.append(f"MOM:{momentum_60s:+.2f}%")
-        if momentum_60s <= -eff_mom:
-            bear_signals.append(f"MOM:{momentum_60s:+.2f}%")
+        # 1. Momentum — dual window: 30s OR 60s (GPFC A)
+        if mom_30s_fire or mom_60s_fire:
+            mom_tag = f"MOM:30s{momentum_30s:+.2f}%/60s{momentum_60s:+.2f}%"
+            if momentum_60s >= eff_mom or momentum_30s >= self.MOMENTUM_30S_MIN_PCT:
+                bull_signals.append(mom_tag)
+            if momentum_60s <= -eff_mom or momentum_30s <= -self.MOMENTUM_30S_MIN_PCT:
+                bear_signals.append(mom_tag)
 
         # 2. Volume spike — direction from candle
         if vol_ratio >= eff_vol:
@@ -1885,6 +1959,7 @@ class ScalpStrategy(BaseStrategy):
             reason = f"LONG {len(bull_signals)}/4: {' + '.join(bull_signals)} [15m={trend_15m}]{req_tag}{widen_tag}"
             use_limit = "MOM" not in bull_signals[0]
             self._last_signal_breakdown = _build_breakdown()
+            self._last_entry_momentum = max(abs(momentum_60s), abs(momentum_30s))  # GPFC B
             return ("long", reason, use_limit, len(bull_signals))
 
         # ── Check required signals (SHORT) — trend-weighted ───────────────
@@ -1893,6 +1968,7 @@ class ScalpStrategy(BaseStrategy):
             reason = f"SHORT {len(bear_signals)}/4: {' + '.join(bear_signals)} [15m={trend_15m}]{req_tag}{widen_tag}"
             use_limit = "MOM" not in bear_signals[0]
             self._last_signal_breakdown = _build_breakdown()
+            self._last_entry_momentum = max(abs(momentum_60s), abs(momentum_30s))  # GPFC B
             return ("short", reason, use_limit, len(bear_signals))
 
         # ── Log direction-blocked entries ────────────────────────────────
@@ -2629,6 +2705,9 @@ class ScalpStrategy(BaseStrategy):
             peak_pnl = ((self.entry_price - self.lowest_since_entry) / self.entry_price) * 100
         else:
             peak_pnl = 0.0
+        # Track exit price for price-level memory guard (GPFC C)
+        ScalpStrategy._pair_last_exit_price[self._base_asset] = price
+        ScalpStrategy._pair_last_exit_time_any[self._base_asset] = time.monotonic()
         self._record_scalp_result(pnl_pct, exit_type.lower())
         return [self._exit_signal(price, side, reason, peak_pnl)]
 
@@ -3375,6 +3454,9 @@ class ScalpStrategy(BaseStrategy):
         self._reversal_exit_logged = False  # reset reversal log suppression
         self._pending_tier1 = None  # clear any pending T1 on entry
         self._hourly_trades.append(time.time())
+        # Track entry momentum for declining-momentum filter (GPFC B)
+        dir_key = f"{self._base_asset}:{side}"
+        ScalpStrategy._pair_last_entry_momentum[dir_key] = getattr(self, '_last_entry_momentum', 0.0)
 
     def _record_scalp_result(self, pnl_pct: float, exit_type: str) -> None:
         # Convert contracts to coin amount for correct P&L
@@ -3464,6 +3546,10 @@ class ScalpStrategy(BaseStrategy):
                 "[%s] REVERSAL COOLDOWN SET — no re-entry on %s for %ds (was %s)",
                 self.pair, self._base_asset, self.REVERSAL_COOLDOWN_SECONDS, exited_side,
             )
+
+        # Track exit time per direction for declining-momentum filter (GPFC B)
+        dir_key_exit = f"{self._base_asset}:{self.position_side or 'long'}"
+        ScalpStrategy._pair_last_exit_time_mono[dir_key_exit] = now
 
         hold_sec = int(now - self.entry_time)
         duration = f"{hold_sec // 60}m{hold_sec % 60:02d}s" if hold_sec >= 60 else f"{hold_sec}s"

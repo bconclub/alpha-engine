@@ -141,6 +141,10 @@ export interface BotStatus {
   // Strategy toggles
   scalp_enabled?: boolean;
   options_scalp_enabled?: boolean;
+  // Exchange toggles
+  bybit_enabled?: boolean;
+  delta_enabled?: boolean;
+  kraken_enabled?: boolean;
   // INR exchange rate
   inr_usd_rate?: number;
   // Daily P&L breakdown
