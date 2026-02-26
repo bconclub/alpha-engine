@@ -277,9 +277,10 @@ class ScalpStrategy(BaseStrategy):
     # ── DISABLED SETUPS — controlled via dashboard setup_config only (no hardcoded blocks)
 
     # ── Entry thresholds — 3-of-4 with 15m trend soft weight ────────────
-    MOMENTUM_MIN_PCT = 0.08           # Level 5/10 — 0.08%+ move in 60s (was 0.20)
-    MOMENTUM_30S_MIN_PCT = 0.06      # 30s window threshold (lower — shorter window)
-    VOL_SPIKE_RATIO = 0.6             # Level 5/10 — volume > 0.6x average (was 0.8)
+    # Layer 3 (momentum safety net) — high gates, only catches big moves
+    MOMENTUM_MIN_PCT = 0.20           # 0.20%+ move in 60s (big sustained moves only)
+    MOMENTUM_30S_MIN_PCT = 0.12      # 30s window threshold (raised from 0.06)
+    VOL_SPIKE_RATIO = 1.5             # need real institutional volume (was 0.6)
     RSI_EXTREME_LONG = 40             # Level 5/10 — RSI < 40 = oversold → long (was 35)
     RSI_EXTREME_SHORT = 60            # Level 5/10 — RSI > 60 = overbought → short (was 60→65→60)
     # BB mean-reversion thresholds (upper = short, lower = long):
@@ -304,13 +305,14 @@ class ScalpStrategy(BaseStrategy):
     TIER1_MIN_SIGNALS = 2             # need 2+ T1 signals for anticipatory entry
 
     # ── TIER 1 CONFIRMATION WINDOW ─────────────────────────────────
-    CONFIRM_MOM_PCT = 0.10            # momentum threshold for tier1 confirmation
-    CONFIRM_COUNTER_PCT = 0.15        # counter-momentum → immediate unconfirmed exit
+    CONFIRM_MOM_PCT = 0.06            # momentum threshold for tier1 confirmation (was 0.10)
+    CONFIRM_COUNTER_PCT = 0.10        # counter-momentum → immediate rejection (was 0.15)
+    T1_ACCEL_CONFIRM_VEL = 0.03      # velocity_5s for acceleration-based T1 confirm
 
     # ── TIER-BASED POSITION SIZING ─────────────────────────────────
     TIER1_SIZE_3_MULT = 1.0           # 3+ T1 signals → full size
-    TIER1_SIZE_2_MULT = 0.60          # 2 T1 signals → 60%
-    TIER1_SIZE_1_MULT = 0.40          # 1 T1 + 2 T2 → 40%
+    TIER1_SIZE_2_MULT = 1.0           # 2 T1 signals → full size (was 0.60)
+    TIER1_SIZE_1_MULT = 0.80          # 1 T1 + 2 T2 → 80% (was 0.40)
     SURVIVAL_BALANCE = 20.0           # below this, cap allocation
     SURVIVAL_MAX_ALLOC = 30.0         # max alloc % in survival mode
     MAX_SL_LOSS_PCT = 5.0             # max SL loss = 5% of TOTAL balance (not collateral)
@@ -318,6 +320,13 @@ class ScalpStrategy(BaseStrategy):
     # ── STALE MOMENTUM FILTER ────────────────────────────────────
     STALE_MOM_LOOKBACK_S = 10         # look back 10 seconds for recent momentum
     STALE_MOM_MIN_PCT = 0.08          # need 0.08% move in last 10s in our direction (was 0.05)
+
+    # ── LAYER 1: WS ACCELERATION ENTRY ────────────────────────────
+    ACCEL_MIN_VELOCITY = 0.04         # 0.04% in 5s = real move
+    ACCEL_MIN_POSITIVE = 0.01         # acceleration must be positive by at least this
+    ACCEL_MIN_TICKS = 3               # minimum ticks in 5s window
+    ACCEL_COOLDOWN = 30               # seconds between accel entries on same pair
+    ACCEL_MIN_SUPPORT = 2             # need 2/4 cached indicator support
 
     # ── Binance SPOT overrides — wider SL/TP/trail for no-leverage spot ──
     SPOT_SL_PCT = 2.0                 # 2% SL for spot (no leverage, needs room)
@@ -478,6 +487,10 @@ class ScalpStrategy(BaseStrategy):
     _pair_dead_cooldown_until: dict[str, float] = {}     # "base_asset:side" → monotonic time cooldown expires
     DEAD_STREAK_LIMIT = 3                                 # 3 consecutive DEAD exits → cooldown
     DEAD_STREAK_COOLDOWN_S = 600                          # 10 minute cooldown
+    # ── LAYER 1: WS acceleration shared state ───────────────────────────
+    _tick_buffer: dict[str, deque] = {}                   # base_asset → deque of (mono_time, price)
+    _last_accel_entry_time: dict[str, float] = {}         # base_asset → last accel entry time
+    _cached_signals: dict[str, dict] = {}                 # base_asset → last candle scan indicators
 
     # ── Daily expiry (Delta India) ──────────────────────────────────────
     EXPIRY_HOUR_IST = 17
@@ -994,6 +1007,18 @@ class ScalpStrategy(BaseStrategy):
             ema_9 = float(close.ewm(span=9, adjust=False).mean().iloc[-1])
             ema_21 = float(close.ewm(span=21, adjust=False).mean().iloc[-1])
 
+            # ── Cache signals for Layer 1 acceleration entry ─────────
+            bb_range_cache = bb_upper - bb_lower if bb_upper > bb_lower else 1e-9
+            bb_pos_cache = (current_price - bb_lower) / bb_range_cache
+            ScalpStrategy._cached_signals[self._base_asset] = {
+                "rsi": rsi_now,
+                "bb_position": bb_pos_cache,
+                "vwap_above": current_price > vwap,
+                "ema9_above_21": ema_9 > ema_21,
+                "volume_ratio": vol_ratio,
+                "timestamp": time.monotonic(),
+            }
+
         # ── Heartbeat every 60 seconds ─────────────────────────────────
         if now - self._last_heartbeat >= 60:
             self._last_heartbeat = now
@@ -1157,20 +1182,44 @@ class ScalpStrategy(BaseStrategy):
             pt1_age = now - pt1["timestamp"]
             pt1_side = pt1["side"]
 
+            # ── Compute tick velocity for acceleration-based T1 confirm ──
+            _t1_vel_5s = 0.0
+            _t1_ticks = ScalpStrategy._tick_buffer.get(self._base_asset)
+            if _t1_ticks and len(_t1_ticks) >= 3:
+                _t1_recent = [(t, p) for t, p in _t1_ticks if now - t <= 5.0]
+                if len(_t1_recent) >= 2:
+                    _t1_vel_5s = (_t1_recent[-1][1] - _t1_recent[0][1]) / _t1_recent[0][1] * 100
+
             if pt1_age >= self.PHASE1_SECONDS:
                 # ── T1_TIMEOUT: 30s with no confirmation ──────────────
                 self.logger.info(
-                    "[%s] T1_TIMEOUT — no momentum confirmation after %.0fs, clearing pending %s",
+                    "[%s] T1_TIMEOUT — no confirmation after %.0fs, clearing pending %s",
                     self.pair, pt1_age, pt1_side,
                 )
                 self._pending_tier1 = None
                 # Zero fees, zero loss — just a skip
 
+            elif (pt1_side == "long" and _t1_vel_5s >= self.T1_ACCEL_CONFIRM_VEL) or \
+                 (pt1_side == "short" and _t1_vel_5s <= -self.T1_ACCEL_CONFIRM_VEL):
+                # ── T1_ACCEL_CONFIRM: tick velocity confirms direction ──
+                self.logger.info(
+                    "[%s] T1_ACCEL_CONFIRM — velocity=%+.3f%%/5s confirms %s after %.0fs",
+                    self.pair, _t1_vel_5s, pt1_side, pt1_age,
+                )
+                self._entry_path = "tier1"
+                self._tier1_count = pt1["tier1_count"]
+                self._tier2_count = pt1["tier2_count"]
+                self._trade_leverage = self._calculate_leverage(
+                    pt1["tier1_count"] + pt1["tier2_count"], momentum_60s, rsi_now,
+                )
+                entry = (pt1_side, pt1["reason"] + f" [ACCEL vel={_t1_vel_5s:+.3f}%] | LEV:{self._trade_leverage}x", True, pt1["strength"])
+                self._pending_tier1 = None
+
             elif (pt1_side == "long" and momentum_60s >= self.CONFIRM_MOM_PCT) or \
                  (pt1_side == "short" and momentum_60s <= -self.CONFIRM_MOM_PCT):
-                # ── CONFIRMED: momentum in pending direction ─────────
+                # ── T1_CONFIRMED: candle momentum in pending direction ──
                 self.logger.info(
-                    "[%s] T1_CONFIRMED — mom=%+.3f%% confirms %s after %.0fs, executing entry",
+                    "[%s] T1_CONFIRMED — mom=%+.3f%% confirms %s after %.0fs",
                     self.pair, momentum_60s, pt1_side, pt1_age,
                 )
                 self._entry_path = "tier1"
@@ -1179,7 +1228,6 @@ class ScalpStrategy(BaseStrategy):
                 self._trade_leverage = self._calculate_leverage(
                     pt1["tier1_count"] + pt1["tier2_count"], momentum_60s, rsi_now,
                 )
-                # Set entry — flows into the normal entry processing below
                 entry = (pt1_side, pt1["reason"] + f" | LEV:{self._trade_leverage}x", True, pt1["strength"])
                 self._pending_tier1 = None
 
@@ -1210,12 +1258,14 @@ class ScalpStrategy(BaseStrategy):
                         )
                         self._pending_tier1 = None
                 if self._pending_tier1 is not None:
-                    # Still pending — log periodically
+                    # Still pending — enhanced logging
                     if self._tick_count % 6 == 0:
                         self.logger.info(
-                            "[%s] T1_PENDING %.0fs/%ds | %s | mom=%+.3f%% need %+.2f%%",
-                            self.pair, pt1_age, self.PHASE1_SECONDS,
-                            pt1_side, momentum_60s, self.CONFIRM_MOM_PCT,
+                            "[%s] T1_WAITING: %s age=%.0fs mom=%+.3f%% vel=%+.3f%% "
+                            "need_confirm=%.2f%% or vel=%.2f%%",
+                            self.pair, pt1_side, pt1_age,
+                            momentum_60s, _t1_vel_5s,
+                            self.CONFIRM_MOM_PCT, self.T1_ACCEL_CONFIRM_VEL,
                         )
                     self._skip_reason = f"T1_PENDING ({pt1_side}, {int(pt1_age)}s/{self.PHASE1_SECONDS}s)"
                     return signals  # don't scan for new entries while pending
@@ -1942,6 +1992,26 @@ class ScalpStrategy(BaseStrategy):
                 self._skip_reason = f"NO_MOMENTUM ({abs(momentum_60s):.3f}% < {eff_mom:.3f}%)"
             return None
 
+        # ── Layer 3 velocity check: skip if 5s velocity opposes momentum ──
+        _mom_ticks = ScalpStrategy._tick_buffer.get(self._base_asset)
+        _mom_vel_5s = 0.0
+        if _mom_ticks and len(_mom_ticks) >= 2:
+            _mom_now = time.monotonic()
+            _mom_recent = [(t, p) for t, p in _mom_ticks if _mom_now - t <= 5.0]
+            if len(_mom_recent) >= 2:
+                _mom_vel_5s = (_mom_recent[-1][1] - _mom_recent[0][1]) / _mom_recent[0][1] * 100
+        if _mom_vel_5s != 0:
+            # If momentum says long but velocity is negative (or vice versa), move is reversing
+            if (mom_direction == "long" and _mom_vel_5s < -0.005) or \
+               (mom_direction == "short" and _mom_vel_5s > 0.005):
+                self.logger.info(
+                    "[%s] MOM_VELOCITY_CHECK: 60s=%+.3f%% but 5s_vel=%+.3f%% — move reversing, skip",
+                    self.pair, momentum_60s, _mom_vel_5s,
+                )
+                self._last_signal_breakdown = _build_breakdown()
+                self._skip_reason = f"MOM_REVERSING (60s={momentum_60s:+.3f}% vel={_mom_vel_5s:+.3f}%)"
+                return None
+
         # WEAK momentum counter to 15m trend = skip (don't fight the bigger picture)
         if mom_strength == "WEAK" and (
             (mom_direction == "long" and trend_15m == "bearish")
@@ -2571,13 +2641,22 @@ class ScalpStrategy(BaseStrategy):
         return signals
 
     def check_exits_immediate(self, current_price: float) -> None:
-        """Price-only exit check — called by WebSocket PriceFeed on every tick.
+        """WS tick handler — acceleration entry (Layer 1) + exit checks.
 
-        Runs SL, Hard TP, ratchet floor, breakeven, flatline/timeout.
-        Does NOT check momentum reversal (needs OHLCV data).
-        Ratchet floor protects profits on every tick.
+        Called by WebSocket PriceFeed on every tick. If not in position,
+        collects ticks and checks for price acceleration entry. If in position,
+        runs SL, Hard TP, ratchet floor, breakeven, flatline/timeout.
         """
+        # ── Always collect ticks into shared buffer ──────────────────
+        key = self._base_asset
+        now = time.monotonic()
+        if key not in ScalpStrategy._tick_buffer:
+            ScalpStrategy._tick_buffer[key] = deque(maxlen=120)
+        ScalpStrategy._tick_buffer[key].append((now, current_price))
+
         if not self.in_position or not self.position_side:
+            # ── LAYER 1: Acceleration entry check ────────────────────
+            self._check_acceleration_entry(key, now, current_price)
             return
 
         hold_seconds = time.monotonic() - self.entry_time
@@ -2704,6 +2783,156 @@ class ScalpStrategy(BaseStrategy):
                     self.logger.warning("[%s] WS exit order failed/skipped", self.pair)
         except Exception:
             self.logger.exception("[%s] WS exit execution error", self.pair)
+
+    # ── LAYER 1: WS Acceleration entry ──────────────────────────────────
+
+    def _check_acceleration_entry(self, key: str, now: float, price: float) -> None:
+        """Detect price acceleration from WS ticks and fire entry if confirmed."""
+        ticks = ScalpStrategy._tick_buffer.get(key)
+        if not ticks or len(ticks) < 5:
+            return
+
+        # ── Cooldown check ───────────────────────────────────────────
+        if now - ScalpStrategy._last_accel_entry_time.get(key, 0) <= self.ACCEL_COOLDOWN:
+            return
+
+        # ── Basic guards: already in position, paused, regime ────────
+        if self.in_position:
+            return
+        if self.risk_manager.is_paused:
+            return
+        if self._market_regime == "CHOPPY":
+            return
+
+        # ── Compute velocity windows ─────────────────────────────────
+        recent = [(t, p) for t, p in ticks if now - t <= 5.0]
+        prior = [(t, p) for t, p in ticks if 5.0 < now - t <= 10.0]
+
+        if len(recent) < 2 or len(prior) < 2:
+            return
+
+        velocity_5s = (recent[-1][1] - recent[0][1]) / recent[0][1] * 100
+        velocity_prev = (prior[-1][1] - prior[0][1]) / prior[0][1] * 100
+        acceleration = abs(velocity_5s) - abs(velocity_prev)
+
+        if abs(velocity_5s) < self.ACCEL_MIN_VELOCITY:
+            return
+        if acceleration < self.ACCEL_MIN_POSITIVE:
+            return
+        if len(recent) < self.ACCEL_MIN_TICKS:
+            return
+
+        direction = "long" if velocity_5s > 0 else "short"
+
+        # ── Shorting guard ───────────────────────────────────────────
+        if direction == "short" and not self.is_futures:
+            return
+
+        # ── Check cached candle signals (from last 5s scan cycle) ────
+        cached = ScalpStrategy._cached_signals.get(key, {})
+        cache_age = now - cached.get("timestamp", 0) if cached else 999
+        support_count = 0
+        if cached and cache_age < 10:
+            if direction == "long":
+                if cached.get("rsi", 50) < 45:
+                    support_count += 1
+                if cached.get("bb_position", 0.5) < 0.30:
+                    support_count += 1
+                if cached.get("vwap_above", False):
+                    support_count += 1
+                if cached.get("ema9_above_21", False):
+                    support_count += 1
+            else:
+                if cached.get("rsi", 50) > 55:
+                    support_count += 1
+                if cached.get("bb_position", 0.5) > 0.70:
+                    support_count += 1
+                if not cached.get("vwap_above", True):
+                    support_count += 1
+                if not cached.get("ema9_above_21", True):
+                    support_count += 1
+
+        if support_count < self.ACCEL_MIN_SUPPORT:
+            return
+
+        # ── FIRE: acceleration confirmed with signal support ─────────
+        self.logger.info(
+            "[%s] ACCEL ENTRY: %s vel=%+.3f%%/5s accel=%+.3f ticks=%d support=%d/4",
+            self.pair, direction, velocity_5s, acceleration,
+            len(recent), support_count,
+        )
+        try:
+            asyncio.get_running_loop().create_task(
+                self._execute_accel_entry(
+                    direction, velocity_5s, acceleration, support_count, price,
+                )
+            )
+        except RuntimeError:
+            pass  # no running event loop (shouldn't happen in normal operation)
+
+    async def _execute_accel_entry(
+        self,
+        direction: str,
+        velocity: float,
+        acceleration: float,
+        support_count: int,
+        price: float,
+    ) -> None:
+        """Execute a Layer 1 acceleration entry (async, called via create_task)."""
+        try:
+            # Double-check not already in position (race guard)
+            if self.in_position:
+                return
+
+            self._entry_path = "acceleration"
+            self._tier1_count = 0
+            self._tier2_count = 0
+
+            # Build reason string
+            reason = (
+                f"{direction.upper()} ACCEL: vel={velocity:+.3f}%/5s "
+                f"accel={acceleration:+.3f} support={support_count}/4"
+            )
+
+            # Dynamic leverage (use support_count as signal strength proxy)
+            signal_strength = max(support_count, 3)  # treat as 3/4 minimum
+            self._trade_leverage = self._calculate_leverage(signal_strength, velocity, 50.0)
+            reason += f" | LEV:{self._trade_leverage}x"
+
+            # Refresh balance + sizing
+            await self._refresh_balance_if_stale()
+            available = self.risk_manager.get_available_capital(self._exchange_id)
+            total_scalp = len(self.risk_manager.open_positions)
+
+            amount = self._calculate_position_size_dynamic(
+                price, available, signal_strength, total_scalp,
+                momentum_60s=velocity,
+            )
+            if amount is None:
+                self.logger.warning("[%s] ACCEL entry skipped — sizing returned None", self.pair)
+                return
+
+            # Build and execute signal (market order for speed)
+            entry_signal = self._build_entry_signal(direction, price, amount, reason, "market")
+            if entry_signal is None:
+                return
+
+            if self.risk_manager.approve_signal(entry_signal):
+                order = await self.executor.execute(entry_signal)
+                if order is not None:
+                    self.on_fill(entry_signal, order)
+                    ScalpStrategy._last_accel_entry_time[self._base_asset] = time.monotonic()
+                    self.logger.info(
+                        "[%s] ACCEL FILLED — %s @ $%.2f, %dx | vel=%+.3f%%/5s",
+                        self.pair, direction.upper(), price,
+                        self._trade_leverage, velocity,
+                    )
+                else:
+                    self.logger.warning("[%s] ACCEL entry order failed/skipped", self.pair)
+            else:
+                self.logger.info("[%s] ACCEL entry rejected by risk manager", self.pair)
+        except Exception:
+            self.logger.exception("[%s] ACCEL entry execution error", self.pair)
 
     def _do_exit(
         self, price: float, pnl_pct: float, side: str,
