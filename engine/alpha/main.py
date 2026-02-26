@@ -435,85 +435,79 @@ class AlphaBot:
         except Exception:
             logger.exception("[STARTUP] Affordability check failed — continuing")
 
-        # ── Build structured status for startup message ────────────────
+        # ── Build startup message as flat string ─────────────────────────
         try:
-            _exchanges: list[dict] = []
-            _issues: list[str] = []
-            for name, ex_obj, bal, enabled, pairs_list in [
-                ("Delta", self.delta, delta_bal, self._delta_enabled, self.delta_pairs),
-                ("Kraken", self.kraken, kraken_bal, self._kraken_enabled, self.kraken_pairs),
-                ("Bybit", self.bybit, bybit_bal, self._bybit_enabled, self.bybit_pairs),
-                ("Binance", self.binance, binance_bal, True, self.pairs),
+            from alpha.utils import get_version as _gv, ist_now as _ist
+
+            _v = _gv()
+            _now = _ist().strftime("%Y-%m-%d %H:%M IST")
+            _lev = config.bybit.leverage or config.delta.leverage or config.kraken.leverage or 1
+
+            # Exchanges
+            _ex_lines = []
+            for name, ex_obj, bal, enabled in [
+                ("Delta", self.delta, delta_bal, self._delta_enabled),
+                ("Kraken", self.kraken, kraken_bal, self._kraken_enabled),
+                ("Bybit", self.bybit, bybit_bal, self._bybit_enabled),
+                ("Binance", self.binance, binance_bal, True),
             ]:
-                entry: dict = {"name": name, "enabled": enabled}
                 if not enabled:
-                    _exchanges.append(entry)
                     continue
                 if ex_obj is None:
-                    entry["connected"] = False
-                    entry["error"] = "no API key"
-                    _exchanges.append(entry)
-                    continue
-                entry["connected"] = bal is not None
-                entry["balance"] = bal
-                if bal is None:
-                    entry["error"] = "balance fetch failed"
-                    _issues.append(f"{name} balance fetch failed")
-                elif bal < 1.0 and pairs_list:
-                    _issues.append(f"{name} needs deposit (${bal:.2f})")
-                _exchanges.append(entry)
+                    _ex_lines.append(f"  \u274c {name} — no API key")
+                elif bal is not None and bal > 0:
+                    _ex_lines.append(f"  \u2705 {name} ${bal:,.2f}")
+                elif bal is not None:
+                    _ex_lines.append(f"  \u26a0\ufe0f {name} ${bal:,.2f}")
+                else:
+                    _ex_lines.append(f"  \u274c {name} — offline")
 
-            leverage = config.bybit.leverage or config.delta.leverage or config.kraken.leverage or 1
-            scalp_pairs = len(self._scalp_strategies)
-            _strategies: list[dict] = []
-            if self._scalp_enabled:
-                _strategies.append({
-                    "name": "Scalp",
-                    "active": scalp_pairs > 0,
-                    "detail": f"{leverage}x, {scalp_pairs} pairs",
-                    "reason": "no pairs configured" if scalp_pairs == 0 else "",
-                })
+            # Strategies
+            _st_lines = []
+            n_scalp = len(self._scalp_strategies)
+            n_opts = len(self._options_strategies)
+            if self._scalp_enabled and n_scalp > 0:
+                _st_lines.append(f"  \u2705 Scalp — {n_scalp} pairs, {_lev}x")
+            elif self._scalp_enabled:
+                _st_lines.append(f"  \u274c Scalp — no pairs")
             else:
-                _strategies.append({"name": "Scalp", "active": False, "reason": "disabled"})
-
-            if self._options_enabled and self._delta_enabled:
-                opts_count = len(self._options_strategies)
-                _strategies.append({
-                    "name": "Options",
-                    "active": opts_count > 0,
-                    "detail": f"{opts_count} pairs",
-                    "reason": "no pairs" if opts_count == 0 else "",
-                })
+                _st_lines.append(f"  \u274c Scalp — disabled")
+            if self._options_enabled and self._delta_enabled and n_opts > 0:
+                _st_lines.append(f"  \u2705 Options — {n_opts} pairs")
             else:
-                reason = "disabled" if not self._options_enabled else "delta exchange disabled"
-                _strategies.append({"name": "Options", "active": False, "reason": reason})
+                _st_lines.append(f"  \u274c Options — disabled")
 
-            # Survival mode warning
-            min_comfortable = 20.0
-            if total_capital < min_comfortable and total_capital > 0:
-                _issues.append(f"Survival mode (${total_capital:.2f} < ${min_comfortable:.0f})")
+            # Market regime (from first scalp strategy)
+            _regime = "unknown"
+            for s in self._scalp_strategies.values():
+                _regime = getattr(s, "_market_regime", "unknown")
+                break
 
-            logger.info(
-                "[STARTUP] Sending status report: exchanges=%d strategies=%d issues=%d capital=$%.2f",
-                len(_exchanges), len(_strategies), len(_issues), total_capital,
+            # All pairs
+            _all_bases = sorted({p.split("/")[0] for p in self.all_pairs})
+            _pairs_str = " | ".join(_all_bases) if _all_bases else "none"
+
+            msg = (
+                f"\U0001f7e2 <b>ALPHA v{_v} — LIVE</b>\n"
+                f"\n"
+                f"<b>Balance:</b> <code>${total_capital:,.2f}</code>\n"
+                f"<b>Pairs:</b> <code>{_pairs_str}</code>\n"
+                f"\n"
+                f"<b>Exchanges</b>\n"
+                + "\n".join(_ex_lines) + "\n"
+                f"\n"
+                f"<b>Strategies</b>\n"
+                + "\n".join(_st_lines) + "\n"
+                f"\n"
+                f"<b>Market:</b> <code>{_regime}</code>\n"
+                f"<b>Time:</b> <code>{_now}</code>"
             )
-            await self.alerts.send_bot_started(
-                capital=total_capital,
-                exchanges=_exchanges,
-                strategies=_strategies,
-                issues=_issues,
-            )
+
+            logger.info("[STARTUP] Sending status report to Telegram")
+            await self.alerts.send_bot_started(msg)
             logger.info("[STARTUP] Status report sent OK")
         except Exception:
-            logger.exception("[STARTUP] Failed to build/send startup message — sending fallback")
-            try:
-                from alpha.utils import get_version as _gv
-                await self.alerts._send(
-                    f"\U0001f7e2 <b>ALPHA v{_gv()} — LIVE</b>\n"
-                    f"\U0001f4b0 <code>${total_capital:,.2f}</code>"
-                )
-            except Exception:
-                logger.exception("[STARTUP] Even fallback startup message failed")
+            logger.exception("[STARTUP] Failed to build/send startup message")
 
         # Register shutdown signals
         self._running = True

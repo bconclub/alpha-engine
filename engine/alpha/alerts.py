@@ -81,58 +81,9 @@ class AlertManager:
 
     # ── 1. STARTUP MESSAGE ───────────────────────────────────────────────────
 
-    async def send_startup(
-        self,
-        capital: float,
-        exchanges: list[dict[str, Any]],
-        strategies: list[dict[str, Any]],
-        issues: list[str],
-    ) -> None:
-        """Status report startup message — shows what's live, broken, or needs attention."""
-        engine_ver = get_version()
-        lines: list[str] = [
-            f"\U0001f7e2 <b>ALPHA v{engine_ver} — LIVE</b>",
-            f"\U0001f4b0 <code>{format_usd(capital)}</code>",
-            "",
-            "<b>EXCHANGES</b>",
-        ]
-
-        for ex in exchanges:
-            name = ex["name"]
-            if not ex.get("enabled"):
-                continue  # skip disabled exchanges entirely
-            if ex.get("error"):
-                lines.append(f"\u274c {name} ({ex['error']})")
-            elif ex.get("connected") and ex.get("balance") is not None:
-                bal = ex["balance"]
-                if bal > 0.50:
-                    lines.append(f"\u2705 {name} <code>{format_usd(bal)}</code>")
-                else:
-                    lines.append(f"\u26a0\ufe0f {name} <code>{format_usd(bal)}</code> (no funds)")
-            else:
-                lines.append(f"\u274c {name} (not connected)")
-
-        lines.append("")
-        lines.append("<b>STRATEGIES</b>")
-        for strat in strategies:
-            name = strat["name"]
-            if strat.get("active"):
-                detail = strat.get("detail", "")
-                lines.append(f"\u2705 {name}" + (f" ({detail})" if detail else ""))
-            else:
-                reason = strat.get("reason", "disabled")
-                lines.append(f"\u274c {name} ({reason})")
-
-        if issues:
-            lines.append("")
-            lines.append("<b>ISSUES</b>")
-            for issue in issues:
-                lines.append(f"\u26a0\ufe0f {issue}")
-        else:
-            lines.append("")
-            lines.append("\u2705 All systems nominal")
-
-        await self._send("\n".join(lines))
+    async def send_startup(self, message: str) -> None:
+        """Send pre-built startup status report."""
+        await self._send(message)
 
     # ── 2. MARKET UPDATE (all pairs, grouped by exchange) ──────────────────
 
@@ -616,20 +567,9 @@ class AlertManager:
 
     # ── BOT LIFECYCLE ─────────────────────────────────────────────────────
 
-    async def send_bot_started(
-        self,
-        capital: float,
-        exchanges: list[dict[str, Any]],
-        strategies: list[dict[str, Any]],
-        issues: list[str],
-    ) -> None:
-        """Routes to send_startup with structured status data."""
-        await self.send_startup(
-            capital=capital,
-            exchanges=exchanges,
-            strategies=strategies,
-            issues=issues,
-        )
+    async def send_bot_started(self, message: str) -> None:
+        """Routes to send_startup with pre-built message."""
+        await self.send_startup(message)
 
     async def send_bot_stopped(self, reason: str) -> None:
         msg = (
