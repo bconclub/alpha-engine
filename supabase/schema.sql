@@ -248,26 +248,31 @@ alter table public.bot_commands enable row level security;
 -- Service role: full access (implicit — service key bypasses RLS)
 -- Anon / authenticated role: read-only for dashboard display
 
-create policy "Allow read access for authenticated users"
-    on public.trades for select
-    to authenticated using (true);
+do $$ begin
+    create policy "Allow read access for authenticated users"
+        on public.trades for select to authenticated using (true);
+exception when duplicate_object then null; end $$;
 
-create policy "Allow read access for authenticated users"
-    on public.strategy_log for select
-    to authenticated using (true);
+do $$ begin
+    create policy "Allow read access for authenticated users"
+        on public.strategy_log for select to authenticated using (true);
+exception when duplicate_object then null; end $$;
 
-create policy "Allow read access for authenticated users"
-    on public.bot_status for select
-    to authenticated using (true);
+do $$ begin
+    create policy "Allow read access for authenticated users"
+        on public.bot_status for select to authenticated using (true);
+exception when duplicate_object then null; end $$;
 
 -- bot_commands: dashboard can INSERT (to send commands) and SELECT
-create policy "Allow read access for authenticated users"
-    on public.bot_commands for select
-    to authenticated using (true);
+do $$ begin
+    create policy "Allow read access for authenticated users"
+        on public.bot_commands for select to authenticated using (true);
+exception when duplicate_object then null; end $$;
 
-create policy "Allow insert for authenticated users"
-    on public.bot_commands for insert
-    to authenticated with check (true);
+do $$ begin
+    create policy "Allow insert for authenticated users"
+        on public.bot_commands for insert to authenticated with check (true);
+exception when duplicate_object then null; end $$;
 
 
 -- ============================================================================
