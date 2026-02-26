@@ -380,7 +380,7 @@ class ScalpStrategy(BaseStrategy):
     WARMUP_MIN_STRENGTH = 3            # during warmup, same 3/4 gate (was 2, let junk in)
 
     # ── Cooldown / loss protection (PER-PAIR: BTC streak doesn't affect XRP) ─
-    SL_COOLDOWN_SECONDS = 2 * 60       # 2 min pause after SL hit (per pair)
+    SL_COOLDOWN_SECONDS = 60             # 60s pause after SL hit (per pair, was 120s)
     REVERSAL_COOLDOWN_SECONDS = 2 * 60 # 2 min pause after REVERSAL exit (ALL directions on pair)
     CONSECUTIVE_LOSS_LIMIT = 3          # after 3 consecutive losses on same pair...
     STREAK_PAUSE_SECONDS = 5 * 60      # ...pause that pair for 5 min
@@ -1076,16 +1076,10 @@ class ScalpStrategy(BaseStrategy):
             return signals
 
         # ── COOLDOWN: pause after SL hit (PER PAIR) ────────────────
+        # Deferred: 4/4 signals bypass cooldown, but signal_strength isn't known yet
         pair_sl_time = ScalpStrategy._pair_last_sl_time.get(self._base_asset, 0.0)
-        sl_cooldown_remaining = pair_sl_time + self.SL_COOLDOWN_SECONDS - now
-        if sl_cooldown_remaining > 0:
-            self._skip_reason = f"SL_COOLDOWN ({int(sl_cooldown_remaining)}s)"
-            if self._tick_count % 12 == 0:
-                self.logger.info(
-                    "[%s] SL COOLDOWN — %.0fs remaining before new entries",
-                    self.pair, sl_cooldown_remaining,
-                )
-            return signals
+        _sl_cooldown_remaining = pair_sl_time + self.SL_COOLDOWN_SECONDS - now
+        _sl_cooldown_active = _sl_cooldown_remaining > 0
 
         # ── STREAK PAUSE: after N consecutive losses on THIS PAIR ───
         pair_pause_until = ScalpStrategy._pair_streak_pause_until.get(self._base_asset, 0.0)
@@ -1200,20 +1194,22 @@ class ScalpStrategy(BaseStrategy):
 
             else:
                 # ── Still waiting — check if T1 signals still present ──
-                tier1_recheck = self._detect_tier1_entry(
-                    current_price, rsi_now, vol_ratio, momentum_60s,
-                    bb_upper, bb_lower, ema_9, ema_21,
-                    kc_upper, kc_lower,
-                    [], [],  # empty T2 — only checking T1 presence
-                    is_widened,
-                )
-                if tier1_recheck is None:
-                    self.logger.info(
-                        "[%s] T1_EXPIRED — tier1 signals faded after %.0fs, clearing pending %s",
-                        self.pair, pt1_age, pt1_side,
+                # Hysteresis: don't re-check signal presence for first 10s (prevent flicker)
+                if pt1_age >= 10:
+                    tier1_recheck = self._detect_tier1_entry(
+                        current_price, rsi_now, vol_ratio, momentum_60s,
+                        bb_upper, bb_lower, ema_9, ema_21,
+                        kc_upper, kc_lower,
+                        [], [],  # empty T2 — only checking T1 presence
+                        is_widened,
                     )
-                    self._pending_tier1 = None
-                else:
+                    if tier1_recheck is None:
+                        self.logger.info(
+                            "[%s] T1_EXPIRED — tier1 signals faded after %.0fs, clearing pending %s",
+                            self.pair, pt1_age, pt1_side,
+                        )
+                        self._pending_tier1 = None
+                if self._pending_tier1 is not None:
                     # Still pending — log periodically
                     if self._tick_count % 6 == 0:
                         self.logger.info(
@@ -1243,6 +1239,22 @@ class ScalpStrategy(BaseStrategy):
 
         if entry is not None:
             side, reason, use_limit, signal_strength = entry
+
+            # ── Deferred SL cooldown check (4/4 signals bypass) ──
+            if _sl_cooldown_active:
+                if signal_strength >= 4:
+                    self.logger.info(
+                        "[%s] SL_COOLDOWN_BYPASS — 4/4 signal overrides cooldown (%.0fs remaining)",
+                        self.pair, _sl_cooldown_remaining,
+                    )
+                else:
+                    self._skip_reason = f"SL_COOLDOWN ({int(_sl_cooldown_remaining)}s)"
+                    if self._tick_count % 12 == 0:
+                        self.logger.info(
+                            "[%s] SL COOLDOWN — %.0fs remaining before new entries",
+                            self.pair, _sl_cooldown_remaining,
+                        )
+                    return signals
 
             # Stash entry momentum for declining-momentum filter (GPFC B)
             self._last_entry_momentum = max(abs(momentum_60s), abs(momentum_30s))
@@ -1501,6 +1513,9 @@ class ScalpStrategy(BaseStrategy):
             if entry_signal is not None:
                 signals.append(entry_signal)
         else:
+            # If SL cooldown is active and no entry was found, show cooldown as skip reason
+            if _sl_cooldown_active and not self._skip_reason:
+                self._skip_reason = f"SL_COOLDOWN ({int(_sl_cooldown_remaining)}s)"
             # Update signal state even when no entry (options can see what's happening)
             self.last_signal_state = {
                 "side": None,
