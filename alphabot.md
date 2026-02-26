@@ -1,12 +1,12 @@
 # Alphabot — Build Truth
 
 ## What Is Alpha
-Alpha is a precision momentum-trading bot built by Z at BCON Club. It trades crypto on two exchanges simultaneously — Delta Exchange India (20x leveraged perpetual futures) and Binance (1x spot, long-only). The mission: grow capital through quality trades that beat the fees.
+Alpha is a precision momentum-trading bot built by Z at BCON Club. It trades crypto across four exchanges simultaneously — Bybit (primary USDT futures), Delta Exchange India (USD futures + options), Kraken Futures (USD perpetuals), and Binance (1x spot, long-only). The mission: grow capital through quality trades that beat the fees.
 
 ## Current Versions
-- **Engine**: `3.9.2`
-- **Dashboard**: `2.6.2`
+- **Engine**: `3.24.6`
 - **Signal Logic**: v6.3 (11-Signal Arsenal — VWAP, BB Squeeze, Liquidity Sweep, FVG, Volume Divergence + setup tracking)
+- **Exchanges**: Bybit (primary), Delta India, Kraken Futures, Binance Spot
 
 ## Repository Structure
 ```
@@ -72,12 +72,16 @@ Alpha/
 ### Engine
 - **Language**: Python 3.11+
 - **Async**: asyncio event loop (runs forever)
-- **Exchanges**: Delta Exchange India API, Binance API (via ccxt)
-- **Real-time**: WebSocket price feed for sub-second exit checks
+- **Exchanges**: Bybit, Delta Exchange India, Kraken Futures, Binance (all via ccxt)
+- **Real-time**: WebSocket price feeds per exchange for sub-second exit checks
+  - Bybit: `wss://stream.bybit.com/v5/public/linear`
+  - Delta: `wss://socket.delta.exchange`
+  - Kraken: `wss://futures.kraken.com/ws/v1`
+  - Binance: `wss://stream.binance.com:9443/ws`
 - **Indicators**: `ta` library (Bollinger Bands, Keltner Channel, RSI, ADX, ATR, MACD)
 - **Database**: Supabase (PostgreSQL) for trade logs, strategy performance, bot status
 - **Alerts**: Telegram bot for trade open/close notifications with P&L
-- **Config**: `.env` → typed dataclasses (DeltaConfig, BinanceConfig, TradingConfig, etc.)
+- **Config**: `.env` → typed dataclasses (BybitConfig, DeltaConfig, KrakenConfig, BinanceConfig, TradingConfig)
 
 ### Dashboard
 - **Framework**: Next.js 14 (App Router)
@@ -185,11 +189,16 @@ SL/TP also adapt dynamically via ATR (SL = 1.5x ATR, TP = 4x ATR), using whichev
 - **9/21 EMA Ribbon** — trend direction for VWAP signal
 - **Volume Ratio** — current vs 20-period average
 
-### Fee Structure (Delta India)
-- Taker: 0.059% per side (0.05% + 18% GST)
-- Maker: 0.024% per side (0.02% + 18% GST)
-- Round-trip taker: 0.118%
-- Strategy: Limit entry (maker) + Market exit (taker) = 0.083% round-trip
+### Fee Structure (Per Exchange)
+
+| Exchange | Taker/side | Maker/side | Mixed RT | Notes |
+|----------|-----------|-----------|----------|-------|
+| **Bybit** | 0.055% | 0.02% | 0.075% | No GST — global |
+| **Delta India** | 0.059% | 0.024% | 0.083% | +18% GST |
+| **Kraken Futures** | 0.05% | 0.02% | 0.07% | No GST — global |
+| **Binance Spot** | 0.10% | 0.10% | 0.20% | Flat |
+
+Strategy: Limit entry (maker) + Market exit (taker) = mixed round-trip.
 
 ## Live Position State
 The engine writes position state to the DB every ~10 seconds while a position is open:
@@ -202,17 +211,18 @@ The engine writes position state to the DB every ~10 seconds while a position is
 Dashboard reads via `v_open_positions` view with 3-second live price polling overlay.
 
 ## Active Strategies
-- **scalp** — Primary. v6.3 11-signal momentum scalping on Delta futures + Binance spot
+- **scalp** — Primary. v6.3 11-signal momentum scalping on Bybit + Delta + Kraken futures + Binance spot
 
 Inactive/disabled: `options_scalp`, `futures_momentum`, `momentum`, `grid`, `arbitrage`, `strategy_selector`
 
 ## Key Protections
-- **Orphan protection**: Reconciles exchange positions every 60s
+- **Orphan protection**: Per-exchange reconciliation every 60s (Bybit, Delta, Kraken)
 - **Phantom protection**: Time guards + cooldown + rate-limited logs
 - **Telegram resilience**: Auto-reconnect on failure + health check + clean shutdown
-- **WebSocket price feed**: Real-time exit checks for sub-second SL/trail execution
+- **WebSocket price feed**: Per-exchange WS for sub-second SL/trail execution
 - **Cooldowns**: 2 min after SL, 5 min after 3 consecutive losses
 - **Phase 1 hands-off**: 30s grace period prevents fill-bounce exits
+- **Multi-exchange balance tracking**: Independent capital per exchange, aggregate view on dashboard
 
 ## Infrastructure
 - **Engine runs on**: VPS (24/7 process)
@@ -249,6 +259,9 @@ Major milestones:
 - v6.1: Emergency signal fix (OR→AND gate enforcement)
 - v6.2: VWAP Reclaim signal + setup type tracking per trade
 - v6.3: 11-signal arsenal (BB Squeeze, Liquidity Sweep, FVG, Volume Divergence)
+- GPFC #20: Bybit exchange integration (primary futures)
+- GPFC #21: Options exit system port + Delta orphan fix
+- GPFC #22: Kraken Futures exchange integration (4th exchange)
 
 ---
 *Born February 14, 2026. Built by Z @ BCON Club.*

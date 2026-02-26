@@ -1,4 +1,4 @@
-**Last updated: v3.21.2 — 2026-02-24**
+**Last updated: v3.24.6 — 2026-02-26**
 
 # Alpha Trade Signals — Complete Reference
 
@@ -382,20 +382,21 @@ Max 10 trades per hour.
 
 ## Fee Structure
 
-### Delta India (including 18% GST)
+### Per-Exchange Fees
 
-| Type | Rate |
-|------|------|
-| Maker | 0.02% x 1.18 = 0.024% |
-| Taker | 0.05% x 1.18 = 0.059% |
-| Mixed round-trip | 0.024% + 0.059% = 0.083% |
+| Exchange | Taker/side | Maker/side | Mixed RT | Notes |
+|----------|-----------|-----------|----------|-------|
+| **Bybit** | 0.055% | 0.02% | 0.075% | No GST — global exchange |
+| **Delta India** | 0.059% | 0.024% | 0.083% | Includes 18% GST |
+| **Kraken Futures** | 0.05% | 0.02% | 0.07% | No GST — global exchange |
+| **Binance Spot** | 0.10% | 0.10% | 0.20% | Flat fee |
 
 ### Exit Fee Optimization
 
 Non-urgent exits use **limit-then-market** strategy:
-1. Place limit order at current price (maker fee: 0.024%)
+1. Place limit order at current price (maker fee)
 2. Wait 3 seconds for fill
-3. If not filled → cancel limit, execute market order (taker fee: 0.059%)
+3. If not filled → cancel limit, execute market order (taker fee)
 
 Urgent exits (SL, HARD_TP, SL_EXCHANGE) always use immediate market orders.
 
@@ -585,4 +586,6 @@ When the bot decides NOT to enter, the reason is tracked and shown on the dashbo
 | Volume min (T2) | 0.8x average | same |
 | Volume anticipation (T1) | 1.5x with mom < 0.10% | same |
 | Stale momentum (10s check) | 0.05% in entry direction over last 10s | same |
-| Mixed RT fee | 0.083% | ~0.20% |
+| Mixed RT fee (Bybit) | 0.075% | ~0.20% |
+| Mixed RT fee (Delta) | 0.083% | — |
+| Mixed RT fee (Kraken) | 0.07% | — |
