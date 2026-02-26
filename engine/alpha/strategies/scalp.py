@@ -1239,6 +1239,9 @@ class ScalpStrategy(BaseStrategy):
         if entry is not None:
             side, reason, use_limit, signal_strength = entry
 
+            # Stash entry momentum for declining-momentum filter (GPFC B)
+            self._last_entry_momentum = max(abs(momentum_60s), abs(momentum_30s))
+
             # ── Write signal state immediately so options_scalp always sees it,
             #    even if scalp skips due to cooldown/sizing/disabled setup. ──
             self.last_signal_state = {
@@ -1959,7 +1962,6 @@ class ScalpStrategy(BaseStrategy):
             reason = f"LONG {len(bull_signals)}/4: {' + '.join(bull_signals)} [15m={trend_15m}]{req_tag}{widen_tag}"
             use_limit = "MOM" not in bull_signals[0]
             self._last_signal_breakdown = _build_breakdown()
-            self._last_entry_momentum = max(abs(momentum_60s), abs(momentum_30s))  # GPFC B
             return ("long", reason, use_limit, len(bull_signals))
 
         # ── Check required signals (SHORT) — trend-weighted ───────────────
@@ -1968,7 +1970,6 @@ class ScalpStrategy(BaseStrategy):
             reason = f"SHORT {len(bear_signals)}/4: {' + '.join(bear_signals)} [15m={trend_15m}]{req_tag}{widen_tag}"
             use_limit = "MOM" not in bear_signals[0]
             self._last_signal_breakdown = _build_breakdown()
-            self._last_entry_momentum = max(abs(momentum_60s), abs(momentum_30s))  # GPFC B
             return ("short", reason, use_limit, len(bear_signals))
 
         # ── Log direction-blocked entries ────────────────────────────────
