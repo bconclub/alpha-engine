@@ -104,24 +104,37 @@ function TimerBadge({ type, elapsed, required }: {
   required: number;
 }) {
   const pct = Math.min(100, (elapsed / required) * 100);
+  const done = elapsed >= required;
   const isFade = type === 'fade';
   const icon = isFade ? '\u23F3' : '\uD83D\uDC80';
-  const label = isFade ? 'FADE' : 'DEAD';
   const bgColor = isFade ? 'bg-amber-400/10' : 'bg-[#ff1744]/10';
   const textColor = isFade ? 'text-amber-400' : 'text-[#ff1744]';
   const barColor = isFade ? 'bg-amber-400' : 'bg-[#ff1744]';
 
+  // When threshold met → show "EXITING", otherwise show countdown remaining
+  const remaining = Math.max(0, required - elapsed);
+  const timerLabel = done
+    ? 'EXITING'
+    : `${remaining}s left`;
+  const contextLabel = isFade ? 'Fading' : 'No momentum';
+
   return (
-    <span className={cn('inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium', bgColor, textColor)}>
+    <span className={cn(
+      'inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium',
+      bgColor, textColor,
+      done && 'animate-pulse',
+    )}>
       <span>{icon}</span>
-      <span>{label}</span>
-      <span className="font-mono">{elapsed}/{required}s</span>
-      <span className="relative w-6 h-1.5 rounded-full bg-zinc-700 overflow-hidden ml-0.5">
-        <span
-          className={cn('absolute top-0 left-0 h-full rounded-full transition-all duration-1000', barColor)}
-          style={{ width: `${pct}%` }}
-        />
-      </span>
+      <span>{contextLabel}</span>
+      <span className="font-mono">{timerLabel}</span>
+      {!done && (
+        <span className="relative w-6 h-1.5 rounded-full bg-zinc-700 overflow-hidden ml-0.5">
+          <span
+            className={cn('absolute top-0 left-0 h-full rounded-full transition-all duration-1000', barColor)}
+            style={{ width: `${pct}%` }}
+          />
+        </span>
+      )}
     </span>
   );
 }
