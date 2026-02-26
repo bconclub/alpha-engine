@@ -5,7 +5,7 @@ Delta India: raw aiohttp WS to wss://socket.india.delta.exchange (ccxt.pro doesn
 
 Architecture:
 - PriceFeed runs as background asyncio tasks (one per exchange)
-- On every price update: calls strategy.check_exits_immediate(price) if in position
+- On every price update: calls strategy.check_exits_immediate(price) (exits + accel entry)
 - REST polling loop is NEVER removed — WS is purely additive
 - If WS disconnects, auto-reconnect with exponential backoff
 - Double-exit prevented by in_position=False guard in strategy
@@ -262,9 +262,9 @@ class PriceFeed:
         else:
             self._binance_updates += 1
 
-        # Check if strategy is in position → immediate exit check
+        # Call strategy on every tick: exits when in position, accel entry when not
         strategy = self._strategies.get(pair)
-        if strategy and strategy.in_position:
+        if strategy:
             self._exit_checks += 1
             try:
                 strategy.check_exits_immediate(price)
