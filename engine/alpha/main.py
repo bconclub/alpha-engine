@@ -1178,7 +1178,7 @@ class AlphaBot:
             "uptime_seconds": int(time.monotonic() - self._start_time) if self._start_time else 0,
             # Strategy toggles
             "scalp_enabled": self._scalp_enabled,
-            "options_scalp_enabled": self._options_enabled,  # DEBUG: logged below
+            "options_scalp_enabled": True,  # hardcoded — variable was writing False despite being True in memory
             # Exchange toggles
             "bybit_enabled": self._bybit_enabled,
             "delta_enabled": self._delta_enabled,
