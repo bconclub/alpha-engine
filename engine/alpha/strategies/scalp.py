@@ -258,13 +258,16 @@ class ScalpStrategy(BaseStrategy):
     # When peak crosses a tier, trail_stop_price = peak * (1 - trail_dist/100)
     # SL is max(hard_sl, trail_stop) for longs — only ever tightens.
     TRAIL_TIER_TABLE: list[tuple[float, float]] = [
-        (0.15, 0.10),   # peak +0.15% → trail 0.10% from peak (early lock)
-        (0.30, 0.15),   # peak +0.30% → trail 0.15% from peak (keep)
-        (0.35, 0.20),   # peak +0.35% → trail 0.20% from peak (keep)
-        (0.50, 0.25),   # peak +0.50% → trail 0.25% from peak (keep)
-        (1.00, 0.30),   # peak +1.00% → trail 0.30% from peak (was 0.40 — lock more)
-        (2.00, 0.50),   # peak +2.00% → trail 0.50% from peak (was 0.70 — keep +1.50%)
-        (3.00, 0.70),   # peak +3.00% → trail 0.70% from peak (was 1.00 — keep +2.30%)
+        # Activation raised to 0.25% — sub-0.25% trades exit via ratchet/reversal
+        # instead of trailing to breakeven and losing to fees.
+        # Old 0.15% tier removed: was exiting at +0.05%, net loss after 0.083% RT fees.
+        (0.25, 0.10),   # peak +0.25% → trail 0.10% = exits ~+0.15% = +0.07% net ✅
+        (0.35, 0.12),   # peak +0.35% → trail 0.12% = exits ~+0.23% = +0.15% net ✅
+        (0.50, 0.15),   # peak +0.50% → trail 0.15% = exits ~+0.35% = +0.27% net ✅
+        (1.00, 0.20),   # peak +1.00% → trail 0.20% = exits ~+0.80% = big win
+        (2.00, 0.30),   # peak +2.00% → trail 0.30% = exits ~+1.70% = huge win
+        (3.00, 0.40),   # peak +3.00% → trail 0.40% = exits ~+2.60% = monster
+        (5.00, 0.60),   # peak +5.00% → trail 0.60% = exits ~+4.40% = moon
     ]
 
     # ── Legacy trailing defaults (futures=0, spot overrides in __init__) ─
@@ -320,6 +323,10 @@ class ScalpStrategy(BaseStrategy):
     # ── STALE MOMENTUM FILTER ────────────────────────────────────
     STALE_MOM_LOOKBACK_S = 10         # look back 10 seconds for recent momentum
     STALE_MOM_MIN_PCT = 0.08          # need 0.08% move in last 10s in our direction (was 0.05)
+
+    # ── 5-MINUTE COUNTER-TREND FILTER ─────────────────────────────
+    COUNTER_TREND_SOFT_PCT = 0.15     # require 4/4 signals when 5m opposes direction
+    COUNTER_TREND_HARD_PCT = 0.40     # block entry entirely when 5m strongly opposes
 
     # ── LAYER 1: WS ACCELERATION ENTRY ────────────────────────────
     ACCEL_MIN_VELOCITY = 0.04         # 0.04% in 5s = real move (fast exchanges)
@@ -619,6 +626,8 @@ class ScalpStrategy(BaseStrategy):
         self._last_signal_breakdown: dict[str, Any] = {}
         # Skip reason — why the bot isn't entering (dashboard reads this)
         self._skip_reason: str = ""
+        # 5-minute price direction (from 1m candles, updated each full indicator tick)
+        self._price_5m_pct: float = 0.0
 
         # BB Squeeze tracking (signal #8)
         self._squeeze_tick_count: int = 0
@@ -1014,6 +1023,13 @@ class ScalpStrategy(BaseStrategy):
             ema_9 = float(close.ewm(span=9, adjust=False).mean().iloc[-1])
             ema_21 = float(close.ewm(span=21, adjust=False).mean().iloc[-1])
 
+            # ── 5-minute price direction (for counter-trend filter) ────
+            if len(close) >= 6:
+                _price_5m_ago = float(close.iloc[-6])
+                self._price_5m_pct = ((current_price - _price_5m_ago) / _price_5m_ago) * 100
+            else:
+                self._price_5m_pct = 0.0
+
             # ── Cache signals for Layer 1 acceleration entry ─────────
             bb_range_cache = bb_upper - bb_lower if bb_upper > bb_lower else 1e-9
             bb_pos_cache = (current_price - bb_lower) / bb_range_cache
@@ -1023,6 +1039,7 @@ class ScalpStrategy(BaseStrategy):
                 "vwap_above": current_price > vwap,
                 "ema9_above_21": ema_9 > ema_21,
                 "volume_ratio": vol_ratio,
+                "price_5m_pct": self._price_5m_pct,
                 "timestamp": time.monotonic(),
             }
 
@@ -1296,6 +1313,50 @@ class ScalpStrategy(BaseStrategy):
 
         if entry is not None:
             side, reason, use_limit, signal_strength = entry
+
+            # ── 5-MINUTE COUNTER-TREND FILTER ──────────────────────────
+            _ct_long_counter = side == "long" and self._price_5m_pct < -self.COUNTER_TREND_SOFT_PCT
+            _ct_short_counter = side == "short" and self._price_5m_pct > self.COUNTER_TREND_SOFT_PCT
+            if _ct_long_counter or _ct_short_counter:
+                # HARD BLOCK: strong counter-trend
+                _ct_hard = (
+                    (side == "long" and self._price_5m_pct < -self.COUNTER_TREND_HARD_PCT)
+                    or (side == "short" and self._price_5m_pct > self.COUNTER_TREND_HARD_PCT)
+                )
+                if _ct_hard:
+                    self._skip_reason = f"5M_COUNTER_BLOCK ({side} vs 5m={self._price_5m_pct:+.2f}%)"
+                    self.logger.info(
+                        "[%s] 5M_COUNTER_BLOCK — %s entry blocked, 5m=%+.2f%% (threshold %.2f%%)",
+                        self.pair, side, self._price_5m_pct, self.COUNTER_TREND_HARD_PCT,
+                    )
+                    self.last_signal_state = {
+                        "side": side, "reason": reason,
+                        "strength": signal_strength, "trend_15m": trend_15m,
+                        "rsi": rsi_now, "momentum_60s": momentum_60s, "momentum_30s": momentum_30s,
+                        "current_price": current_price, "timestamp": time.monotonic(),
+                        "skip_reason": self._skip_reason,
+                        **self._last_signal_breakdown,
+                    }
+                    return signals
+                # SOFT FILTER: moderate counter-trend, require 4/4 signals
+                if signal_strength < 4:
+                    self._skip_reason = (
+                        f"5M_COUNTER_SOFT ({side} 5m={self._price_5m_pct:+.2f}%, "
+                        f"need 4/4 got {signal_strength}/4)"
+                    )
+                    self.logger.info(
+                        "[%s] 5M_COUNTER_SOFT — %s needs 4/4, got %d/4 (5m=%+.2f%%)",
+                        self.pair, side, signal_strength, self._price_5m_pct,
+                    )
+                    self.last_signal_state = {
+                        "side": side, "reason": reason,
+                        "strength": signal_strength, "trend_15m": trend_15m,
+                        "rsi": rsi_now, "momentum_60s": momentum_60s, "momentum_30s": momentum_30s,
+                        "current_price": current_price, "timestamp": time.monotonic(),
+                        "skip_reason": self._skip_reason,
+                        **self._last_signal_breakdown,
+                    }
+                    return signals
 
             # ── Deferred SL cooldown check (4/4 signals bypass) ──
             if _sl_cooldown_active:
@@ -2295,6 +2356,15 @@ class ScalpStrategy(BaseStrategy):
                 break
 
         if new_dist is None:
+            # Log when peak crosses old 0.15% threshold but not new 0.25%
+            if peak_pnl >= 0.15 and not self._trailing_active:
+                if not getattr(self, '_trail_skip_logged', False):
+                    self.logger.info(
+                        "[%s] TRAIL_SKIP_LOW_PEAK — peak +%.2f%% (old threshold 0.15%% would activate, "
+                        "new threshold 0.25%% not reached)",
+                        self.pair, peak_pnl,
+                    )
+                    self._trail_skip_logged = True
             return  # peak hasn't reached first tier yet
 
         # Compute trail stop from peak PRICE (not entry)
@@ -2902,6 +2972,30 @@ class ScalpStrategy(BaseStrategy):
 
         if support_count < self.ACCEL_MIN_SUPPORT:
             return
+
+        # ── 5-minute counter-trend filter (from cached candle data) ──
+        _accel_5m = cached.get("price_5m_pct", 0.0) if cached and cache_age < 10 else 0.0
+        if _accel_5m != 0.0:
+            _accel_hard = (
+                (direction == "long" and _accel_5m < -self.COUNTER_TREND_HARD_PCT)
+                or (direction == "short" and _accel_5m > self.COUNTER_TREND_HARD_PCT)
+            )
+            if _accel_hard:
+                self.logger.info(
+                    "[%s] ACCEL 5M_COUNTER_BLOCK — %s blocked, 5m=%+.2f%%",
+                    self.pair, direction, _accel_5m,
+                )
+                return
+            _accel_soft = (
+                (direction == "long" and _accel_5m < -self.COUNTER_TREND_SOFT_PCT)
+                or (direction == "short" and _accel_5m > self.COUNTER_TREND_SOFT_PCT)
+            )
+            if _accel_soft and support_count < 4:
+                self.logger.info(
+                    "[%s] ACCEL 5M_COUNTER_SOFT — %s needs 4/4 support, got %d/4 (5m=%+.2f%%)",
+                    self.pair, direction, support_count, _accel_5m,
+                )
+                return
 
         # ── FIRE: acceleration confirmed with signal support ─────────
         self.logger.info(
@@ -3669,7 +3763,7 @@ class ScalpStrategy(BaseStrategy):
 
         # signals_fired = raw reason string (all signal tags for analysis)
         mom_10s = getattr(self, '_last_momentum_10s', 0.0)
-        signals_fired = f"{reason} | 10s_mom={mom_10s:+.3f}%"
+        signals_fired = f"{reason} | 10s_mom={mom_10s:+.3f}% | 5m={self._price_5m_pct:+.2f}%"
 
         if side == "long":
             sl = price * (1 - self._sl_pct / 100)
@@ -3809,6 +3903,7 @@ class ScalpStrategy(BaseStrategy):
         self._trailing_active = False
         self._trail_stop_price = 0.0              # reset trailing stop price
         self._trail_distance_pct = 0.0             # reset trail distance tier
+        self._trail_skip_logged = False            # reset TRAIL_SKIP_LOW_PEAK log flag
         self._peak_unrealized_pnl = 0.0  # reset peak P&L tracker for decay exit
         self._profit_floor_pct = -999.0  # reset ratcheting profit floor
         self._in_position_tick = 0  # reset tick counter for OHLCV refresh cadence
