@@ -263,7 +263,8 @@ class PriceFeed:
             self._binance_updates += 1
 
         # Call strategy on every tick: exits when in position, accel entry when not
-        strategy = self._strategies.get(pair)
+        # Strategy dict uses exchange-prefixed keys ("delta:BTC/USD:USD")
+        strategy = self._strategies.get(f"{source}:{pair}")
         if strategy:
             self._exit_checks += 1
             try:
@@ -273,13 +274,13 @@ class PriceFeed:
 
         # ── Momentum wake: detect sharp moves and wake strategy for fast entry ──
         if pair in self._wake_callbacks:
-            self._check_momentum_wake(pair, price, now)
+            self._check_momentum_wake(pair, price, now, source)
 
     # ══════════════════════════════════════════════════════════════════
     # MOMENTUM WAKE — detect sharp moves from WS tick stream
     # ══════════════════════════════════════════════════════════════════
 
-    def _check_momentum_wake(self, pair: str, price: float, now: float) -> None:
+    def _check_momentum_wake(self, pair: str, price: float, now: float, source: str = "") -> None:
         """Append tick to history, check momentum thresholds, wake strategy if needed."""
         history = self._price_history.get(pair)
         if history is None:
@@ -299,7 +300,7 @@ class PriceFeed:
             return
 
         # Don't wake if strategy is already in position (exits handle that)
-        strategy = self._strategies.get(pair)
+        strategy = self._strategies.get(f"{source}:{pair}") if source else self._strategies.get(pair)
         if strategy and strategy.in_position:
             return
 

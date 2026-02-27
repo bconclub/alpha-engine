@@ -329,7 +329,7 @@ class ScalpStrategy(BaseStrategy):
     COUNTER_TREND_HARD_PCT = 0.40     # block entry entirely when 5m strongly opposes
 
     # ── LAYER 1: WS ACCELERATION ENTRY ────────────────────────────
-    ACCEL_MIN_VELOCITY = 0.04         # 0.04% in 5s = real move (fast exchanges)
+    ACCEL_MIN_VELOCITY = 0.08         # 0.08% in 5s = real move (fast exchanges)
     ACCEL_MIN_POSITIVE = 0.01         # acceleration must be positive by at least this
     ACCEL_MIN_TICKS = 3               # minimum ticks in 5s window (legacy, see _FAST/_SLOW)
     ACCEL_COOLDOWN = 30               # seconds between accel entries on same pair
@@ -340,7 +340,7 @@ class ScalpStrategy(BaseStrategy):
     ACCEL_MIN_TICKS_SLOW = 1          # Delta (~12 ticks/min, ~1 per 5s)
     ACCEL_VELOCITY_WINDOW_FAST = 5.0  # seconds — standard window
     ACCEL_VELOCITY_WINDOW_SLOW = 10.0 # seconds — wider to capture 2+ ticks
-    ACCEL_MIN_VELOCITY_SLOW = 0.03    # 0.03% over 10s (vs 0.04% over 5s)
+    ACCEL_MIN_VELOCITY_SLOW = 0.06    # 0.06% over 10s (raised from 0.03%)
 
     # ── Binance SPOT overrides — wider SL/TP/trail for no-leverage spot ──
     SPOT_SL_PCT = 2.0                 # 2% SL for spot (no leverage, needs room)
@@ -358,9 +358,9 @@ class ScalpStrategy(BaseStrategy):
     SPOT_BREAKEVEN_MIN_PEAK_PCT = 0.30   # peak >= 0.30% to activate
     SPOT_BREAKEVEN_EXIT_BELOW_PCT = 0.05 # exit if current <= 0.05%
 
-    # ── Adaptive widening (if idle too long, loosen by 20%) ──────────
-    IDLE_WIDEN_SECONDS = 30 * 60      # after 30 min idle, widen thresholds
-    IDLE_WIDEN_FACTOR = 0.80          # multiply thresholds by 0.80 (20% looser)
+    # ── Adaptive widening DISABLED — weak entries after 30min idle were losers
+    IDLE_WIDEN_SECONDS = 30 * 60      # (unused — widening disabled)
+    IDLE_WIDEN_FACTOR = 1.00          # 1.0 = no widening (was 0.80)
 
     # ── Fee awareness (Delta India incl 18% GST) ──────────────────────
     # NOTE: MIN_EXPECTED_MOVE_PCT fee filter REMOVED — it was blocking 385+
@@ -2973,6 +2973,16 @@ class ScalpStrategy(BaseStrategy):
         if support_count < self.ACCEL_MIN_SUPPORT:
             return
 
+        # ── Require at least one of RSI or BB confirming (not just VWAP/EMA) ──
+        has_rsi_or_bb = False
+        if cached and cache_age < 10:
+            if direction == "long":
+                has_rsi_or_bb = cached.get("rsi", 50) < 45 or cached.get("bb_position", 0.5) < 0.30
+            else:
+                has_rsi_or_bb = cached.get("rsi", 50) > 55 or cached.get("bb_position", 0.5) > 0.70
+        if not has_rsi_or_bb:
+            return
+
         # ── 5-minute counter-trend filter (from cached candle data) ──
         _accel_5m = cached.get("price_5m_pct", 0.0) if cached and cache_age < 10 else 0.0
         if _accel_5m != 0.0:
@@ -3527,16 +3537,17 @@ class ScalpStrategy(BaseStrategy):
         Priority order (pick the FIRST match):
           1. RSI_OVERRIDE        (RSI < 30 or > 70)
           2. TIER1_ANTICIPATORY  (T1: tag — anticipatory leading signals)
-          3. BB_SQUEEZE          (BBSQZ tag)
-          4. MOMENTUM_BURST      (MOM + VOL)
-          5. MEAN_REVERT         (BB + RSI)
-          6. TREND_CONT          (TCONT tag)
-          7. VWAP_RECLAIM        (VWAP tag)
-          8. LIQ_SWEEP           (LIQSWEEP tag)
-          9. FVG_FILL            (FVG tag)
-         10. VOL_DIVERGENCE      (VOLDIV tag)
-         11. MULTI_SIGNAL        (none of above matched — true catch-all)
-         12. MIXED               (final fallback)
+          3. ACCEL_ENTRY         (ACCEL: tag — WS acceleration entry)
+          4. BB_SQUEEZE          (BBSQZ tag)
+          5. MOMENTUM_BURST      (MOM + VOL)
+          6. MEAN_REVERT         (BB + RSI)
+          7. TREND_CONT          (TCONT tag)
+          8. VWAP_RECLAIM        (VWAP tag)
+          9. LIQ_SWEEP           (LIQSWEEP tag)
+         10. FVG_FILL            (FVG tag)
+         11. VOL_DIVERGENCE      (VOLDIV tag)
+         12. MULTI_SIGNAL        (none of above matched — true catch-all)
+         13. MIXED               (final fallback)
         """
         r = reason.upper()
 
@@ -3557,39 +3568,43 @@ class ScalpStrategy(BaseStrategy):
         if "T1:" in r:
             return ["TIER1_ANTICIPATORY"]
 
-        # Priority 3: BB_SQUEEZE
+        # Priority 3: ACCEL_ENTRY — WS acceleration-based entry
+        if "ACCEL:" in r:
+            return ["ACCEL_ENTRY"]
+
+        # Priority 4: BB_SQUEEZE
         if "BBSQZ:" in r:
             return ["BB_SQUEEZE"]
 
-        # Priority 4: MOMENTUM_BURST
+        # Priority 5: MOMENTUM_BURST
         if has_mom and has_vol:
             return ["MOMENTUM_BURST"]
 
-        # Priority 5: MEAN_REVERT
+        # Priority 6: MEAN_REVERT
         if has_bb and has_rsi:
             return ["MEAN_REVERT"]
 
-        # Priority 6: TREND_CONT
+        # Priority 7: TREND_CONT
         if "TCONT:" in r:
             return ["TREND_CONT"]
 
-        # Priority 7: VWAP_RECLAIM
+        # Priority 8: VWAP_RECLAIM
         if "VWAP:" in r:
             return ["VWAP_RECLAIM"]
 
-        # Priority 8: LIQ_SWEEP
+        # Priority 9: LIQ_SWEEP
         if "LIQSWEEP:" in r:
             return ["LIQ_SWEEP"]
 
-        # Priority 9: FVG_FILL
+        # Priority 10: FVG_FILL
         if "FVG:" in r:
             return ["FVG_FILL"]
 
-        # Priority 10: VOL_DIVERGENCE
+        # Priority 11: VOL_DIVERGENCE
         if "VOLDIV:" in r:
             return ["VOL_DIVERGENCE"]
 
-        # Priority 11: MULTI_SIGNAL — none of the above matched
+        # Priority 12: MULTI_SIGNAL — none of the above matched
         # Only when 4+ distinct signals fired but no recognized pattern
         signal_count = sum([
             has_mom, has_vol, has_rsi, has_bb,
@@ -3599,7 +3614,7 @@ class ScalpStrategy(BaseStrategy):
         if signal_count >= 4:
             return ["MULTI_SIGNAL"]
 
-        # Priority 12: MIXED — final fallback
+        # Priority 13: MIXED — final fallback
         return ["MIXED"]
 
     # ======================================================================
