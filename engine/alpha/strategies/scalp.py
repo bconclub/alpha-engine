@@ -322,11 +322,18 @@ class ScalpStrategy(BaseStrategy):
     STALE_MOM_MIN_PCT = 0.08          # need 0.08% move in last 10s in our direction (was 0.05)
 
     # ── LAYER 1: WS ACCELERATION ENTRY ────────────────────────────
-    ACCEL_MIN_VELOCITY = 0.04         # 0.04% in 5s = real move
+    ACCEL_MIN_VELOCITY = 0.04         # 0.04% in 5s = real move (fast exchanges)
     ACCEL_MIN_POSITIVE = 0.01         # acceleration must be positive by at least this
-    ACCEL_MIN_TICKS = 3               # minimum ticks in 5s window
+    ACCEL_MIN_TICKS = 3               # minimum ticks in 5s window (legacy, see _FAST/_SLOW)
     ACCEL_COOLDOWN = 30               # seconds between accel entries on same pair
     ACCEL_MIN_SUPPORT = 2             # need 2/4 cached indicator support
+
+    # ── Exchange-aware ACCEL tuning (tick-rate adaptation) ────────
+    ACCEL_MIN_TICKS_FAST = 3          # Kraken/Bybit (~60 ticks/min)
+    ACCEL_MIN_TICKS_SLOW = 1          # Delta (~12 ticks/min, ~1 per 5s)
+    ACCEL_VELOCITY_WINDOW_FAST = 5.0  # seconds — standard window
+    ACCEL_VELOCITY_WINDOW_SLOW = 10.0 # seconds — wider to capture 2+ ticks
+    ACCEL_MIN_VELOCITY_SLOW = 0.03    # 0.03% over 10s (vs 0.04% over 5s)
 
     # ── Binance SPOT overrides — wider SL/TP/trail for no-leverage spot ──
     SPOT_SL_PCT = 2.0                 # 2% SL for spot (no leverage, needs room)
@@ -2808,8 +2815,19 @@ class ScalpStrategy(BaseStrategy):
 
     def _check_acceleration_entry(self, key: str, now: float, price: float) -> None:
         """Detect price acceleration from WS ticks and fire entry if confirmed."""
+        # ── Exchange-aware tick-rate tuning ─────────────────────────
+        if self._exchange_id == "delta":
+            min_ticks = self.ACCEL_MIN_TICKS_SLOW
+            vel_window = self.ACCEL_VELOCITY_WINDOW_SLOW
+            min_velocity = self.ACCEL_MIN_VELOCITY_SLOW
+        else:
+            min_ticks = self.ACCEL_MIN_TICKS_FAST
+            vel_window = self.ACCEL_VELOCITY_WINDOW_FAST
+            min_velocity = self.ACCEL_MIN_VELOCITY
+
         ticks = ScalpStrategy._tick_buffer.get(key)
-        if not ticks or len(ticks) < 5:
+        min_buffer = min_ticks + min(min_ticks, 2)   # fast=5, slow=2
+        if not ticks or len(ticks) < min_buffer:
             return
 
         # ── Cooldown check ───────────────────────────────────────────
@@ -2825,31 +2843,34 @@ class ScalpStrategy(BaseStrategy):
             return
 
         # ── Tick density check: pair must have real activity ──────────
-        # Require 8+ ticks in last 10s to prove pair is liquid/moving.
-        # Sparse ticks on dead pairs create fake "acceleration" from noise.
-        ticks_10s = [(t, p) for t, p in ticks if now - t <= 10.0]
-        if len(ticks_10s) < 8:
+        # Fast exchanges (Kraken/Bybit): 8+ ticks in 2*window proves liquidity.
+        # Slow exchanges (Delta ~1 tick/5s): 2+ ticks in 2*window is sufficient.
+        broad_window = vel_window * 2
+        ticks_broad = [(t, p) for t, p in ticks if now - t <= broad_window]
+        density_min = 8 if min_ticks >= 3 else 2
+        if len(ticks_broad) < density_min:
             return
 
         # ── Compute velocity windows ─────────────────────────────────
-        recent = [(t, p) for t, p in ticks_10s if now - t <= 5.0]
-        prior = [(t, p) for t, p in ticks_10s if now - t > 5.0]
+        recent = [(t, p) for t, p in ticks_broad if now - t <= vel_window]
+        prior = [(t, p) for t, p in ticks_broad if now - t > vel_window]
 
-        if len(recent) < 3 or len(prior) < 2:
+        prior_min = min(min_ticks, 2)                 # fast=2, slow=1
+        if len(recent) < min_ticks or len(prior) < prior_min:
             return
 
-        velocity_5s = (recent[-1][1] - recent[0][1]) / recent[0][1] * 100
+        velocity_current = (recent[-1][1] - recent[0][1]) / recent[0][1] * 100
         velocity_prev = (prior[-1][1] - prior[0][1]) / prior[0][1] * 100
-        acceleration = abs(velocity_5s) - abs(velocity_prev)
+        acceleration = abs(velocity_current) - abs(velocity_prev)
 
-        if abs(velocity_5s) < self.ACCEL_MIN_VELOCITY:
+        if abs(velocity_current) < min_velocity:
             return
         if acceleration < self.ACCEL_MIN_POSITIVE:
             return
-        if len(recent) < self.ACCEL_MIN_TICKS:
+        if len(recent) < min_ticks:
             return
 
-        direction = "long" if velocity_5s > 0 else "short"
+        direction = "long" if velocity_current > 0 else "short"
 
         # ── Shorting guard ───────────────────────────────────────────
         if direction == "short" and not self.is_futures:
@@ -2884,14 +2905,15 @@ class ScalpStrategy(BaseStrategy):
 
         # ── FIRE: acceleration confirmed with signal support ─────────
         self.logger.info(
-            "[%s] ACCEL ENTRY: %s vel=%+.3f%%/5s accel=%+.3f ticks=%d support=%d/4",
-            self.pair, direction, velocity_5s, acceleration,
+            "[%s] ACCEL ENTRY: %s vel=%+.3f%%/%.0fs accel=%+.3f ticks=%d support=%d/4",
+            self.pair, direction, velocity_current, vel_window, acceleration,
             len(recent), support_count,
         )
         try:
             asyncio.get_running_loop().create_task(
                 self._execute_accel_entry(
-                    direction, velocity_5s, acceleration, support_count, price,
+                    direction, velocity_current, acceleration, support_count, price,
+                    vel_window,
                 )
             )
         except RuntimeError:
@@ -2904,6 +2926,7 @@ class ScalpStrategy(BaseStrategy):
         acceleration: float,
         support_count: int,
         price: float,
+        vel_window: float = 5.0,
     ) -> None:
         """Execute a Layer 1 acceleration entry (async, called via create_task)."""
         try:
@@ -2917,7 +2940,7 @@ class ScalpStrategy(BaseStrategy):
 
             # Build reason string
             reason = (
-                f"{direction.upper()} ACCEL: vel={velocity:+.3f}%/5s "
+                f"{direction.upper()} ACCEL: vel={velocity:+.3f}%/{vel_window:.0f}s "
                 f"accel={acceleration:+.3f} support={support_count}/4"
             )
 

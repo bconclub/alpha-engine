@@ -1349,6 +1349,19 @@ export default function TradeTable({ trades }: TradeTableProps) {
                                 {display.isUnrealized && (
                                   <span className="text-[9px] text-zinc-500 ml-0.5">unr</span>
                                 )}
+                                {trade.peak_pnl != null && trade.peak_pnl > 0 && display.pnlPct != null && trade.status === 'closed' && (() => {
+                                  const captured = Math.round((display.pnlPct / trade.peak_pnl) * 100);
+                                  return (
+                                    <div className={cn(
+                                      'text-[9px] mt-0.5',
+                                      captured >= 75 ? 'text-emerald-500/70' :
+                                      captured >= 50 ? 'text-yellow-500/70' :
+                                      captured >= 0 ? 'text-zinc-500' : 'text-red-400/70'
+                                    )}>
+                                      {captured}% of pk
+                                    </div>
+                                  );
+                                })()}
                               </>
                             )
                             : trade.status === 'closed' ? '+0.00%' : '—'}
