@@ -4,7 +4,7 @@
 #
 # Single Alpha version stored in engine/VERSION. Bumps on every
 # commit regardless of which directory changed. Patch rolls over
-# at 10:  3.10.9 → 3.11.0
+# at 10:  0.0.9 → 0.1.0
 #
 # The VERSION file is auto-staged so it's included in the commit.
 # ═══════════════════════════════════════════════════════════════════
@@ -16,7 +16,7 @@ VERSION_FILE="$REPO_ROOT/engine/VERSION"
 
 bump_version() {
     local current
-    current=$(cat "$VERSION_FILE" 2>/dev/null || echo "3.0.0")
+    current=$(cat "$VERSION_FILE" 2>/dev/null || echo "0.0.0")
 
     IFS='.' read -r major minor patch <<< "$current"
     patch=$((patch + 1))
