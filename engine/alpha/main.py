@@ -109,6 +109,22 @@ class AlphaBot:
             + (self.kraken_pairs if self.kraken else [])
         )
 
+    def _get_scalp(self, pair: str, exchange: str | None = None) -> ScalpStrategy | None:
+        """Look up a scalp strategy by bare pair name.
+
+        With exchange-prefixed keys (e.g. "delta:BTC/USD:USD"), callers
+        that only have a bare pair need this helper.  If *exchange* is
+        given, only that prefix is checked; otherwise tries delta, kraken,
+        then unprefixed (for any future non-prefixed entries).
+        """
+        if exchange:
+            return self._scalp_strategies.get(f"{exchange}:{pair}")
+        for prefix in ("delta:", "kraken:", ""):
+            s = self._scalp_strategies.get(f"{prefix}{pair}")
+            if s is not None:
+                return s
+        return None
+
     async def start(self) -> None:
         """Initialize all components and start the main loop."""
         from pathlib import Path
@@ -225,9 +241,11 @@ class AlphaBot:
         #         )
 
         # Register scalp strategies — Delta futures (primary)
+        # Keys are exchange-prefixed ("delta:BTC/USD:USD") so Delta and
+        # Kraken instances for the same pair coexist without collision.
         if self.delta:
             for pair in self.delta_pairs:
-                self._scalp_strategies[pair] = ScalpStrategy(
+                self._scalp_strategies[f"delta:{pair}"] = ScalpStrategy(
                     pair, self.executor, self.risk_manager,
                     exchange=self.delta,
                     is_futures=True,
@@ -238,7 +256,7 @@ class AlphaBot:
         # Register scalp strategies — Kraken futures
         if self.kraken:
             for pair in self.kraken_pairs:
-                self._scalp_strategies[pair] = ScalpStrategy(
+                self._scalp_strategies[f"kraken:{pair}"] = ScalpStrategy(
                     pair, self.executor, self.risk_manager,
                     exchange=self.kraken,
                     is_futures=True,
@@ -260,13 +278,13 @@ class AlphaBot:
         # Options use Delta exchange, signals come from Delta scalp strategies
         if self.delta and self.delta_options and self._options_enabled:
             for pair in config.delta.options_pairs:
-                # Map options pair to Delta scalp strategy via base asset
+                # Map options pair to Delta scalp strategy (delta-prefixed keys)
                 base = pair.split("/")[0]
-                scalp = self._scalp_strategies.get(pair)
+                scalp = self._scalp_strategies.get(f"delta:{pair}")
                 if scalp is None:
-                    # Try matching by base asset
+                    # Try matching by base asset within delta-prefixed keys
                     scalp = next(
-                        (s for p, s in self._scalp_strategies.items() if p.startswith(f"{base}/")),
+                        (s for p, s in self._scalp_strategies.items() if p.startswith(f"delta:{base}/")),
                         None,
                     )
                 if scalp is None:
@@ -343,8 +361,8 @@ class AlphaBot:
 
             # Register momentum wake callbacks — WS detects sharp moves and
             # wakes strategy check loop instantly instead of waiting for tick sleep
-            for pair, strategy in self._scalp_strategies.items():
-                self._price_feed.register_wake_callback(pair, strategy.wake)
+            for _key, strategy in self._scalp_strategies.items():
+                self._price_feed.register_wake_callback(strategy.pair, strategy.wake)
 
             await self._price_feed.start()
         except Exception:
@@ -639,7 +657,7 @@ class AlphaBot:
                         entry_distance_pct = 45.0 - analysis.rsi
 
                     # Grab live signal state from the scalp strategy (1m data)
-                    scalp = self._scalp_strategies.get(pair)
+                    scalp = self._get_scalp(pair)
                     sig = scalp.last_signal_state if scalp else None
                     sig_count = sig.get("strength", 0) if sig else 0
                     sig_side = sig.get("side") if sig else None  # "long", "short", or None
@@ -784,7 +802,7 @@ class AlphaBot:
                 # ── Ghost position guard ──
                 # Only check liquidation if the scalp strategy ALSO thinks we're in
                 # a position. Prevents spam from stale entries in risk_manager.
-                scalp = self._scalp_strategies.get(pair)
+                scalp = self._get_scalp(pair, exchange="delta")
                 if scalp and not scalp.in_position:
                     self._liq_warned.pop(pair, None)
                     continue
@@ -951,7 +969,7 @@ class AlphaBot:
             # Build active strategies map (scalp + options overlays)
             active_map: dict[str, str | None] = {}
             for pair in self.all_pairs:
-                scalp = self._scalp_strategies.get(pair)
+                scalp = self._get_scalp(pair)
                 opts = self._options_strategies.get(pair)
                 if scalp and scalp.in_position:
                     side = scalp.position_side or "long"
@@ -976,10 +994,10 @@ class AlphaBot:
 
             # Compute unrealized P&L for open positions from scalp strategies
             unrealized_pnl = 0.0
-            for pair, scalp in self._scalp_strategies.items():
+            for _key, scalp in self._scalp_strategies.items():
                 if scalp.in_position and scalp.entry_price > 0:
                     # Get latest price from analysis cache
-                    analysis = self._latest_analyses.get(pair) if self._latest_analyses else None
+                    analysis = self._latest_analyses.get(scalp.pair) if self._latest_analyses else None
                     if analysis and analysis.current_price and analysis.current_price > 0:
                         if scalp.position_side == "short":
                             pnl_pct = (scalp.entry_price - analysis.current_price) / scalp.entry_price * 100
@@ -987,7 +1005,7 @@ class AlphaBot:
                             pnl_pct = (analysis.current_price - scalp.entry_price) / scalp.entry_price * 100
                         # Estimate position value from risk manager
                         for pos in rm.open_positions:
-                            if pos.pair == pair:
+                            if pos.pair == scalp.pair:
                                 notional = pos.entry_price * pos.amount
                                 unrealized_pnl += notional * (pnl_pct / 100)
                                 break
@@ -1087,7 +1105,7 @@ class AlphaBot:
         active_map: dict[str, str | None] = {}
         active_count = 0
         for pair in self.all_pairs:
-            scalp = self._scalp_strategies.get(pair)
+            scalp = self._get_scalp(pair)
             opts = self._options_strategies.get(pair)
             if scalp and scalp.in_position:
                 side = scalp.position_side or "long"
@@ -1244,13 +1262,14 @@ class AlphaBot:
                 },
                 "pairs": {},
             }
-            for pair, scalp in self._scalp_strategies.items():
-                sl_cd = max(0, int((ScalpStrategy._pair_last_sl_time.get(pair, 0) + 120) - now_m))
-                rev_cd = max(0, int((ScalpStrategy._pair_last_reversal_time.get(pair, 0) + 120) - now_m))
-                streak_cd = max(0, int(ScalpStrategy._pair_streak_pause_until.get(pair, 0) - now_m))
+            for key, scalp in self._scalp_strategies.items():
+                bare_pair = scalp.pair  # bare pair name without exchange prefix
+                sl_cd = max(0, int((ScalpStrategy._pair_last_sl_time.get(bare_pair, 0) + 120) - now_m))
+                rev_cd = max(0, int((ScalpStrategy._pair_last_reversal_time.get(bare_pair, 0) + 120) - now_m))
+                streak_cd = max(0, int(ScalpStrategy._pair_streak_pause_until.get(bare_pair, 0) - now_m))
                 phantom_cd = max(0, int(getattr(scalp, "_phantom_cooldown_until", 0) - now_m))
                 sig = getattr(scalp, "last_signal_state", None) or {}
-                diag["pairs"][pair] = {
+                diag["pairs"][key] = {
                     "skip_reason": getattr(scalp, "_skip_reason", "") or "NONE",
                     "in_position": scalp.in_position,
                     "position_side": scalp.position_side,
@@ -1443,10 +1462,10 @@ class AlphaBot:
 
         # Find the matching scalp strategy instance
         scalp: ScalpStrategy | None = None
-        for p, s in self._scalp_strategies.items():
-            if p == pair_str or pair_str.startswith(p.split("/")[0]):
+        for _key, s in self._scalp_strategies.items():
+            if s.pair == pair_str or pair_str.startswith(s.pair.split("/")[0]):
                 scalp = s
-                pair_str = p  # normalise to full pair
+                pair_str = s.pair  # normalise to full bare pair
                 break
 
         if scalp is None:
@@ -1520,8 +1539,9 @@ class AlphaBot:
             return
 
         # Apply pair configs to matching scalp strategies
-        for pair, scalp in self._scalp_strategies.items():
-            base = pair.split("/")[0] if "/" in pair else pair.replace("USD", "").replace(":USD", "")
+        for _key, scalp in self._scalp_strategies.items():
+            bare = scalp.pair
+            base = bare.split("/")[0] if "/" in bare else bare.replace("USD", "").replace(":USD", "")
             pc = pair_configs.get(base, {})
             if pc:
                 scalp._pair_enabled = pc.get("enabled", True)
@@ -1553,8 +1573,8 @@ class AlphaBot:
 
         # Find the matching scalp strategy
         scalp: ScalpStrategy | None = None
-        for p, s in self._scalp_strategies.items():
-            if p == pair_str or pair_str.startswith(p.split("/")[0]):
+        for _key, s in self._scalp_strategies.items():
+            if s.pair == pair_str or pair_str.startswith(s.pair.split("/")[0]):
                 scalp = s
                 break
 
@@ -2317,7 +2337,7 @@ class AlphaBot:
             strategy_name = trade.get("strategy", "")
 
             # Only inject scalp positions (our active strategy)
-            scalp = self._scalp_strategies.get(pair)
+            scalp = self._get_scalp(pair, exchange=exchange_id)
             if scalp and strategy_name in ("scalp", ""):
                 scalp.in_position = True
                 scalp.position_side = position_type if position_type in ("long", "short") else "long"
@@ -2510,7 +2530,7 @@ class AlphaBot:
         try:
             ghost_pairs: list[str] = []
             for pos in self.risk_manager.open_positions:
-                scalp = self._scalp_strategies.get(pos.pair)
+                scalp = self._get_scalp(pos.pair, exchange=pos.exchange)
                 if scalp is None or not scalp.in_position:
                     ghost_pairs.append(pos.pair)
             for pair in ghost_pairs:
@@ -2564,7 +2584,7 @@ class AlphaBot:
 
         for pair in all_checked_pairs:
             epos = exchange_positions.get(pair)
-            scalp = self._scalp_strategies.get(pair)
+            scalp = self._get_scalp(pair, exchange="bybit")
 
             if epos and scalp and scalp.in_position:
                 continue  # ALL GOOD
@@ -2709,36 +2729,36 @@ class AlphaBot:
 
         # ── Step 3: Check for PHANTOM positions (bot has, exchange doesn't) ──
         now = time.monotonic()
-        for pair, scalp in self._scalp_strategies.items():
+        for _key, scalp in self._scalp_strategies.items():
             if not scalp.in_position or not scalp.is_futures:
                 continue
             if getattr(scalp, "_exchange_id", "delta") != "bybit":
                 continue  # skip non-Bybit strategies
-            epos = exchange_positions.get(pair)
+            epos = exchange_positions.get(scalp.pair)
             if not epos:
                 if scalp.entry_time > 0:
                     hold_seconds = now - scalp.entry_time
                     if hold_seconds < 300:
                         logger.debug(
-                            "PHANTOM SKIP: %s — opened %.0fs ago (< 5min)", pair, hold_seconds,
+                            "PHANTOM SKIP: %s — opened %.0fs ago (< 5min)", scalp.pair, hold_seconds,
                         )
                         continue
                 if scalp._last_position_exit > 0:
                     since_exit = now - scalp._last_position_exit
                     if since_exit < 30:
                         logger.debug(
-                            "PHANTOM SKIP: %s — trade closed %.0fs ago (< 30s)", pair, since_exit,
+                            "PHANTOM SKIP: %s — trade closed %.0fs ago (< 30s)", scalp.pair, since_exit,
                         )
                         continue
 
                 logger.warning(
                     "PHANTOM DETECTED: %s — bot thinks %s @ $%.2f "
                     "but Bybit has NO position! Clearing.",
-                    pair, scalp.position_side, scalp.entry_price,
+                    scalp.pair, scalp.position_side, scalp.entry_price,
                 )
                 try:
                     await self.alerts.send_orphan_alert(
-                        pair=pair,
+                        pair=scalp.pair,
                         side=scalp.position_side or "unknown",
                         contracts=scalp.entry_amount,
                         action="PHANTOM CLEARED",
@@ -2753,12 +2773,12 @@ class AlphaBot:
                 scalp.entry_amount = 0.0
                 scalp._last_position_exit = now
                 scalp._phantom_cooldown_until = now + 60
-                ScalpStrategy._live_pnl.pop(pair, None)
+                ScalpStrategy._live_pnl.pop(scalp.pair, None)
 
                 phantom_pnl_for_rm = 0.0
                 if self.db.is_connected:
                     open_trade = await self.db.get_open_trade(
-                        pair=pair, exchange="bybit", strategy="scalp",
+                        pair=scalp.pair, exchange="bybit", strategy="scalp",
                     )
                     if open_trade:
                         order_id = open_trade.get("order_id", "")
@@ -2769,7 +2789,7 @@ class AlphaBot:
                         phantom_exit = entry_px
 
                         try:
-                            recent_trades = await self.bybit.fetch_my_trades(pair, limit=20)
+                            recent_trades = await self.bybit.fetch_my_trades(scalp.pair, limit=20)
                             if recent_trades:
                                 close_side = "sell" if pos_type == "long" else "buy"
                                 closing_fills = [
@@ -2782,18 +2802,18 @@ class AlphaBot:
                                         phantom_exit = fill_price
                                         phantom_reason = "CLOSED_BY_EXCHANGE"
                         except Exception as e:
-                            logger.debug("Could not fetch trade history for %s: %s", pair, e)
+                            logger.debug("Could not fetch trade history for %s: %s", scalp.pair, e)
 
                         if phantom_exit == entry_px:
                             try:
-                                ticker = await self.bybit.fetch_ticker(pair)
+                                ticker = await self.bybit.fetch_ticker(scalp.pair)
                                 phantom_exit = float(ticker.get("last", 0) or 0) or entry_px
                             except Exception:
                                 pass
 
                         phantom_pnl, phantom_pnl_pct = calc_pnl(
                             entry_px, phantom_exit, phantom_amount,
-                            pos_type, trade_lev, "bybit", pair,
+                            pos_type, trade_lev, "bybit", scalp.pair,
                         )
                         phantom_pnl_for_rm = phantom_pnl
                         phantom_reason = "phantom_cleared"
@@ -2806,10 +2826,10 @@ class AlphaBot:
                             )
                         logger.info(
                             "Phantom trade %s closed: exit=$%.2f pnl=$%.4f (%.2f%%)",
-                            pair, phantom_exit, phantom_pnl, phantom_pnl_pct,
+                            scalp.pair, phantom_exit, phantom_pnl, phantom_pnl_pct,
                         )
 
-                self.risk_manager.record_close(pair, phantom_pnl_for_rm)
+                self.risk_manager.record_close(scalp.pair, phantom_pnl_for_rm)
 
     async def _reconcile_kraken_positions(self) -> None:
         """Reconcile Kraken positions with bot memory.
@@ -2851,7 +2871,7 @@ class AlphaBot:
 
         for pair in all_checked_pairs:
             epos = exchange_positions.get(pair)
-            scalp = self._scalp_strategies.get(pair)
+            scalp = self._get_scalp(pair, exchange="kraken")
 
             if epos and scalp and scalp.in_position:
                 continue  # ALL GOOD
@@ -2996,36 +3016,36 @@ class AlphaBot:
 
         # ── Step 3: Check for PHANTOM positions (bot has, exchange doesn't) ──
         now = time.monotonic()
-        for pair, scalp in self._scalp_strategies.items():
+        for _key, scalp in self._scalp_strategies.items():
             if not scalp.in_position or not scalp.is_futures:
                 continue
             if getattr(scalp, "_exchange_id", "delta") != "kraken":
                 continue  # skip non-Kraken strategies
-            epos = exchange_positions.get(pair)
+            epos = exchange_positions.get(scalp.pair)
             if not epos:
                 if scalp.entry_time > 0:
                     hold_seconds = now - scalp.entry_time
                     if hold_seconds < 300:
                         logger.debug(
-                            "PHANTOM SKIP: %s — opened %.0fs ago (< 5min)", pair, hold_seconds,
+                            "PHANTOM SKIP: %s — opened %.0fs ago (< 5min)", scalp.pair, hold_seconds,
                         )
                         continue
                 if scalp._last_position_exit > 0:
                     since_exit = now - scalp._last_position_exit
                     if since_exit < 30:
                         logger.debug(
-                            "PHANTOM SKIP: %s — trade closed %.0fs ago (< 30s)", pair, since_exit,
+                            "PHANTOM SKIP: %s — trade closed %.0fs ago (< 30s)", scalp.pair, since_exit,
                         )
                         continue
 
                 logger.warning(
                     "PHANTOM DETECTED: %s — bot thinks %s @ $%.2f "
                     "but Kraken has NO position! Clearing.",
-                    pair, scalp.position_side, scalp.entry_price,
+                    scalp.pair, scalp.position_side, scalp.entry_price,
                 )
                 try:
                     await self.alerts.send_orphan_alert(
-                        pair=pair,
+                        pair=scalp.pair,
                         side=scalp.position_side or "unknown",
                         contracts=scalp.entry_amount,
                         action="PHANTOM CLEARED",
@@ -3040,12 +3060,12 @@ class AlphaBot:
                 scalp.entry_amount = 0.0
                 scalp._last_position_exit = now
                 scalp._phantom_cooldown_until = now + 60
-                ScalpStrategy._live_pnl.pop(pair, None)
+                ScalpStrategy._live_pnl.pop(scalp.pair, None)
 
                 phantom_pnl_for_rm = 0.0
                 if self.db.is_connected:
                     open_trade = await self.db.get_open_trade(
-                        pair=pair, exchange="kraken", strategy="scalp",
+                        pair=scalp.pair, exchange="kraken", strategy="scalp",
                     )
                     if open_trade:
                         order_id = open_trade.get("order_id", "")
@@ -3056,7 +3076,7 @@ class AlphaBot:
                         phantom_exit = entry_px
 
                         try:
-                            recent_trades = await self.kraken.fetch_my_trades(pair, limit=20)
+                            recent_trades = await self.kraken.fetch_my_trades(scalp.pair, limit=20)
                             if recent_trades:
                                 close_side = "sell" if pos_type == "long" else "buy"
                                 closing_fills = [
@@ -3068,18 +3088,18 @@ class AlphaBot:
                                     if fill_price > 0:
                                         phantom_exit = fill_price
                         except Exception as e:
-                            logger.debug("Could not fetch trade history for %s: %s", pair, e)
+                            logger.debug("Could not fetch trade history for %s: %s", scalp.pair, e)
 
                         if phantom_exit == entry_px:
                             try:
-                                ticker = await self.kraken.fetch_ticker(pair)
+                                ticker = await self.kraken.fetch_ticker(scalp.pair)
                                 phantom_exit = float(ticker.get("last", 0) or 0) or entry_px
                             except Exception:
                                 pass
 
                         phantom_pnl, phantom_pnl_pct = calc_pnl(
                             entry_px, phantom_exit, phantom_amount,
-                            pos_type, trade_lev, "kraken", pair,
+                            pos_type, trade_lev, "kraken", scalp.pair,
                         )
                         phantom_pnl_for_rm = phantom_pnl
                         phantom_reason = "phantom_cleared"
@@ -3092,10 +3112,10 @@ class AlphaBot:
                             )
                         logger.info(
                             "Phantom trade %s closed: exit=$%.2f pnl=$%.4f (%.2f%%)",
-                            pair, phantom_exit, phantom_pnl, phantom_pnl_pct,
+                            scalp.pair, phantom_exit, phantom_pnl, phantom_pnl_pct,
                         )
 
-                self.risk_manager.record_close(pair, phantom_pnl_for_rm)
+                self.risk_manager.record_close(scalp.pair, phantom_pnl_for_rm)
 
     async def _reconcile_delta_positions(self) -> None:
         """Reconcile Delta Exchange positions with bot memory.
@@ -3164,7 +3184,7 @@ class AlphaBot:
                 continue
 
             epos = normalized_positions.get(pair)
-            scalp = self._scalp_strategies.get(pair)
+            scalp = self._get_scalp(pair, exchange="delta")
 
             if epos and scalp and scalp.in_position:
                 # ALL GOOD — exchange has it, bot is managing it
@@ -3347,12 +3367,12 @@ class AlphaBot:
 
         # ── Step 3: Check for PHANTOM positions (bot has, exchange doesn't) ──
         now = time.monotonic()
-        for pair, scalp in self._scalp_strategies.items():
+        for _key, scalp in self._scalp_strategies.items():
             if not scalp.in_position or not scalp.is_futures:
                 continue
             if getattr(scalp, "_exchange_id", "delta") != "delta":
                 continue  # skip non-Delta strategies
-            epos = normalized_positions.get(pair)
+            epos = normalized_positions.get(scalp.pair)
             if not epos:
                 # ── TIME GUARDS: don't phantom-clear legitimate trades ──
                 # Guard 1: position opened < 5 min ago — give it time to settle
@@ -3361,7 +3381,7 @@ class AlphaBot:
                     if hold_seconds < 300:
                         logger.debug(
                             "PHANTOM SKIP: %s — opened %.0fs ago (< 5min), not clearing",
-                            pair, hold_seconds,
+                            scalp.pair, hold_seconds,
                         )
                         continue
 
@@ -3371,18 +3391,18 @@ class AlphaBot:
                     if since_exit < 30:
                         logger.debug(
                             "PHANTOM SKIP: %s — trade closed %.0fs ago (< 30s), not phantom",
-                            pair, since_exit,
+                            scalp.pair, since_exit,
                         )
                         continue
 
                 logger.warning(
                     "PHANTOM DETECTED: %s — bot thinks %s @ $%.2f "
                     "but exchange has NO position! Clearing.",
-                    pair, scalp.position_side, scalp.entry_price,
+                    scalp.pair, scalp.position_side, scalp.entry_price,
                 )
                 try:
                     await self.alerts.send_orphan_alert(
-                        pair=pair,
+                        pair=scalp.pair,
                         side=scalp.position_side or "unknown",
                         contracts=scalp.entry_amount,
                         action="PHANTOM CLEARED",
@@ -3399,14 +3419,14 @@ class AlphaBot:
                 scalp._last_position_exit = now
                 # Set phantom cooldown — no new entries on this pair for 60s
                 scalp._phantom_cooldown_until = now + 60
-                ScalpStrategy._live_pnl.pop(pair, None)
+                ScalpStrategy._live_pnl.pop(scalp.pair, None)
 
                 phantom_pnl_for_rm = 0.0  # track actual P&L for risk manager
 
                 # Mark closed in DB — use trade history to find real exit price & reason
                 if self.db.is_connected:
                     open_trade = await self.db.get_open_trade(
-                        pair=pair, exchange="delta", strategy="scalp",
+                        pair=scalp.pair, exchange="delta", strategy="scalp",
                     )
                     if open_trade:
                         order_id = open_trade.get("order_id", "")
@@ -3419,7 +3439,7 @@ class AlphaBot:
 
                         # Try to find actual exit from Delta trade history
                         try:
-                            recent_trades = await self.delta.fetch_my_trades(pair, limit=20)
+                            recent_trades = await self.delta.fetch_my_trades(scalp.pair, limit=20)
                             if recent_trades:
                                 close_side = "sell" if pos_type == "long" else "buy"
                                 closing_fills = [
@@ -3442,22 +3462,22 @@ class AlphaBot:
                                             phantom_reason = "CLOSED_BY_EXCHANGE"
                                         logger.info(
                                             "Phantom %s: found exit fill $%.2f (reason=%s)",
-                                            pair, fill_price, phantom_reason,
+                                            scalp.pair, fill_price, phantom_reason,
                                         )
                         except Exception as e:
-                            logger.debug("Could not fetch trade history for %s: %s", pair, e)
+                            logger.debug("Could not fetch trade history for %s: %s", scalp.pair, e)
 
                         # Fallback: current ticker if no fill found
                         if phantom_exit == entry_px:
                             try:
-                                ticker = await self.delta.fetch_ticker(pair)
+                                ticker = await self.delta.fetch_ticker(scalp.pair)
                                 phantom_exit = float(ticker.get("last", 0) or 0) or entry_px
                             except Exception:
                                 pass
 
                         phantom_pnl, phantom_pnl_pct = calc_pnl(
                             entry_px, phantom_exit, phantom_amount,
-                            pos_type, trade_lev, "delta", pair,
+                            pos_type, trade_lev, "delta", scalp.pair,
                         )
                         phantom_pnl_for_rm = phantom_pnl
                         trade_id = open_trade.get("id")
@@ -3482,11 +3502,11 @@ class AlphaBot:
                             })
                         logger.info(
                             "Phantom trade %s closed: exit=$%.2f pnl=$%.4f (%.2f%%) reason=%s",
-                            pair, phantom_exit, phantom_pnl, phantom_pnl_pct, phantom_reason,
+                            scalp.pair, phantom_exit, phantom_pnl, phantom_pnl_pct, phantom_reason,
                         )
 
                 # Remove from risk manager — use real P&L for accurate daily tracking
-                self.risk_manager.record_close(pair, phantom_pnl_for_rm)
+                self.risk_manager.record_close(scalp.pair, phantom_pnl_for_rm)
 
     async def _reconcile_binance_positions(self) -> None:
         """Reconcile Binance spot positions with bot memory.
@@ -3502,14 +3522,14 @@ class AlphaBot:
         except Exception:
             return
 
-        for pair, scalp in self._scalp_strategies.items():
+        for _key, scalp in self._scalp_strategies.items():
             if scalp.is_futures:
                 continue  # skip Delta pairs
             if not scalp.in_position:
                 continue  # bot doesn't think it has a position, skip
 
             # Check if we actually hold this asset
-            base = pair.split("/")[0] if "/" in pair else pair
+            base = scalp.pair.split("/")[0] if "/" in scalp.pair else scalp.pair
             held = float(free_balances.get(base, 0) or 0)
             held_value = held * scalp.entry_price if scalp.entry_price > 0 else 0
 
@@ -3524,11 +3544,11 @@ class AlphaBot:
                 # PHANTOM — bot thinks position exists but nothing on exchange
                 logger.warning(
                     "PHANTOM (Binance): %s — bot thinks long @ $%.2f but only $%.2f held. Clearing.",
-                    pair, scalp.entry_price, held_value,
+                    scalp.pair, scalp.entry_price, held_value,
                 )
                 try:
                     await self.alerts.send_orphan_alert(
-                        pair=pair, side="long", contracts=scalp.entry_amount,
+                        pair=scalp.pair, side="long", contracts=scalp.entry_amount,
                         action="PHANTOM CLEARED (insufficient balance)",
                         detail=f"Only ${held_value:.2f} held — position was closed externally",
                     )
@@ -3546,7 +3566,7 @@ class AlphaBot:
 
                 if self.db.is_connected:
                     open_trade = await self.db.get_open_trade(
-                        pair=pair, exchange="binance", strategy="scalp",
+                        pair=scalp.pair, exchange="binance", strategy="scalp",
                     )
                     if open_trade:
                         order_id = open_trade.get("order_id", "")
@@ -3557,7 +3577,7 @@ class AlphaBot:
 
                         # Try to find actual exit from Binance trade history
                         try:
-                            recent_trades = await self.binance.fetch_my_trades(pair, limit=20)
+                            recent_trades = await self.binance.fetch_my_trades(scalp.pair, limit=20)
                             if recent_trades:
                                 closing_fills = [
                                     t for t in recent_trades if t.get("side") == "sell"
@@ -3570,22 +3590,22 @@ class AlphaBot:
                                         phantom_reason = "CLOSED_BY_EXCHANGE"
                                         logger.info(
                                             "Phantom Binance %s: found sell fill $%.2f",
-                                            pair, fill_price,
+                                            scalp.pair, fill_price,
                                         )
                         except Exception as e:
-                            logger.debug("Could not fetch Binance trade history for %s: %s", pair, e)
+                            logger.debug("Could not fetch Binance trade history for %s: %s", scalp.pair, e)
 
                         # Fallback: current ticker if no fill found
                         if phantom_exit == entry_px:
                             try:
-                                ticker = await self.binance.fetch_ticker(pair)
+                                ticker = await self.binance.fetch_ticker(scalp.pair)
                                 phantom_exit = float(ticker.get("last", 0) or 0) or entry_px
                             except Exception:
                                 pass
 
                         phantom_pnl, phantom_pnl_pct = calc_pnl(
                             entry_px, phantom_exit, phantom_amount,
-                            "spot", 1, "binance", pair,
+                            "spot", 1, "binance", scalp.pair,
                         )
                         phantom_pnl_for_rm_bn = phantom_pnl
                         trade_id = open_trade.get("id")
@@ -3610,10 +3630,10 @@ class AlphaBot:
                             })
                         logger.info(
                             "Phantom Binance %s closed: exit=$%.2f pnl=$%.4f reason=%s",
-                            pair, phantom_exit, phantom_pnl, phantom_reason,
+                            scalp.pair, phantom_exit, phantom_pnl, phantom_reason,
                         )
                 # Remove from risk manager — use real P&L for accurate daily tracking
-                self.risk_manager.record_close(pair, phantom_pnl_for_rm_bn)
+                self.risk_manager.record_close(scalp.pair, phantom_pnl_for_rm_bn)
 
     async def _close_orphaned_positions(self) -> None:
         """Close any open positions from non-scalp strategies (e.g. futures_momentum).
