@@ -1034,6 +1034,9 @@ class ScalpStrategy(BaseStrategy):
             else:
                 self._price_5m_pct = 0.0
 
+            # ── 15m trend (needed by cache + entry gates below) ────────
+            trend_15m = self._get_15m_trend()
+
             # ── Cache signals for Layer 1 acceleration entry ─────────
             bb_range_cache = bb_upper - bb_lower if bb_upper > bb_lower else 1e-9
             bb_pos_cache = (current_price - bb_lower) / bb_range_cache
@@ -1195,8 +1198,7 @@ class ScalpStrategy(BaseStrategy):
                 )
             return signals
 
-        # ── 15m trend (INFO ONLY — logged but never gates entries) ─────
-        trend_15m = self._get_15m_trend()
+
 
         # ── Adaptive widening: if idle 30+ min, loosen thresholds 20% ─
         idle_seconds = now - self._last_position_exit
