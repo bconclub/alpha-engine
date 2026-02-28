@@ -411,3 +411,12 @@ export interface SnapshotStats {
   avg_hold_seconds: number;
   exit_breakdown: Record<string, number>;
 }
+
+export interface Deposit {
+  id: number;
+  created_at: string;
+  exchange: Exchange;
+  amount: number;
+  amount_inr?: number | null;
+  notes?: string | null;
+}

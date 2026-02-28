@@ -320,11 +320,15 @@ class ScalpStrategy(BaseStrategy):
     SURVIVAL_MAX_ALLOC = 30.0         # max alloc % in survival mode
     MAX_SL_LOSS_PCT = 5.0             # max SL loss = 5% of TOTAL balance (not collateral)
 
-    # ── STALE MOMENTUM FILTER ────────────────────────────────────
-    STALE_MOM_LOOKBACK_S = 10         # look back 10 seconds for recent momentum
-    STALE_MOM_MIN_PCT = 0.08          # need 0.08% move in last 10s in our direction (was 0.05)
+    # ── MOM-PATH DECELERATION FILTER ─────────────────────────────
+    DECEL_RECENT_WINDOW_S = 10        # recent 10s window for acceleration check
+    DECEL_PRIOR_WINDOW_S = 10         # prior 10s window (10-20s ago)
+    DECEL_MOM_FLOOR_PCT = 0.05        # minimum 10s momentum in entry direction (absolute floor)
 
-    # ── 5-MINUTE COUNTER-TREND FILTER ─────────────────────────────
+    # ── 15-MINUTE TREND GATE ─────────────────────────────────────
+    TREND_GATE_ENABLED = True          # block counter-trend entries based on 15m trend
+
+    # ── 5-MINUTE COUNTER-TREND FILTER (secondary, when 15m=neutral) ─
     COUNTER_TREND_SOFT_PCT = 0.15     # require 4/4 signals when 5m opposes direction
     COUNTER_TREND_HARD_PCT = 0.40     # block entry entirely when 5m strongly opposes
 
@@ -1040,6 +1044,7 @@ class ScalpStrategy(BaseStrategy):
                 "ema9_above_21": ema_9 > ema_21,
                 "volume_ratio": vol_ratio,
                 "price_5m_pct": self._price_5m_pct,
+                "trend_15m": trend_15m,
                 "timestamp": time.monotonic(),
             }
 
@@ -1099,7 +1104,7 @@ class ScalpStrategy(BaseStrategy):
         self._prev_rsi = rsi_now
         self._skip_reason = ""  # reset each tick — set if we skip
 
-        # Record price for 10s stale momentum check
+        # Record price for deceleration / acceleration checks
         self._price_history.append((time.monotonic(), current_price))
 
         # Check position limits
@@ -1314,7 +1319,41 @@ class ScalpStrategy(BaseStrategy):
         if entry is not None:
             side, reason, use_limit, signal_strength = entry
 
-            # ── 5-MINUTE COUNTER-TREND FILTER ──────────────────────────
+            # ── 15-MINUTE TREND GATE ─────────────────────────────────────
+            # Trade WITH the trend. Only allow counter-trend when 15m actually reverses.
+            if self.TREND_GATE_ENABLED and trend_15m != "neutral":
+                if side == "long" and trend_15m == "bearish":
+                    self._skip_reason = "TREND_GATE (long blocked, 15m=bearish)"
+                    self.logger.info(
+                        "[%s] TREND_GATE — LONG blocked, 15m=bearish. Wait for reversal.",
+                        self.pair,
+                    )
+                    self.last_signal_state = {
+                        "side": side, "reason": reason,
+                        "strength": signal_strength, "trend_15m": trend_15m,
+                        "rsi": rsi_now, "momentum_60s": momentum_60s, "momentum_30s": momentum_30s,
+                        "current_price": current_price, "timestamp": time.monotonic(),
+                        "skip_reason": self._skip_reason,
+                        **self._last_signal_breakdown,
+                    }
+                    return signals
+                if side == "short" and trend_15m == "bullish":
+                    self._skip_reason = "TREND_GATE (short blocked, 15m=bullish)"
+                    self.logger.info(
+                        "[%s] TREND_GATE — SHORT blocked, 15m=bullish. Wait for reversal.",
+                        self.pair,
+                    )
+                    self.last_signal_state = {
+                        "side": side, "reason": reason,
+                        "strength": signal_strength, "trend_15m": trend_15m,
+                        "rsi": rsi_now, "momentum_60s": momentum_60s, "momentum_30s": momentum_30s,
+                        "current_price": current_price, "timestamp": time.monotonic(),
+                        "skip_reason": self._skip_reason,
+                        **self._last_signal_breakdown,
+                    }
+                    return signals
+
+            # ── 5-MINUTE COUNTER-TREND FILTER (secondary, when 15m=neutral) ──
             _ct_long_counter = side == "long" and self._price_5m_pct < -self.COUNTER_TREND_SOFT_PCT
             _ct_short_counter = side == "short" and self._price_5m_pct > self.COUNTER_TREND_SOFT_PCT
             if _ct_long_counter or _ct_short_counter:
@@ -1390,33 +1429,49 @@ class ScalpStrategy(BaseStrategy):
                 **self._last_signal_breakdown,
             }
 
-            # ── STALE MOMENTUM: 60s momentum OK but is the move still happening? ──
-            # Look back 10s in real-time price feed — if move has stalled, skip entry
+            # ── DECELERATION FILTER: is the move accelerating or exhausting? ──
+            # Compare recent 10s momentum vs prior 10s (10-20s ago).
+            # If the move is decelerating → the 60s momentum is stale, skip.
+            # If accelerating → the move is gaining speed, safe to enter.
             self._last_momentum_10s = 0.0
-            momentum_10s = 0.0
-            if len(self._price_history) >= 2:
-                target_time = now - self.STALE_MOM_LOOKBACK_S
-                price_10s_ago = None
-                for ts, px in self._price_history:
-                    if ts <= target_time:
-                        price_10s_ago = px
-                    else:
-                        break  # deque is chronological, first entry past target = done
-                if price_10s_ago is not None and price_10s_ago > 0:
-                    momentum_10s = (current_price - price_10s_ago) / price_10s_ago * 100
-                    self._last_momentum_10s = momentum_10s
+            self._last_momentum_prior_10s = 0.0
+            mom_recent = 0.0
+            mom_prior = 0.0
+            accel_check_valid = False
 
-            stale = False
-            if side == "long" and momentum_10s < self.STALE_MOM_MIN_PCT:
-                stale = True
-            elif side == "short" and momentum_10s > -self.STALE_MOM_MIN_PCT:
-                stale = True
+            prices = self._price_history
+            recent_prices = [(ts, px) for ts, px in prices if now - self.DECEL_RECENT_WINDOW_S <= ts <= now]
+            prior_prices = [(ts, px) for ts, px in prices if now - (self.DECEL_RECENT_WINDOW_S + self.DECEL_PRIOR_WINDOW_S) <= ts < now - self.DECEL_RECENT_WINDOW_S]
 
-            if stale:
-                self._skip_reason = f"STALE_MOMENTUM (10s={momentum_10s:+.3f}%, need {'+' if side == 'long' else '-'}{self.STALE_MOM_MIN_PCT:.2f}%)"
+            if len(recent_prices) >= 2 and len(prior_prices) >= 2:
+                mom_recent = (recent_prices[-1][1] - recent_prices[0][1]) / recent_prices[0][1] * 100
+                mom_prior = (prior_prices[-1][1] - prior_prices[0][1]) / prior_prices[0][1] * 100
+                accel_check_valid = True
+                self._last_momentum_10s = mom_recent
+                self._last_momentum_prior_10s = mom_prior
+
+            # Floor check: need SOME momentum in entry direction (absolute minimum)
+            floor_fail = False
+            if side == "long" and mom_recent < self.DECEL_MOM_FLOOR_PCT:
+                floor_fail = True
+            elif side == "short" and mom_recent > -self.DECEL_MOM_FLOOR_PCT:
+                floor_fail = True
+
+            # Deceleration check: recent must be stronger than prior in entry direction
+            decelerating = False
+            if accel_check_valid and not floor_fail:
+                if side == "long":
+                    decelerating = mom_recent <= mom_prior  # upward move slowing
+                else:
+                    decelerating = mom_recent >= mom_prior  # downward move slowing
+
+            if floor_fail or decelerating:
+                tag = "DECEL_SKIP" if decelerating else "MOM_FLOOR"
+                self._skip_reason = f"{tag} (10s={mom_recent:+.3f}% prior_10s={mom_prior:+.3f}%)"
                 self.logger.info(
-                    "[%s] STALE_MOMENTUM — 60s mom=%+.3f%% OK but 10s=%+.3f%% (move is over), skipping %s",
-                    self.pair, momentum_60s, momentum_10s, side,
+                    "[%s] %s — 60s mom=%+.3f%% but 10s=%+.3f%% prior_10s=%+.3f%% — move %s, skipping %s",
+                    self.pair, tag, momentum_60s, mom_recent, mom_prior,
+                    "decelerating" if decelerating else "below floor", side,
                 )
                 self.last_signal_state = {
                     "side": side, "reason": reason,
@@ -2983,6 +3038,23 @@ class ScalpStrategy(BaseStrategy):
         if not has_rsi_or_bb:
             return
 
+        # ── 15-minute trend gate (from cached candle data) ──
+        if self.TREND_GATE_ENABLED:
+            _accel_trend = cached.get("trend_15m", "neutral") if cached and cache_age < 10 else "neutral"
+            if _accel_trend != "neutral":
+                if direction == "long" and _accel_trend == "bearish":
+                    self.logger.info(
+                        "[%s] ACCEL TREND_GATE — LONG blocked, 15m=bearish",
+                        self.pair,
+                    )
+                    return
+                if direction == "short" and _accel_trend == "bullish":
+                    self.logger.info(
+                        "[%s] ACCEL TREND_GATE — SHORT blocked, 15m=bullish",
+                        self.pair,
+                    )
+                    return
+
         # ── 5-minute counter-trend filter (from cached candle data) ──
         _accel_5m = cached.get("price_5m_pct", 0.0) if cached and cache_age < 10 else 0.0
         if _accel_5m != 0.0:
@@ -3778,7 +3850,8 @@ class ScalpStrategy(BaseStrategy):
 
         # signals_fired = raw reason string (all signal tags for analysis)
         mom_10s = getattr(self, '_last_momentum_10s', 0.0)
-        signals_fired = f"{reason} | 10s_mom={mom_10s:+.3f}% | 5m={self._price_5m_pct:+.2f}%"
+        mom_prior = getattr(self, '_last_momentum_prior_10s', 0.0)
+        signals_fired = f"{reason} | 10s={mom_10s:+.3f}% prior={mom_prior:+.3f}% | 5m={self._price_5m_pct:+.2f}%"
 
         if side == "long":
             sl = price * (1 - self._sl_pct / 100)

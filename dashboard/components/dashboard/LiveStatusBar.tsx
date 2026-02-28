@@ -1,8 +1,9 @@
 'use client';
 
-import { useEffect, useState, useMemo } from 'react';
+import { useEffect, useState, useMemo, useRef } from 'react';
 import { useSupabase } from '@/components/providers/SupabaseProvider';
 import { formatCurrency, formatPnL, cn } from '@/lib/utils';
+import type { Deposit } from '@/lib/types';
 
 function formatUptime(seconds: number): string {
   const h = Math.floor(seconds / 3600);
@@ -80,8 +81,131 @@ function MiniSparkline({ data, color }: { data: number[]; color: string }) {
   );
 }
 
+type DepositRange = '24h' | '7d' | '30d' | 'all';
+
+function DepositsPopover({ deposits, inrRate }: { deposits: Deposit[]; inrRate: number }) {
+  const [open, setOpen] = useState(false);
+  const [range, setRange] = useState<DepositRange>('7d');
+  const ref = useRef<HTMLDivElement>(null);
+
+  // Close on outside click
+  useEffect(() => {
+    if (!open) return;
+    const handler = (e: MouseEvent) => {
+      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
+    };
+    document.addEventListener('mousedown', handler);
+    return () => document.removeEventListener('mousedown', handler);
+  }, [open]);
+
+  const filtered = useMemo(() => {
+    if (range === 'all') return deposits;
+    const now = Date.now();
+    const ms: Record<string, number> = { '24h': 86400000, '7d': 604800000, '30d': 2592000000 };
+    const cutoff = now - (ms[range] ?? 0);
+    return deposits.filter((d) => new Date(d.created_at).getTime() >= cutoff);
+  }, [deposits, range]);
+
+  const total = filtered.reduce((s, d) => s + d.amount, 0);
+
+  // Mini bar chart data: group by date
+  const chartData = useMemo(() => {
+    const byDate = new Map<string, number>();
+    for (const d of filtered) {
+      const date = new Date(d.created_at).toISOString().slice(0, 10);
+      byDate.set(date, (byDate.get(date) ?? 0) + d.amount);
+    }
+    return Array.from(byDate.entries())
+      .sort((a, b) => a[0].localeCompare(b[0]))
+      .map(([date, amount]) => ({ date, amount }));
+  }, [filtered]);
+
+  const maxAmount = Math.max(...chartData.map((d) => d.amount), 1);
+
+  return (
+    <div ref={ref} className="relative inline-block">
+      <button
+        onClick={() => setOpen(!open)}
+        className={cn(
+          'px-2 py-0.5 rounded text-[9px] font-medium transition-colors border',
+          open
+            ? 'bg-zinc-700 text-white border-zinc-600'
+            : 'text-zinc-500 hover:text-zinc-300 border-zinc-700 hover:border-zinc-600',
+        )}
+      >
+        Deposits
+      </button>
+      {open && (
+        <div className="absolute top-full mt-1.5 right-0 z-50 w-72 bg-[#0d1117] border border-zinc-700 rounded-lg shadow-xl p-3 space-y-2.5">
+          {/* Range tabs */}
+          <div className="flex gap-1">
+            {(['24h', '7d', '30d', 'all'] as DepositRange[]).map((r) => (
+              <button
+                key={r}
+                onClick={() => setRange(r)}
+                className={cn(
+                  'px-1.5 py-0.5 rounded text-[9px] font-medium transition-colors',
+                  range === r ? 'bg-zinc-700 text-white' : 'text-zinc-500 hover:text-zinc-300',
+                )}
+              >
+                {r === 'all' ? 'ALL' : r.toUpperCase()}
+              </button>
+            ))}
+          </div>
+
+          {/* Total */}
+          <div className="flex items-baseline gap-2">
+            <span className="font-mono text-sm font-bold text-[#2196f3]">
+              {formatCurrency(total)}
+            </span>
+            {inrRate > 0 && (
+              <span className="text-[9px] text-zinc-500 font-mono">
+                {'\u20B9'}{Math.round(total * inrRate).toLocaleString('en-IN')}
+              </span>
+            )}
+            <span className="text-[9px] text-zinc-500">{filtered.length} deposit{filtered.length !== 1 ? 's' : ''}</span>
+          </div>
+
+          {/* Mini bar chart */}
+          {chartData.length > 0 && (
+            <div className="flex items-end gap-0.5 h-10">
+              {chartData.map((d) => (
+                <div
+                  key={d.date}
+                  className="flex-1 bg-[#2196f3]/40 rounded-t-sm hover:bg-[#2196f3]/70 transition-colors"
+                  style={{ height: `${Math.max(8, (d.amount / maxAmount) * 100)}%` }}
+                  title={`${d.date}: ${formatCurrency(d.amount)}`}
+                />
+              ))}
+            </div>
+          )}
+
+          {/* Deposit list */}
+          <div className="max-h-36 overflow-y-auto space-y-1">
+            {filtered.length === 0 ? (
+              <p className="text-[10px] text-zinc-500 text-center py-2">No deposits</p>
+            ) : (
+              filtered.map((d) => (
+                <div key={d.id} className="flex items-center justify-between text-[10px]">
+                  <div className="flex items-center gap-1.5">
+                    <span className="text-zinc-500 font-mono">
+                      {new Date(d.created_at).toLocaleDateString('en-GB', { day: '2-digit', month: 'short' })}
+                    </span>
+                    <span className="text-zinc-400 capitalize">{d.exchange}</span>
+                  </div>
+                  <span className="font-mono text-[#2196f3]">{formatCurrency(d.amount)}</span>
+                </div>
+              ))
+            )}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 export function LiveStatusBar() {
-  const { botStatus, isConnected, pnlByExchange, trades, dailyPnL } = useSupabase();
+  const { botStatus, isConnected, pnlByExchange, trades, dailyPnL, deposits } = useSupabase();
 
   const bybitConnected = botStatus?.bybit_connected || (Number(botStatus?.bybit_balance ?? 0) > 0);
   const deltaConnected = botStatus?.delta_connected || (Number(botStatus?.delta_balance ?? 0) > 0);
@@ -220,67 +344,37 @@ export function LiveStatusBar() {
       {/* ═══ MOBILE LAYOUT ═══ */}
       <div className="flex flex-col gap-2 md:hidden">
 
-        {/* Row 1 — Balance cards */}
+        {/* Row 1 — Balance cards (only show live exchanges with balance) */}
         <div className="grid grid-cols-2 gap-2">
-          {/* Bybit */}
-          <div className="bg-zinc-900/50 border border-zinc-800 rounded-lg px-2.5 py-2">
-            <div className="flex items-center gap-1 mb-1">
-              <span className={cn(
-                'w-1.5 h-1.5 rounded-full shrink-0',
-                bybitConnected && !isStale ? 'bg-[#00c853] animate-pulse' : 'bg-red-500',
-              )} />
-              <span className="text-[10px] font-semibold text-[#f7a600] truncate">BYBIT</span>
-            </div>
-            {bybitBalance > 0 ? (
+          {bybitConnected && bybitBalance > 0 && (
+            <div className="bg-zinc-900/50 border border-zinc-800 rounded-lg px-2.5 py-2">
+              <div className="flex items-center gap-1 mb-1">
+                <span className="w-1.5 h-1.5 rounded-full shrink-0 bg-[#00c853] animate-pulse" />
+                <span className="text-[10px] font-semibold text-[#f7a600] truncate">BYBIT</span>
+              </div>
               <span className="font-mono text-sm text-white">{formatCurrency(bybitBalance)}</span>
-            ) : bybitPnl ? (
-              <span className={cn('font-mono text-xs', bybitPnl.total_pnl >= 0 ? 'text-[#00c853]' : 'text-[#ff1744]')}>
-                {formatPnL(bybitPnl.total_pnl)}
-              </span>
-            ) : (
-              <span className="text-[10px] text-zinc-500">No data</span>
-            )}
-          </div>
-
-          {/* Delta */}
-          <div className="bg-zinc-900/50 border border-zinc-800 rounded-lg px-2.5 py-2">
-            <div className="flex items-center gap-1 mb-1">
-              <span className={cn(
-                'w-1.5 h-1.5 rounded-full shrink-0',
-                deltaConnected && !isStale ? 'bg-[#00c853] animate-pulse' : 'bg-red-500',
-              )} />
-              <span className="text-[10px] font-semibold text-[#00d2ff] truncate">DELTA</span>
             </div>
-            {deltaBalance > 0 ? (
+          )}
+
+          {deltaConnected && deltaBalance > 0 && (
+            <div className="bg-zinc-900/50 border border-zinc-800 rounded-lg px-2.5 py-2">
+              <div className="flex items-center gap-1 mb-1">
+                <span className="w-1.5 h-1.5 rounded-full shrink-0 bg-[#00c853] animate-pulse" />
+                <span className="text-[10px] font-semibold text-[#00d2ff] truncate">DELTA</span>
+              </div>
               <span className="font-mono text-sm text-white">{formatCurrency(deltaBalance)}</span>
-            ) : deltaPnl ? (
-              <span className={cn('font-mono text-xs', deltaPnl.total_pnl >= 0 ? 'text-[#00c853]' : 'text-[#ff1744]')}>
-                {formatPnL(deltaPnl.total_pnl)}
-              </span>
-            ) : (
-              <span className="text-[10px] text-zinc-500">—</span>
-            )}
-          </div>
-
-          {/* Kraken */}
-          <div className="bg-zinc-900/50 border border-zinc-800 rounded-lg px-2.5 py-2">
-            <div className="flex items-center gap-1 mb-1">
-              <span className={cn(
-                'w-1.5 h-1.5 rounded-full shrink-0',
-                krakenConnected && !isStale ? 'bg-[#00c853] animate-pulse' : 'bg-red-500',
-              )} />
-              <span className="text-[10px] font-semibold text-[#7B61FF] truncate">KRAKEN</span>
             </div>
-            {krakenBalance > 0 ? (
+          )}
+
+          {krakenConnected && krakenBalance > 0 && (
+            <div className="bg-zinc-900/50 border border-zinc-800 rounded-lg px-2.5 py-2">
+              <div className="flex items-center gap-1 mb-1">
+                <span className="w-1.5 h-1.5 rounded-full shrink-0 bg-[#00c853] animate-pulse" />
+                <span className="text-[10px] font-semibold text-[#7B61FF] truncate">KRAKEN</span>
+              </div>
               <span className="font-mono text-sm text-white">{formatCurrency(krakenBalance)}</span>
-            ) : krakenPnl ? (
-              <span className={cn('font-mono text-xs', krakenPnl.total_pnl >= 0 ? 'text-[#00c853]' : 'text-[#ff1744]')}>
-                {formatPnL(krakenPnl.total_pnl)}
-              </span>
-            ) : (
-              <span className="text-[10px] text-zinc-500">—</span>
-            )}
-          </div>
+            </div>
+          )}
 
           {/* Capital */}
           <div className="bg-zinc-900/50 border border-zinc-800 rounded-lg px-2.5 py-2 text-center">
@@ -310,6 +404,7 @@ export function LiveStatusBar() {
                   {range.toUpperCase()}
                 </button>
               ))}
+              <DepositsPopover deposits={deposits} inrRate={inrRate} />
             </div>
           </div>
           <div className="flex items-center justify-between gap-2">
@@ -405,6 +500,7 @@ export function LiveStatusBar() {
         {/* Exchange Cards */}
         <div className="flex gap-3 flex-1 min-w-0">
           {/* Bybit Card */}
+          {bybitConnected && bybitBalance > 0 && (
           <div className="flex-1 bg-zinc-900/50 border border-zinc-800 rounded-lg px-4 py-3">
             <div className="flex items-center gap-2 mb-1">
               <span
@@ -415,23 +511,14 @@ export function LiveStatusBar() {
               />
               <span className="text-sm font-semibold text-[#f7a600]">BYBIT</span>
             </div>
-            {bybitBalance > 0 ? (
-              <div className="flex items-baseline gap-2 min-w-0 flex-wrap">
-                <span className="font-mono text-lg text-white truncate">{formatCurrency(bybitBalance)}</span>
-              </div>
-            ) : bybitPnl ? (
-              <div className="flex items-center gap-2 text-xs">
-                <span className="text-zinc-500">P&L:</span>
-                <span className={cn('font-mono', bybitPnl.total_pnl >= 0 ? 'text-[#00c853]' : 'text-[#ff1744]')}>
-                  {formatPnL(bybitPnl.total_pnl)}
-                </span>
-              </div>
-            ) : (
-              <span className="text-xs text-zinc-500">No data</span>
-            )}
+            <div className="flex items-baseline gap-2 min-w-0 flex-wrap">
+              <span className="font-mono text-lg text-white truncate">{formatCurrency(bybitBalance)}</span>
+            </div>
           </div>
+          )}
 
           {/* Delta Card */}
+          {deltaConnected && deltaBalance > 0 && (
           <div className="flex-1 bg-zinc-900/50 border border-zinc-800 rounded-lg px-4 py-3">
             <div className="flex items-center gap-2 mb-1">
               <span
@@ -442,26 +529,17 @@ export function LiveStatusBar() {
               />
               <span className="text-sm font-semibold text-[#00d2ff]">DELTA</span>
             </div>
-            {deltaBalance > 0 ? (
-              <div className="flex items-baseline gap-2 min-w-0 flex-wrap">
-                <span className="font-mono text-lg text-white truncate">{formatCurrency(deltaBalance)}</span>
-                {deltaBalanceInr != null && (
-                  <span className="text-[10px] text-zinc-500 shrink-0">~{deltaBalanceInr.toLocaleString()}</span>
-                )}
-              </div>
-            ) : deltaPnl ? (
-              <div className="flex items-center gap-2 text-xs">
-                <span className="text-zinc-500">P&L:</span>
-                <span className={cn('font-mono', deltaPnl.total_pnl >= 0 ? 'text-[#00c853]' : 'text-[#ff1744]')}>
-                  {formatPnL(deltaPnl.total_pnl)}
-                </span>
-              </div>
-            ) : (
-              <span className="text-xs text-zinc-500">—</span>
-            )}
+            <div className="flex items-baseline gap-2 min-w-0 flex-wrap">
+              <span className="font-mono text-lg text-white truncate">{formatCurrency(deltaBalance)}</span>
+              {deltaBalanceInr != null && (
+                <span className="text-[10px] text-zinc-500 shrink-0">~{deltaBalanceInr.toLocaleString()}</span>
+              )}
+            </div>
           </div>
+          )}
 
           {/* Kraken Card */}
+          {krakenConnected && krakenBalance > 0 && (
           <div className="flex-1 bg-zinc-900/50 border border-zinc-800 rounded-lg px-4 py-3">
             <div className="flex items-center gap-2 mb-1">
               <span
@@ -472,21 +550,11 @@ export function LiveStatusBar() {
               />
               <span className="text-sm font-semibold text-[#7B61FF]">KRAKEN</span>
             </div>
-            {krakenBalance > 0 ? (
-              <div className="flex items-baseline gap-2 min-w-0 flex-wrap">
-                <span className="font-mono text-lg text-white truncate">{formatCurrency(krakenBalance)}</span>
-              </div>
-            ) : krakenPnl ? (
-              <div className="flex items-center gap-2 text-xs">
-                <span className="text-zinc-500">P&L:</span>
-                <span className={cn('font-mono', krakenPnl.total_pnl >= 0 ? 'text-[#00c853]' : 'text-[#ff1744]')}>
-                  {formatPnL(krakenPnl.total_pnl)}
-                </span>
-              </div>
-            ) : (
-              <span className="text-xs text-zinc-500">—</span>
-            )}
+            <div className="flex items-baseline gap-2 min-w-0 flex-wrap">
+              <span className="font-mono text-lg text-white truncate">{formatCurrency(krakenBalance)}</span>
+            </div>
           </div>
+          )}
 
           {/* P&L Summary Card */}
           <div className="flex-1 bg-zinc-900/50 border border-zinc-800 rounded-lg px-4 py-3">
@@ -505,6 +573,7 @@ export function LiveStatusBar() {
                   {range.toUpperCase()}
                 </button>
               ))}
+              <DepositsPopover deposits={deposits} inrRate={inrRate} />
             </div>
             {pnlStats.total > 0 ? (
               <>

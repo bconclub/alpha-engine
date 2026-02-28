@@ -28,6 +28,7 @@ import type {
   PairConfig,
   SetupConfig,
   SignalState,
+  Deposit,
 } from '@/lib/types';
 
 // ---------------------------------------------------------------------------
@@ -113,6 +114,8 @@ interface SupabaseContextValue {
   pairConfigs: PairConfig[];
   setupConfigs: SetupConfig[];
   signalStates: SignalState[];
+  // Deposits
+  deposits: Deposit[];
 }
 
 const SupabaseContext = createContext<SupabaseContextValue | null>(null);
@@ -138,6 +141,7 @@ const EMPTY_CONTEXT: SupabaseContextValue = {
   pairConfigs: [],
   setupConfigs: [],
   signalStates: [],
+  deposits: [],
 };
 
 function buildActivityEvent(
@@ -190,6 +194,7 @@ function SupabaseProviderInner({ children }: { children: ReactNode }) {
   const [pairConfigs, setPairConfigs] = useState<PairConfig[]>([]);
   const [setupConfigs, setSetupConfigs] = useState<SetupConfig[]>([]);
   const [signalStates, setSignalStates] = useState<SignalState[]>([]);
+  const [deposits, setDeposits] = useState<Deposit[]>([]);
 
   const activityRef = useRef<ActivityEvent[]>([]);
 
@@ -247,6 +252,11 @@ function SupabaseProviderInner({ children }: { children: ReactNode }) {
       const res = await client.from('signal_state').select('*');
       if (res.data) setSignalStates(res.data as SignalState[]);
     } catch (e) { console.warn('[Alpha] signal_state fetch failed', e); }
+
+    try {
+      const res = await client.from('deposits').select('*').order('created_at', { ascending: false }).limit(100);
+      if (res.data) setDeposits(res.data as Deposit[]);
+    } catch (e) { /* deposits table may not exist yet — silent */ }
   }, []);
 
   const buildInitialFeed = useCallback((trades: Trade[], activityRows: ActivityLogRow[]) => {
@@ -529,13 +539,14 @@ function SupabaseProviderInner({ children }: { children: ReactNode }) {
       pairConfigs,
       setupConfigs,
       signalStates,
+      deposits,
     }),
     [
       trades, recentTrades, botStatus, strategyLog, isConnected,
       exchangeFilter, filteredTrades,
       openPositions, pnlByExchange, futuresPositions, dailyPnL, strategyPerformance,
       activityFeed, optionsLog, optionsState, fetchViews,
-      pairConfigs, setupConfigs, signalStates,
+      pairConfigs, setupConfigs, signalStates, deposits,
     ],
   );
 
