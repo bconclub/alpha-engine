@@ -84,6 +84,11 @@ I am a quick momentum trader. I catch the move, protect the profit, and get out.
 - As profit grows, trail WIDENS (never tightens) — locks in more profit
 - Trail follows from BEST price (highest for long, lowest for short)
 - Once trailing is active, the trail IS the exit
+- **Momentum-aware widening:** When momentum is alive and pushing in my direction
+  (60s momentum > 0.05%) AND peak PnL > 0.20%, trail distance widens by 1.5×.
+  This lets winners breathe during strong moves instead of getting stopped out
+  by normal volatility. When momentum fades or flips, trail snaps back to base.
+  The market tells me when to hold tight and when to give room.
 
 **Signal Reversal Exit:**
 - In a LONG: RSI crosses above 70, or momentum flips negative

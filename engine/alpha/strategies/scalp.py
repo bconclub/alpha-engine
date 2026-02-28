@@ -269,6 +269,8 @@ class ScalpStrategy(BaseStrategy):
         (3.00, 0.40),   # peak +3.00% → trail 0.40% = exits ~+2.60% = monster
         (5.00, 0.60),   # peak +5.00% → trail 0.60% = exits ~+4.40% = moon
     ]
+    TRAIL_MOMENTUM_WIDEN = 1.5    # 50% wider trail when momentum aligned + peak > 0.20%
+    TRAIL_MOM_ALIVE_PCT = 0.05    # minimum |momentum| to consider "alive"
 
     # ── Legacy trailing defaults (futures=0, spot overrides in __init__) ─
     TRAILING_ACTIVATE_PCT = 0.0       # futures: no trailing (momentum riding instead)
@@ -555,6 +557,8 @@ class ScalpStrategy(BaseStrategy):
             self._sl_pct = self.PAIR_SL_FLOOR.get(base_asset, self.STOP_LOSS_PCT)
             self._tp_pct = self.PAIR_TP_FLOOR.get(base_asset, self.MIN_TP_PCT)
         self._last_atr_pct: float = 0.0  # last computed 1m ATR as % of price
+        self._last_momentum_60s: float = 0.0  # cached for trail widening
+        self._trail_widened: bool = False      # momentum-aware trail state
         self._atr_history: deque[float] = deque(maxlen=60)  # rolling ~1hr of ATR samples
         self._price_history: deque[tuple[float, float]] = deque(maxlen=120)  # (monotonic_time, price) for 10s/30s momentum
         self._last_entry_momentum: float = 0.0  # strongest momentum at last signal (GPFC B)
@@ -1003,6 +1007,7 @@ class ScalpStrategy(BaseStrategy):
             # 60-second momentum (last 1 full candle)
             price_1m_ago = float(close.iloc[-2]) if len(close) >= 2 else current_price
             momentum_60s = ((current_price - price_1m_ago) / price_1m_ago * 100) if price_1m_ago > 0 else 0
+            self._last_momentum_60s = momentum_60s  # store for trail widening
 
             # 30-second momentum from real-time price history deque (GPFC A)
             momentum_30s = 0.0
@@ -2481,6 +2486,36 @@ class ScalpStrategy(BaseStrategy):
                     )
                     self._trail_skip_logged = True
             return  # peak hasn't reached first tier yet
+
+        # ── Momentum-aware trail widening ──
+        # When momentum is alive and aligned with position direction,
+        # widen the trail to let winners run instead of getting stopped
+        # out by normal volatility during a strong move.
+        base_dist = new_dist
+        mom = self._last_momentum_60s
+        momentum_aligned = (
+            (side == "long" and mom > self.TRAIL_MOM_ALIVE_PCT)
+            or (side == "short" and mom < -self.TRAIL_MOM_ALIVE_PCT)
+        )
+
+        if momentum_aligned and peak_pnl > 0.20:
+            new_dist = round(base_dist * self.TRAIL_MOMENTUM_WIDEN, 4)
+            if not self._trail_widened:
+                self._trail_widened = True
+                self.logger.info(
+                    "[%s] TRAIL WIDEN — momentum %.3f%% aligned with %s, "
+                    "peak +%.2f%% > 0.20%%, trail %.2f%% → %.2f%% (×%.1f)",
+                    self.pair, mom, side, peak_pnl,
+                    base_dist, new_dist, self.TRAIL_MOMENTUM_WIDEN,
+                )
+        elif self._trail_widened:
+            # Momentum faded or flipped — revert to base trail distance
+            self._trail_widened = False
+            self.logger.info(
+                "[%s] TRAIL TIGHTEN — momentum %.3f%% faded/flipped, "
+                "trail %.2f%% → %.2f%% (base)",
+                self.pair, mom, base_dist * self.TRAIL_MOMENTUM_WIDEN, base_dist,
+            )
 
         # Compute trail stop from peak PRICE (not entry)
         if side == "long":
@@ -4075,6 +4110,7 @@ class ScalpStrategy(BaseStrategy):
         self._trail_stop_price = 0.0              # reset trailing stop price
         self._trail_distance_pct = 0.0             # reset trail distance tier
         self._trail_skip_logged = False            # reset TRAIL_SKIP_LOW_PEAK log flag
+        self._trail_widened = False                # reset momentum-aware trail widen flag
         self._peak_unrealized_pnl = 0.0  # reset peak P&L tracker for decay exit
         self._profit_floor_pct = -999.0  # reset ratcheting profit floor
         self._in_position_tick = 0  # reset tick counter for OHLCV refresh cadence
