@@ -326,6 +326,7 @@ class ScalpStrategy(BaseStrategy):
     DECEL_MOM_FLOOR_PCT = 0.05        # minimum 10s momentum in entry direction (absolute floor)
 
     # ── SIDEWAYS / LOW-VOL RANGE GATE ────────────────────────────
+    SIDEWAYS_MOM_GATE = 0.25           # minimum |momentum| during SIDEWAYS regime
     ATR_CONTRACTION_RATIO = 0.50       # current ATR < 50% of avg = contracted range
     RANGE_MOM_GATE = 0.30              # raised momentum gate during low-vol range (vs 0.20%)
 
@@ -1363,12 +1364,15 @@ class ScalpStrategy(BaseStrategy):
                     }
                     return signals
 
-            # ── SIDEWAYS REGIME GATE: raise bar to 4/4 during consolidation ──
-            if self._market_regime == "SIDEWAYS" and signal_strength < 4:
-                self._skip_reason = f"SIDEWAYS_GATE (need 4/4, got {signal_strength}/4)"
+            # ── SIDEWAYS REGIME GATE: require 4/4 + minimum momentum ──
+            if self._market_regime == "SIDEWAYS" and (signal_strength < 4 or abs(momentum_60s) < self.SIDEWAYS_MOM_GATE):
+                self._skip_reason = (
+                    f"SIDEWAYS_GATE (need 4/4+{self.SIDEWAYS_MOM_GATE}% mom, "
+                    f"got {signal_strength}/4 mom={abs(momentum_60s):.3f}%)"
+                )
                 self.logger.info(
-                    "[%s] SIDEWAYS_GATE — regime=SIDEWAYS, need 4/4 got %d/4, skipping %s",
-                    self.pair, signal_strength, side,
+                    "[%s] SIDEWAYS_GATE — need 4/4 + %.2f%% mom, got %d/4 + %.3f%%, skipping %s",
+                    self.pair, self.SIDEWAYS_MOM_GATE, signal_strength, abs(momentum_60s), side,
                 )
                 self.last_signal_state = {
                     "side": side, "reason": reason,
@@ -3137,10 +3141,10 @@ class ScalpStrategy(BaseStrategy):
 
         # ── SIDEWAYS regime gate (from cached candle data) ──
         _accel_regime = cached.get("market_regime", "SIDEWAYS") if cached and cache_age < 10 else "SIDEWAYS"
-        if _accel_regime == "SIDEWAYS" and support_count < 4:
+        if _accel_regime == "SIDEWAYS" and (support_count < 4 or abs(velocity_current) < 0.06):
             self.logger.info(
-                "[%s] ACCEL SIDEWAYS_GATE — need 4/4 support, got %d/4",
-                self.pair, support_count,
+                "[%s] ACCEL SIDEWAYS_GATE — need 4/4 + vel>=0.06%%, got %d/4 + vel=%.3f%%",
+                self.pair, support_count, abs(velocity_current),
             )
             return
 
