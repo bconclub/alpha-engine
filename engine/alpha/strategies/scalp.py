@@ -325,6 +325,10 @@ class ScalpStrategy(BaseStrategy):
     DECEL_PRIOR_WINDOW_S = 10         # prior 10s window (10-20s ago)
     DECEL_MOM_FLOOR_PCT = 0.05        # minimum 10s momentum in entry direction (absolute floor)
 
+    # ── SIDEWAYS / LOW-VOL RANGE GATE ────────────────────────────
+    ATR_CONTRACTION_RATIO = 0.50       # current ATR < 50% of avg = contracted range
+    RANGE_MOM_GATE = 0.30              # raised momentum gate during low-vol range (vs 0.20%)
+
     # ── 15-MINUTE TREND GATE ─────────────────────────────────────
     TREND_GATE_ENABLED = True          # block counter-trend entries based on 15m trend
 
@@ -1040,6 +1044,7 @@ class ScalpStrategy(BaseStrategy):
             # ── Cache signals for Layer 1 acceleration entry ─────────
             bb_range_cache = bb_upper - bb_lower if bb_upper > bb_lower else 1e-9
             bb_pos_cache = (current_price - bb_lower) / bb_range_cache
+            _avg_atr = sum(self._atr_history) / len(self._atr_history) if self._atr_history else self._last_atr_pct
             ScalpStrategy._cached_signals[self._base_asset] = {
                 "rsi": rsi_now,
                 "bb_position": bb_pos_cache,
@@ -1048,6 +1053,9 @@ class ScalpStrategy(BaseStrategy):
                 "volume_ratio": vol_ratio,
                 "price_5m_pct": self._price_5m_pct,
                 "trend_15m": trend_15m,
+                "market_regime": self._market_regime,
+                "atr_pct": self._last_atr_pct,
+                "atr_avg": _avg_atr,
                 "timestamp": time.monotonic(),
             }
 
@@ -1344,6 +1352,52 @@ class ScalpStrategy(BaseStrategy):
                     self.logger.info(
                         "[%s] TREND_GATE — SHORT blocked, 15m=bullish. Wait for reversal.",
                         self.pair,
+                    )
+                    self.last_signal_state = {
+                        "side": side, "reason": reason,
+                        "strength": signal_strength, "trend_15m": trend_15m,
+                        "rsi": rsi_now, "momentum_60s": momentum_60s, "momentum_30s": momentum_30s,
+                        "current_price": current_price, "timestamp": time.monotonic(),
+                        "skip_reason": self._skip_reason,
+                        **self._last_signal_breakdown,
+                    }
+                    return signals
+
+            # ── SIDEWAYS REGIME GATE: raise bar to 4/4 during consolidation ──
+            if self._market_regime == "SIDEWAYS" and signal_strength < 4:
+                self._skip_reason = f"SIDEWAYS_GATE (need 4/4, got {signal_strength}/4)"
+                self.logger.info(
+                    "[%s] SIDEWAYS_GATE — regime=SIDEWAYS, need 4/4 got %d/4, skipping %s",
+                    self.pair, signal_strength, side,
+                )
+                self.last_signal_state = {
+                    "side": side, "reason": reason,
+                    "strength": signal_strength, "trend_15m": trend_15m,
+                    "rsi": rsi_now, "momentum_60s": momentum_60s, "momentum_30s": momentum_30s,
+                    "current_price": current_price, "timestamp": time.monotonic(),
+                    "skip_reason": self._skip_reason,
+                    **self._last_signal_breakdown,
+                }
+                return signals
+
+            # ── LOW-VOL RANGE GATE: ATR contracted = consolidation ────────
+            _avg_atr = sum(self._atr_history) / len(self._atr_history) if self._atr_history else self._last_atr_pct
+            if (
+                _avg_atr > 0
+                and self._last_atr_pct < _avg_atr * self.ATR_CONTRACTION_RATIO
+                and len(self._atr_history) >= 5
+            ):
+                _abs_mom = abs(momentum_60s)
+                if signal_strength < 4 or _abs_mom < self.RANGE_MOM_GATE:
+                    self._skip_reason = (
+                        f"LOW_VOL_RANGE (ATR={self._last_atr_pct:.3f}% avg={_avg_atr:.3f}%, "
+                        f"need 4/4+{self.RANGE_MOM_GATE}% mom, got {signal_strength}/4 mom={_abs_mom:.3f}%)"
+                    )
+                    self.logger.info(
+                        "[%s] LOW_VOL_RANGE — ATR=%.3f%% < %.0f%% of avg=%.3f%%, "
+                        "need 4/4 + %.2f%% mom, got %d/4 + %.3f%% — skipping %s",
+                        self.pair, self._last_atr_pct, self.ATR_CONTRACTION_RATIO * 100,
+                        _avg_atr, self.RANGE_MOM_GATE, signal_strength, _abs_mom, side,
                     )
                     self.last_signal_state = {
                         "side": side, "reason": reason,
@@ -3078,6 +3132,29 @@ class ScalpStrategy(BaseStrategy):
                 self.logger.info(
                     "[%s] ACCEL 5M_COUNTER_SOFT — %s needs 4/4 support, got %d/4 (5m=%+.2f%%)",
                     self.pair, direction, support_count, _accel_5m,
+                )
+                return
+
+        # ── SIDEWAYS regime gate (from cached candle data) ──
+        _accel_regime = cached.get("market_regime", "SIDEWAYS") if cached and cache_age < 10 else "SIDEWAYS"
+        if _accel_regime == "SIDEWAYS" and support_count < 4:
+            self.logger.info(
+                "[%s] ACCEL SIDEWAYS_GATE — need 4/4 support, got %d/4",
+                self.pair, support_count,
+            )
+            return
+
+        # ── LOW-VOL range gate (from cached ATR data) ──
+        _accel_atr = cached.get("atr_pct", 0.0) if cached and cache_age < 10 else 0.0
+        _accel_atr_avg = cached.get("atr_avg", 0.0) if cached and cache_age < 10 else 0.0
+        if _accel_atr_avg > 0 and _accel_atr < _accel_atr_avg * self.ATR_CONTRACTION_RATIO:
+            _accel_abs_vel = abs(velocity_current)
+            if support_count < 4 or _accel_abs_vel < self.RANGE_MOM_GATE:
+                self.logger.info(
+                    "[%s] ACCEL LOW_VOL_RANGE — ATR=%.3f%% < %.0f%% of avg=%.3f%%, "
+                    "need 4/4 + vel>=%.2f%%, got %d/4 + vel=%.3f%% — skipping",
+                    self.pair, _accel_atr, self.ATR_CONTRACTION_RATIO * 100,
+                    _accel_atr_avg, self.RANGE_MOM_GATE, support_count, _accel_abs_vel,
                 )
                 return
 
