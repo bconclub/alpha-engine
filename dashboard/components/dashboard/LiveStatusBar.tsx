@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState, useMemo, useRef } from 'react';
+import { useEffect, useState, useMemo } from 'react';
 import { useSupabase } from '@/components/providers/SupabaseProvider';
 import { formatCurrency, formatPnL, cn } from '@/lib/utils';
 import type { Deposit } from '@/lib/types';
@@ -81,128 +81,7 @@ function MiniSparkline({ data, color }: { data: number[]; color: string }) {
   );
 }
 
-type DepositRange = '24h' | '7d' | '30d' | 'all';
-
-function DepositsPopover({ deposits, inrRate }: { deposits: Deposit[]; inrRate: number }) {
-  const [open, setOpen] = useState(false);
-  const [range, setRange] = useState<DepositRange>('7d');
-  const ref = useRef<HTMLDivElement>(null);
-
-  // Close on outside click
-  useEffect(() => {
-    if (!open) return;
-    const handler = (e: MouseEvent) => {
-      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
-    };
-    document.addEventListener('mousedown', handler);
-    return () => document.removeEventListener('mousedown', handler);
-  }, [open]);
-
-  const filtered = useMemo(() => {
-    if (range === 'all') return deposits;
-    const now = Date.now();
-    const ms: Record<string, number> = { '24h': 86400000, '7d': 604800000, '30d': 2592000000 };
-    const cutoff = now - (ms[range] ?? 0);
-    return deposits.filter((d) => new Date(d.created_at).getTime() >= cutoff);
-  }, [deposits, range]);
-
-  const total = filtered.reduce((s, d) => s + d.amount, 0);
-
-  // Mini bar chart data: group by date
-  const chartData = useMemo(() => {
-    const byDate = new Map<string, number>();
-    for (const d of filtered) {
-      const date = new Date(d.created_at).toISOString().slice(0, 10);
-      byDate.set(date, (byDate.get(date) ?? 0) + d.amount);
-    }
-    return Array.from(byDate.entries())
-      .sort((a, b) => a[0].localeCompare(b[0]))
-      .map(([date, amount]) => ({ date, amount }));
-  }, [filtered]);
-
-  const maxAmount = Math.max(...chartData.map((d) => d.amount), 1);
-
-  return (
-    <div ref={ref} className="relative inline-block">
-      <button
-        onClick={() => setOpen(!open)}
-        className={cn(
-          'px-2 py-0.5 rounded text-[9px] font-medium transition-colors border',
-          open
-            ? 'bg-zinc-700 text-white border-zinc-600'
-            : 'text-zinc-500 hover:text-zinc-300 border-zinc-700 hover:border-zinc-600',
-        )}
-      >
-        Deposits
-      </button>
-      {open && (
-        <div className="absolute top-full mt-1.5 right-0 z-50 w-72 bg-[#0d1117] border border-zinc-700 rounded-lg shadow-xl p-3 space-y-2.5">
-          {/* Range tabs */}
-          <div className="flex gap-1">
-            {(['24h', '7d', '30d', 'all'] as DepositRange[]).map((r) => (
-              <button
-                key={r}
-                onClick={() => setRange(r)}
-                className={cn(
-                  'px-1.5 py-0.5 rounded text-[9px] font-medium transition-colors',
-                  range === r ? 'bg-zinc-700 text-white' : 'text-zinc-500 hover:text-zinc-300',
-                )}
-              >
-                {r === 'all' ? 'ALL' : r.toUpperCase()}
-              </button>
-            ))}
-          </div>
-
-          {/* Total */}
-          <div className="flex items-baseline gap-2">
-            <span className="font-mono text-sm font-bold text-[#2196f3]">
-              {formatCurrency(total)}
-            </span>
-            {inrRate > 0 && (
-              <span className="text-[9px] text-zinc-500 font-mono">
-                {'\u20B9'}{Math.round(total * inrRate).toLocaleString('en-IN')}
-              </span>
-            )}
-            <span className="text-[9px] text-zinc-500">{filtered.length} deposit{filtered.length !== 1 ? 's' : ''}</span>
-          </div>
-
-          {/* Mini bar chart */}
-          {chartData.length > 0 && (
-            <div className="flex items-end gap-0.5 h-10">
-              {chartData.map((d) => (
-                <div
-                  key={d.date}
-                  className="flex-1 bg-[#2196f3]/40 rounded-t-sm hover:bg-[#2196f3]/70 transition-colors"
-                  style={{ height: `${Math.max(8, (d.amount / maxAmount) * 100)}%` }}
-                  title={`${d.date}: ${formatCurrency(d.amount)}`}
-                />
-              ))}
-            </div>
-          )}
-
-          {/* Deposit list */}
-          <div className="max-h-36 overflow-y-auto space-y-1">
-            {filtered.length === 0 ? (
-              <p className="text-[10px] text-zinc-500 text-center py-2">No deposits</p>
-            ) : (
-              filtered.map((d) => (
-                <div key={d.id} className="flex items-center justify-between text-[10px]">
-                  <div className="flex items-center gap-1.5">
-                    <span className="text-zinc-500 font-mono">
-                      {new Date(d.created_at).toLocaleDateString('en-GB', { day: '2-digit', month: 'short' })}
-                    </span>
-                    <span className="text-zinc-400 capitalize">{d.exchange}</span>
-                  </div>
-                  <span className="font-mono text-[#2196f3]">{formatCurrency(d.amount)}</span>
-                </div>
-              ))
-            )}
-          </div>
-        </div>
-      )}
-    </div>
-  );
-}
+type CardView = 'pnl' | 'deposits';
 
 export function LiveStatusBar() {
   const { botStatus, isConnected, pnlByExchange, trades, dailyPnL, deposits } = useSupabase();
@@ -254,6 +133,29 @@ export function LiveStatusBar() {
   const uptimeSeconds = botStatus?.uptime_seconds ?? 0;
 
   const [pnlRange, setPnlRange] = useState<'24h' | '7d' | '14d' | '30d'>('24h');
+  const [cardView, setCardView] = useState<CardView>('pnl');
+
+  // Deposit stats filtered by same pnlRange
+  const depositStats = useMemo(() => {
+    const now = Date.now();
+    const istOffsetMs = 5.5 * 60 * 60 * 1000;
+    let cutoffMs: number;
+    if (pnlRange === '24h') {
+      const istNow = new Date(now + istOffsetMs);
+      const todayIST = istNow.toISOString().slice(0, 10);
+      cutoffMs = new Date(todayIST + 'T00:00:00+05:30').getTime();
+    } else {
+      const days = pnlRange === '7d' ? 7 : pnlRange === '14d' ? 14 : 30;
+      cutoffMs = now - days * 24 * 60 * 60 * 1000;
+    }
+    const filtered = deposits.filter((d) => new Date(d.created_at).getTime() >= cutoffMs);
+    const total = filtered.reduce((s, d) => s + d.amount, 0);
+    const totalInr = filtered.reduce((s, d) => s + (d.amount_inr ?? d.amount * inrRate), 0);
+    // All-time totals
+    const allTotal = deposits.reduce((s, d) => s + d.amount, 0);
+    const allInr = deposits.reduce((s, d) => s + (d.amount_inr ?? d.amount * inrRate), 0);
+    return { filtered, total, totalInr, count: filtered.length, allTotal, allInr, allCount: deposits.length };
+  }, [deposits, pnlRange, inrRate]);
 
   const pnlStats = useMemo(() => {
     const now = Date.now();
@@ -386,7 +288,7 @@ export function LiveStatusBar() {
           </div>
         </div>
 
-        {/* Row 2 — PnL with time range + micro sparkline */}
+        {/* Row 2 — PnL / Deposits toggled card */}
         <div className="bg-zinc-900/50 border border-zinc-800 rounded-lg px-3 py-2">
           <div className="flex items-center justify-between mb-1.5">
             <div className="flex items-center gap-1">
@@ -404,43 +306,86 @@ export function LiveStatusBar() {
                   {range.toUpperCase()}
                 </button>
               ))}
-              <DepositsPopover deposits={deposits} inrRate={inrRate} />
+            </div>
+            <div className="flex items-center gap-0.5">
+              <button
+                onClick={() => setCardView('pnl')}
+                className={cn(
+                  'px-1.5 py-0.5 rounded text-[9px] font-medium transition-colors',
+                  cardView === 'pnl' ? 'bg-zinc-700 text-white' : 'text-zinc-500 hover:text-zinc-300',
+                )}
+              >
+                P&L
+              </button>
+              <button
+                onClick={() => setCardView('deposits')}
+                className={cn(
+                  'px-1.5 py-0.5 rounded text-[9px] font-medium transition-colors',
+                  cardView === 'deposits' ? 'bg-[#2196f3]/20 text-[#2196f3]' : 'text-zinc-500 hover:text-zinc-300',
+                )}
+              >
+                Deposits
+              </button>
             </div>
           </div>
-          <div className="flex items-center justify-between gap-2">
-            <div className="min-w-0">
-              {pnlStats.total > 0 ? (
-                <>
-                  <div className="flex items-baseline gap-1.5">
-                    <span className={cn(
-                      'font-mono text-base font-bold',
-                      pnlStats.pnl >= 0 ? 'text-[#00c853]' : 'text-[#ff1744]',
-                    )}>
-                      {pnlStats.pnl >= 0 ? '+' : ''}{formatCurrency(pnlStats.pnl)}
-                    </span>
-                    <span className="text-[9px] text-zinc-500 font-mono">
-                      {pnlStats.pnl >= 0 ? '+' : '-'}{'\u20B9'}{Math.abs(Math.round(pnlStats.pnl * inrRate)).toLocaleString('en-IN')}
-                    </span>
-                  </div>
-                  <div className="text-[9px] text-zinc-500 font-mono mt-0.5">
-                    {pnlStats.wins}W / {pnlStats.losses}L · {pnlStats.winRate.toFixed(0)}% WR · {pnlStats.total} trades
-                  </div>
-                  {pnlStats.fees > 0 && (
-                    <div className="text-[9px] font-mono mt-0.5">
-                      <span className={pnlStats.grossPnl >= 0 ? 'text-[#00c853]/60' : 'text-[#ff1744]/60'}>
-                        {pnlStats.grossPnl >= 0 ? '+' : ''}{formatCurrency(pnlStats.grossPnl)} P&L
+
+          {cardView === 'pnl' ? (
+            <div className="flex items-center justify-between gap-2">
+              <div className="min-w-0">
+                {pnlStats.total > 0 ? (
+                  <>
+                    <div className="flex items-baseline gap-1.5">
+                      <span className={cn(
+                        'font-mono text-base font-bold',
+                        pnlStats.pnl >= 0 ? 'text-[#00c853]' : 'text-[#ff1744]',
+                      )}>
+                        {pnlStats.pnl >= 0 ? '+' : ''}{formatCurrency(pnlStats.pnl)}
                       </span>
-                      <span className="text-zinc-600"> · </span>
-                      <span className="text-zinc-500">${pnlStats.fees.toFixed(2)} fees</span>
+                      <span className="text-[9px] text-zinc-500 font-mono">
+                        {pnlStats.pnl >= 0 ? '+' : '-'}{'\u20B9'}{Math.abs(Math.round(pnlStats.pnl * inrRate)).toLocaleString('en-IN')}
+                      </span>
                     </div>
-                  )}
-                </>
-              ) : (
-                <span className="text-xs text-zinc-500">No trades</span>
-              )}
+                    <div className="text-[9px] text-zinc-500 font-mono mt-0.5">
+                      {pnlStats.wins}W / {pnlStats.losses}L · {pnlStats.winRate.toFixed(0)}% WR · {pnlStats.total} trades
+                    </div>
+                    {pnlStats.fees > 0 && (
+                      <div className="text-[9px] font-mono mt-0.5">
+                        <span className={pnlStats.grossPnl >= 0 ? 'text-[#00c853]/60' : 'text-[#ff1744]/60'}>
+                          {pnlStats.grossPnl >= 0 ? '+' : ''}{formatCurrency(pnlStats.grossPnl)} P&L
+                        </span>
+                        <span className="text-zinc-600"> · </span>
+                        <span className="text-zinc-500">${pnlStats.fees.toFixed(2)} fees</span>
+                      </div>
+                    )}
+                  </>
+                ) : (
+                  <span className="text-xs text-zinc-500">No trades</span>
+                )}
+              </div>
+              <MiniSparkline data={sparklineData} color={sparkColor} />
             </div>
-            <MiniSparkline data={sparklineData} color={sparkColor} />
-          </div>
+          ) : (
+            <div className="min-w-0">
+              <div className="flex items-baseline gap-1.5">
+                <span className="font-mono text-base font-bold text-[#2196f3]">
+                  {formatCurrency(depositStats.total)}
+                </span>
+                <span className="text-[9px] text-zinc-500 font-mono">
+                  {'\u20B9'}{Math.round(depositStats.totalInr).toLocaleString('en-IN')}
+                </span>
+              </div>
+              <div className="text-[9px] text-zinc-500 font-mono mt-0.5">
+                {depositStats.count} deposit{depositStats.count !== 1 ? 's' : ''} in period
+              </div>
+              <div className="text-[9px] font-mono mt-0.5">
+                <span className="text-[#2196f3]/60">
+                  {formatCurrency(depositStats.allTotal)} total
+                </span>
+                <span className="text-zinc-600"> · </span>
+                <span className="text-zinc-500">{depositStats.allCount} all-time</span>
+              </div>
+            </div>
+          )}
         </div>
 
         {/* Row 3 — Market Regime */}
@@ -556,53 +501,98 @@ export function LiveStatusBar() {
           </div>
           )}
 
-          {/* P&L Summary Card */}
+          {/* P&L / Deposits toggled card */}
           <div className="flex-1 bg-zinc-900/50 border border-zinc-800 rounded-lg px-4 py-3">
-            <div className="flex items-center gap-1.5 mb-1">
-              {(['24h', '7d', '14d', '30d'] as const).map((range) => (
+            <div className="flex items-center justify-between mb-1">
+              <div className="flex items-center gap-1.5">
+                {(['24h', '7d', '14d', '30d'] as const).map((range) => (
+                  <button
+                    key={range}
+                    onClick={() => setPnlRange(range)}
+                    className={cn(
+                      'px-1.5 py-0.5 rounded text-[10px] font-medium transition-colors',
+                      pnlRange === range
+                        ? 'bg-zinc-700 text-white'
+                        : 'text-zinc-500 hover:text-zinc-300',
+                    )}
+                  >
+                    {range.toUpperCase()}
+                  </button>
+                ))}
+              </div>
+              <div className="flex items-center gap-0.5">
                 <button
-                  key={range}
-                  onClick={() => setPnlRange(range)}
+                  onClick={() => setCardView('pnl')}
                   className={cn(
                     'px-1.5 py-0.5 rounded text-[10px] font-medium transition-colors',
-                    pnlRange === range
-                      ? 'bg-zinc-700 text-white'
-                      : 'text-zinc-500 hover:text-zinc-300',
+                    cardView === 'pnl' ? 'bg-zinc-700 text-white' : 'text-zinc-500 hover:text-zinc-300',
                   )}
                 >
-                  {range.toUpperCase()}
+                  P&L
                 </button>
-              ))}
-              <DepositsPopover deposits={deposits} inrRate={inrRate} />
+                <button
+                  onClick={() => setCardView('deposits')}
+                  className={cn(
+                    'px-1.5 py-0.5 rounded text-[10px] font-medium transition-colors',
+                    cardView === 'deposits' ? 'bg-[#2196f3]/20 text-[#2196f3]' : 'text-zinc-500 hover:text-zinc-300',
+                  )}
+                >
+                  Deposits
+                </button>
+              </div>
             </div>
-            {pnlStats.total > 0 ? (
+
+            {cardView === 'pnl' ? (
+              pnlStats.total > 0 ? (
+                <>
+                  <div className="flex items-baseline gap-2">
+                    <span className={cn(
+                      'font-mono text-lg font-bold',
+                      pnlStats.pnl >= 0 ? 'text-[#00c853]' : 'text-[#ff1744]',
+                    )}>
+                      {pnlStats.pnl >= 0 ? '+' : ''}{formatCurrency(pnlStats.pnl)}
+                    </span>
+                    <span className="text-[10px] text-zinc-500 font-mono">
+                      {pnlStats.pnl >= 0 ? '+' : '-'}{'\u20B9'}{Math.abs(Math.round(pnlStats.pnl * inrRate)).toLocaleString('en-IN')}
+                    </span>
+                  </div>
+                  <div className="text-[10px] text-zinc-500 font-mono">
+                    {pnlStats.wins}W / {pnlStats.losses}L · {pnlStats.winRate.toFixed(0)}% WR · {pnlStats.total} trades
+                  </div>
+                  {pnlStats.fees > 0 && (
+                    <div className="text-[10px] font-mono">
+                      <span className={pnlStats.grossPnl >= 0 ? 'text-[#00c853]/60' : 'text-[#ff1744]/60'}>
+                        {pnlStats.grossPnl >= 0 ? '+' : ''}{formatCurrency(pnlStats.grossPnl)} P&L
+                      </span>
+                      <span className="text-zinc-600"> · </span>
+                      <span className="text-zinc-500">${pnlStats.fees.toFixed(2)} fees</span>
+                    </div>
+                  )}
+                </>
+              ) : (
+                <span className="text-xs text-zinc-500">No trades</span>
+              )
+            ) : (
               <>
                 <div className="flex items-baseline gap-2">
-                  <span className={cn(
-                    'font-mono text-lg font-bold',
-                    pnlStats.pnl >= 0 ? 'text-[#00c853]' : 'text-[#ff1744]',
-                  )}>
-                    {pnlStats.pnl >= 0 ? '+' : ''}{formatCurrency(pnlStats.pnl)}
+                  <span className="font-mono text-lg font-bold text-[#2196f3]">
+                    {formatCurrency(depositStats.total)}
                   </span>
                   <span className="text-[10px] text-zinc-500 font-mono">
-                    {pnlStats.pnl >= 0 ? '+' : '-'}{'\u20B9'}{Math.abs(Math.round(pnlStats.pnl * inrRate)).toLocaleString('en-IN')}
+                    {'\u20B9'}{Math.round(depositStats.totalInr).toLocaleString('en-IN')}
                   </span>
                 </div>
                 <div className="text-[10px] text-zinc-500 font-mono">
-                  {pnlStats.wins}W / {pnlStats.losses}L · {pnlStats.winRate.toFixed(0)}% WR · {pnlStats.total} trades
+                  {depositStats.count} deposit{depositStats.count !== 1 ? 's' : ''} in period
                 </div>
-                {pnlStats.fees > 0 && (
-                  <div className="text-[10px] font-mono">
-                    <span className={pnlStats.grossPnl >= 0 ? 'text-[#00c853]/60' : 'text-[#ff1744]/60'}>
-                      {pnlStats.grossPnl >= 0 ? '+' : ''}{formatCurrency(pnlStats.grossPnl)} P&L
-                    </span>
-                    <span className="text-zinc-600"> · </span>
-                    <span className="text-zinc-500">${pnlStats.fees.toFixed(2)} fees</span>
-                  </div>
-                )}
+                <div className="text-[10px] font-mono">
+                  <span className="text-[#2196f3]/60">
+                    {formatCurrency(depositStats.allTotal)} total
+                  </span>
+                  <span className="text-zinc-600"> · </span>
+                  <span className="text-zinc-500">{depositStats.allCount} all-time</span>
+                </div>
               </>
-            ) : (
-              <span className="text-xs text-zinc-500">No trades</span>
             )}
           </div>
 
