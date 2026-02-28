@@ -326,7 +326,7 @@ class ScalpStrategy(BaseStrategy):
     DECEL_MOM_FLOOR_PCT = 0.05        # minimum 10s momentum in entry direction (absolute floor)
 
     # ── SIDEWAYS / LOW-VOL RANGE GATE ────────────────────────────
-    SIDEWAYS_MOM_GATE = 0.25           # minimum |momentum| during SIDEWAYS regime
+    SIDEWAYS_MOM_GATE = 0.20           # minimum |momentum| during SIDEWAYS regime
     ATR_CONTRACTION_RATIO = 0.50       # current ATR < 50% of avg = contracted range
     RANGE_MOM_GATE = 0.30              # raised momentum gate during low-vol range (vs 0.20%)
 
