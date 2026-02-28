@@ -222,7 +222,9 @@ export function LiveStatusBar() {
   useEffect(() => {
     const check = () => {
       if (!lastHeartbeat) { setIsStale(true); return; }
-      setIsStale(Date.now() - new Date(lastHeartbeat).getTime() > 420_000);
+      // Supabase returns "2026-02-28 11:46:27+00" — normalize to valid ISO-8601
+      const normalized = String(lastHeartbeat).replace(' ', 'T').replace(/\+00$/, '+00:00');
+      setIsStale(Date.now() - new Date(normalized).getTime() > 420_000);
     };
     check();
     const id = setInterval(check, 30_000);
@@ -232,7 +234,8 @@ export function LiveStatusBar() {
   // Human-readable "last updated" label
   const staleLabel = useMemo(() => {
     if (!lastHeartbeat) return 'No data';
-    const ago = Math.max(0, Math.floor((Date.now() - new Date(lastHeartbeat).getTime()) / 1000));
+    const normalized = String(lastHeartbeat).replace(' ', 'T').replace(/\+00$/, '+00:00');
+    const ago = Math.max(0, Math.floor((Date.now() - new Date(normalized).getTime()) / 1000));
     if (ago < 60) return `${ago}s ago`;
     if (ago < 3600) return `${Math.floor(ago / 60)}m ago`;
     return `${Math.floor(ago / 3600)}h ${Math.floor((ago % 3600) / 60)}m ago`;
