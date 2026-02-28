@@ -254,8 +254,10 @@ class Database:
         "total_trades", "open_positions", "active_strategy", "market_condition",
         "capital", "pair", "is_running", "is_paused", "pause_reason",
         "binance_balance", "delta_balance", "delta_balance_inr",
-        "binance_connected", "delta_connected", "bot_state",
-        "shorting_enabled", "leverage",
+        "bybit_balance", "kraken_balance",
+        "binance_connected", "delta_connected",
+        "bybit_connected", "kraken_connected",
+        "bot_state", "shorting_enabled", "leverage",
     })
 
     async def save_bot_status(self, status: dict[str, Any]) -> None:
