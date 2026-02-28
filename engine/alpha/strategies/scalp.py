@@ -841,12 +841,12 @@ class ScalpStrategy(BaseStrategy):
             if chop_score > 0.60 and atr_ratio > 1.3:
                 # High reversals + high vol = death zone
                 new_regime = "CHOPPY"
-            elif abs(net_change) > 0.30 and direction_ratio > 0.60:
+            elif abs(net_change) > 0.15 and direction_ratio > 0.55:
                 new_regime = "TRENDING_UP" if net_change > 0 else "TRENDING_DOWN"
-            elif abs(net_change) < 0.10 and chop_score < 0.40:
+            elif abs(net_change) < 0.08 and chop_score < 0.40:
                 new_regime = "SIDEWAYS"
             else:
-                new_regime = "SIDEWAYS"  # default safe
+                new_regime = self._market_regime  # keep current — don't snap to SIDEWAYS on ambiguity
 
             # ── CHOPPY exit hysteresis: need 3 consecutive clean checks ──
             if old_regime == "CHOPPY" and new_regime != "CHOPPY":
