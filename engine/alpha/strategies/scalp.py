@@ -1516,6 +1516,25 @@ class ScalpStrategy(BaseStrategy):
                 self._last_momentum_10s = mom_recent
                 self._last_momentum_prior_10s = mom_prior
 
+            # Sparse tick guard: prior_10s == 0.000% means no price change in 10-20s window.
+            # On Delta (~12 ticks/min), this is common. Without prior data we can't
+            # verify acceleration — treat as unreliable and skip.
+            if accel_check_valid and mom_prior == 0.0 and mom_recent != 0.0:
+                self._skip_reason = f"SPARSE_TICK_SKIP (10s={mom_recent:+.3f}% prior_10s=0.000%)"
+                self.logger.info(
+                    "[%s] SPARSE_TICK — 10s=%+.3f%% but prior_10s=0.000%% — cannot verify acceleration, skipping %s",
+                    self.pair, mom_recent, side,
+                )
+                self.last_signal_state = {
+                    "side": side, "reason": reason,
+                    "strength": signal_strength, "trend_15m": trend_15m,
+                    "rsi": rsi_now, "momentum_60s": momentum_60s, "momentum_30s": momentum_30s,
+                    "current_price": current_price, "timestamp": time.monotonic(),
+                    "skip_reason": self._skip_reason,
+                    **self._last_signal_breakdown,
+                }
+                return signals
+
             # Floor check: need SOME momentum in entry direction (absolute minimum)
             floor_fail = False
             if side == "long" and mom_recent < self.DECEL_MOM_FLOOR_PCT:
