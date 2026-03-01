@@ -332,8 +332,10 @@ class ScalpStrategy(BaseStrategy):
     ATR_CONTRACTION_RATIO = 0.50       # current ATR < 50% of avg = contracted range
     RANGE_MOM_GATE = 0.30              # raised momentum gate during low-vol range (vs 0.20%)
 
-    # ── 15-MINUTE TREND GATE ─────────────────────────────────────
-    TREND_GATE_ENABLED = True          # block counter-trend entries based on 15m trend
+    # ── DYNAMIC RANGE GATE (replaces 15m trend gate) ──────────────
+    RANGE_LOOKBACK_CANDLES = 30        # 30 x 1m = 30 min rolling window
+    RANGE_EXTREME_PCT = 0.20           # bottom/top 20% of range = extreme zone
+    RANGE_DEAD_FLAT_PCT = 0.05         # range < 0.05% of price = dead flat, skip gate
 
     # ── 5-MINUTE COUNTER-TREND FILTER (secondary, when 15m=neutral) ─
     COUNTER_TREND_SOFT_PCT = 0.15     # require 4/4 signals when 5m opposes direction
@@ -566,6 +568,7 @@ class ScalpStrategy(BaseStrategy):
         self._high_vol: bool = False  # True when ATR > 1.5x normal
 
         # ── Market regime detection ──────────────────────────────────────
+        self._range_position: float | None = None  # 0.0=range bottom, 1.0=range top
         self._market_regime: str = "SIDEWAYS"     # TRENDING_UP, TRENDING_DOWN, SIDEWAYS, CHOPPY
         self._regime_since: float = time.monotonic()  # when current regime started
         self._chop_score: float = 0.0             # 0.0=smooth, 1.0=choppy
@@ -736,6 +739,21 @@ class ScalpStrategy(BaseStrategy):
         if analysis is None:
             return "neutral"
         return analysis.direction or "neutral"
+
+    def _compute_range_position(self, df, current_price: float) -> float | None:
+        """Price position in 30-candle rolling range. 0.0=bottom, 1.0=top.
+
+        Returns None if insufficient data or dead-flat market (skip gate).
+        """
+        if df is None or len(df) < self.RANGE_LOOKBACK_CANDLES:
+            return None
+        window = df.iloc[-self.RANGE_LOOKBACK_CANDLES:]
+        range_high = float(window["high"].max())
+        range_low = float(window["low"].min())
+        range_size = range_high - range_low
+        if range_low <= 0 or (range_size / range_low * 100) < self.RANGE_DEAD_FLAT_PCT:
+            return None  # dead flat — no meaningful range
+        return (current_price - range_low) / range_size
 
     def _update_dynamic_sl_tp(self, df: pd.DataFrame, current_price: float) -> None:
         """Compute ATR-based SL/TP from 1m candles.
@@ -1045,8 +1063,12 @@ class ScalpStrategy(BaseStrategy):
             else:
                 self._price_5m_pct = 0.0
 
-            # ── 15m trend (needed by cache + entry gates below) ────────
+            # ── 15m trend (info/logging only — no longer blocks entries) ─
             trend_15m = self._get_15m_trend()
+
+            # ── Dynamic range position (replaces 15m trend gate) ───────
+            range_pos = self._compute_range_position(df, current_price)
+            self._range_position = range_pos  # stored for gate chain below
 
             # ── Cache signals for Layer 1 acceleration entry ─────────
             bb_range_cache = bb_upper - bb_lower if bb_upper > bb_lower else 1e-9
@@ -1060,6 +1082,7 @@ class ScalpStrategy(BaseStrategy):
                 "volume_ratio": vol_ratio,
                 "price_5m_pct": self._price_5m_pct,
                 "trend_15m": trend_15m,
+                "range_position": range_pos,
                 "market_regime": self._market_regime,
                 "atr_pct": self._last_atr_pct,
                 "atr_avg": _avg_atr,
@@ -1336,14 +1359,26 @@ class ScalpStrategy(BaseStrategy):
         if entry is not None:
             side, reason, use_limit, signal_strength = entry
 
-            # ── 15-MINUTE TREND GATE ─────────────────────────────────────
-            # Trade WITH the trend. Only allow counter-trend when 15m actually reverses.
-            if self.TREND_GATE_ENABLED and trend_15m != "neutral":
-                if side == "long" and trend_15m == "bearish":
-                    self._skip_reason = "TREND_GATE (long blocked, 15m=bearish)"
+            # ── RANGE GATE: price position in 30-min rolling range ─────
+            range_pos = self._range_position
+            if range_pos is not None:
+                if range_pos <= self.RANGE_EXTREME_PCT:          # LOW ZONE
+                    range_min_strength = 3 if side == "long" else 4
+                elif range_pos >= (1.0 - self.RANGE_EXTREME_PCT):  # HIGH ZONE
+                    range_min_strength = 3 if side == "short" else 4
+                else:                                             # MID ZONE
+                    range_min_strength = None  # no adjustment
+
+                if range_min_strength and signal_strength < range_min_strength:
+                    zone = "LOW" if range_pos <= self.RANGE_EXTREME_PCT else "HIGH"
+                    self._skip_reason = (
+                        f"RANGE_GATE ({side} in {zone}_ZONE needs "
+                        f"{range_min_strength}/4, got {signal_strength}/4, pos={range_pos:.2f})"
+                    )
                     self.logger.info(
-                        "[%s] TREND_GATE — LONG blocked, 15m=bearish. Wait for reversal.",
-                        self.pair,
+                        "[%s] RANGE_GATE — %s in %s_ZONE needs %d/4, got %d/4 (pos=%.2f)",
+                        self.pair, side.upper(), zone, range_min_strength,
+                        signal_strength, range_pos,
                     )
                     self.last_signal_state = {
                         "side": side, "reason": reason,
@@ -1354,21 +1389,14 @@ class ScalpStrategy(BaseStrategy):
                         **self._last_signal_breakdown,
                     }
                     return signals
-                if side == "short" and trend_15m == "bullish":
-                    self._skip_reason = "TREND_GATE (short blocked, 15m=bullish)"
-                    self.logger.info(
-                        "[%s] TREND_GATE — SHORT blocked, 15m=bullish. Wait for reversal.",
-                        self.pair,
-                    )
-                    self.last_signal_state = {
-                        "side": side, "reason": reason,
-                        "strength": signal_strength, "trend_15m": trend_15m,
-                        "rsi": rsi_now, "momentum_60s": momentum_60s, "momentum_30s": momentum_30s,
-                        "current_price": current_price, "timestamp": time.monotonic(),
-                        "skip_reason": self._skip_reason,
-                        **self._last_signal_breakdown,
-                    }
-                    return signals
+
+                zone = "LOW" if range_pos <= self.RANGE_EXTREME_PCT else (
+                    "HIGH" if range_pos >= (1.0 - self.RANGE_EXTREME_PCT) else "MID")
+                self.logger.info(
+                    "[%s] RANGE_GATE: pos=%.2f (%s_ZONE) → %s %s",
+                    self.pair, range_pos, zone, side,
+                    "favored 3/4" if range_min_strength == 3 else "standard",
+                )
 
             # ── SIDEWAYS REGIME GATE: require 4/4 + minimum momentum ──
             if self._market_regime == "SIDEWAYS" and (signal_strength < 4 or abs(momentum_60s) < self.SIDEWAYS_MOM_GATE):
@@ -1967,21 +1995,9 @@ class ScalpStrategy(BaseStrategy):
         elif self._market_regime == "TRENDING_DOWN":
             required_long = max(required_long, 4)  # longing against trend = 4/4
 
-        # ── 15m TREND GATE — don't fight the bigger picture ──────────
-        # Counter-trend entries need 4/4 signals. RSI override (<30/>70)
-        # still bypasses this (checked later, before signal gate).
-        if trend_15m == "bullish":
-            required_short = max(required_short, 4)  # shorting into bullish 15m = 4/4
-        elif trend_15m == "bearish":
-            required_long = max(required_long, 4)  # longing into bearish 15m = 4/4
+        # (15m trend gate removed — replaced by Range Gate in main entry path)
 
-        # ── TREND-ALIGNED REDUCTION — Level 5/10 aggressive entries ──────
-        # When 15m trend aligns with signal direction, 2/4 signals are enough.
-        # Counter-trend stays at 4/4 (set above), neutral stays at 3/4.
-        if trend_15m == "bullish":
-            required_long = min(required_long, 3)   # longing with bullish 15m = 3/4 (was 2/4)
-        elif trend_15m == "bearish":
-            required_short = min(required_short, 3)  # shorting with bearish 15m = 3/4 (was 2/4)
+        # (15m trend-aligned reduction removed — Range Gate handles zone-based requirements)
 
         # WEAK momentum in SIDEWAYS already requires 4/4 signals (line above).
         # No hard skip — 4/4 is sufficient protection. Let strong setups through.
@@ -2225,18 +2241,7 @@ class ScalpStrategy(BaseStrategy):
                 self._skip_reason = f"MOM_REVERSING (60s={momentum_60s:+.3f}% vel={_mom_vel_5s:+.3f}%)"
                 return None
 
-        # WEAK momentum counter to 15m trend = skip (don't fight the bigger picture)
-        if mom_strength == "WEAK" and (
-            (mom_direction == "long" and trend_15m == "bearish")
-            or (mom_direction == "short" and trend_15m == "bullish")
-        ):
-            self.logger.info(
-                "[%s] WEAK mom %s counter-trend (15m=%s) — skipping entry",
-                self.pair, mom_direction, trend_15m,
-            )
-            self._last_signal_breakdown = _build_breakdown()
-            self._skip_reason = f"WEAK_COUNTER_TREND ({mom_direction} vs 15m {trend_15m})"
-            return None
+        # (WEAK_COUNTER_TREND removed — Range Gate handles zone-based filtering)
 
         # ── RSI EXTREME OVERRIDE: RSI <30 or >70 → enter immediately ─────
         # Strong oversold/overbought overrides all other conditions.
@@ -2258,28 +2263,9 @@ class ScalpStrategy(BaseStrategy):
             self._last_signal_breakdown = _build_breakdown()
             return ("short", reason, True, strength)
 
-        # ── TREND_CONFLICT: log when 15m gate specifically blocks a counter-trend entry ──
-        if (trend_15m == "bearish" and mom_direction == "long"
-                and len(bull_signals) >= 3 and len(bull_signals) < required_long):
-            self.logger.info(
-                "[%s] TREND_CONFLICT: %d/4 LONG signals but 15m bearish — need %d/4 or RSI<%d override",
-                self.pair, len(bull_signals), required_long, self.RSI_OVERRIDE_LONG,
-            )
-            self._skip_reason = f"TREND_CONFLICT (LONG {len(bull_signals)}/4 vs 15m bearish)"
-            self._last_signal_breakdown = _build_breakdown()
-            return None
+        # (TREND_CONFLICT removed — Range Gate handles zone-based filtering)
 
-        if (trend_15m == "bullish" and mom_direction == "short"
-                and len(bear_signals) >= 3 and len(bear_signals) < required_short):
-            self.logger.info(
-                "[%s] TREND_CONFLICT: %d/4 SHORT signals but 15m bullish — need %d/4 or RSI>%d override",
-                self.pair, len(bear_signals), required_short, self.RSI_OVERRIDE_SHORT,
-            )
-            self._skip_reason = f"TREND_CONFLICT (SHORT {len(bear_signals)}/4 vs 15m bullish)"
-            self._last_signal_breakdown = _build_breakdown()
-            return None
-
-        # ── Check required signals (LONG) — trend-weighted ────────────────
+        # ── Check required signals (LONG) ────────────────────────────────
         # NO fee filter — if 2/4 signals fire, ENTER. The signal system IS the filter.
         # RSI + VOL is a valid entry even when momentum is flat (price about to move).
         if len(bull_signals) >= required_long and mom_direction == "long":
@@ -3158,22 +3144,23 @@ class ScalpStrategy(BaseStrategy):
         if not has_rsi_or_bb:
             return
 
-        # ── 15-minute trend gate (from cached candle data) ──
-        if self.TREND_GATE_ENABLED:
-            _accel_trend = cached.get("trend_15m", "neutral") if cached and cache_age < 10 else "neutral"
-            if _accel_trend != "neutral":
-                if direction == "long" and _accel_trend == "bearish":
-                    self.logger.info(
-                        "[%s] ACCEL TREND_GATE — LONG blocked, 15m=bearish",
-                        self.pair,
-                    )
-                    return
-                if direction == "short" and _accel_trend == "bullish":
-                    self.logger.info(
-                        "[%s] ACCEL TREND_GATE — SHORT blocked, 15m=bullish",
-                        self.pair,
-                    )
-                    return
+        # ── RANGE GATE (from cached candle data) ──
+        _accel_range_pos = cached.get("range_position") if cached and cache_age < 10 else None
+        if _accel_range_pos is not None:
+            if _accel_range_pos <= self.RANGE_EXTREME_PCT:          # LOW ZONE
+                _range_min = 3 if direction == "long" else 4
+            elif _accel_range_pos >= (1.0 - self.RANGE_EXTREME_PCT):  # HIGH ZONE
+                _range_min = 3 if direction == "short" else 4
+            else:
+                _range_min = None
+            if _range_min and support_count < _range_min:
+                _zone = "LOW" if _accel_range_pos <= self.RANGE_EXTREME_PCT else "HIGH"
+                self.logger.info(
+                    "[%s] ACCEL RANGE_GATE — %s in %s_ZONE needs %d/4, got %d/4 (pos=%.2f)",
+                    self.pair, direction.upper(), _zone, _range_min,
+                    support_count, _accel_range_pos,
+                )
+                return
 
         # ── 5-minute counter-trend filter (from cached candle data) ──
         _accel_5m = cached.get("price_5m_pct", 0.0) if cached and cache_age < 10 else 0.0
@@ -3330,6 +3317,7 @@ class ScalpStrategy(BaseStrategy):
             if self.risk_manager.approve_signal(entry_signal):
                 order = await self.executor.execute(entry_signal)
                 if order is not None:
+                    self.risk_manager.record_open(entry_signal)
                     self.on_fill(entry_signal, order)
                     ScalpStrategy._last_accel_entry_time[self._base_asset] = time.monotonic()
                     self.logger.info(
@@ -3994,7 +3982,9 @@ class ScalpStrategy(BaseStrategy):
         # signals_fired = raw reason string (all signal tags for analysis)
         mom_10s = getattr(self, '_last_momentum_10s', 0.0)
         mom_prior = getattr(self, '_last_momentum_prior_10s', 0.0)
-        signals_fired = f"{reason} | 10s={mom_10s:+.3f}% prior={mom_prior:+.3f}% | 5m={self._price_5m_pct:+.2f}%"
+        _rp = self._range_position
+        _rp_tag = f" rng={_rp:.2f}" if _rp is not None else ""
+        signals_fired = f"{reason} | 10s={mom_10s:+.3f}% prior={mom_prior:+.3f}% | 5m={self._price_5m_pct:+.2f}%{_rp_tag}"
 
         if side == "long":
             sl = price * (1 - self._sl_pct / 100)

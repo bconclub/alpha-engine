@@ -1427,6 +1427,18 @@ class TradeExecutor:
             tp_price = signal.metadata.get("tp_price")
             sl_price = signal.metadata.get("sl_price")
 
+            # Options metadata for richer notification
+            option_meta = None
+            if is_option_symbol(signal.pair):
+                option_meta = {
+                    "option_type": signal.metadata.get("option_type", ""),
+                    "strike": signal.metadata.get("strike", 0),
+                    "expiry": signal.metadata.get("expiry", ""),
+                    "contracts": signal.metadata.get("contracts", int(filled_amount)),
+                    "setup_type": signal.metadata.get("setup_type", ""),
+                    "underlying_pair": signal.metadata.get("underlying_pair", ""),
+                }
+
             await self.alerts.send_trade_opened(
                 pair=signal.pair,
                 side=signal.side,
@@ -1440,6 +1452,7 @@ class TradeExecutor:
                 position_type=signal.position_type,
                 tp_price=tp_price,
                 sl_price=sl_price,
+                option_meta=option_meta,
             )
         except Exception:
             logger.exception("Failed to send trade opened alert")

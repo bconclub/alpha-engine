@@ -5,9 +5,10 @@ No leverage, no liquidation. When scalp sees 4/4 momentum, buy the option.
 
 Entry: 3-of-4+ momentum signals from scalp strategy (trending regime only)
        Bullish → buy CALL, Bearish → buy PUT
-       15m trend conflict gate: no CALLs in bearish, no PUTs in bullish (RSI override)
+       Range Gate: zone-based filtering (LOW favors CALLs, HIGH favors PUTs)
        Pullback entry: wait up to 30s for 5% premium dip before buying
-       1 contract per trade, nearest affordable strike (ATM or up to 3 OTM)
+       Dynamic sizing: contracts = floor(balance × alloc% × 80% / (premium / leverage))
+       Nearest affordable strike (ATM or up to 3 OTM)
        Minimum 0.25% momentum required
 
 Exit:
@@ -61,7 +62,7 @@ class OptionsScalpStrategy(BaseStrategy):
     """Buy CALLs/PUTs on strong momentum signals from the scalp strategy.
 
     Reads the scalp strategy's `last_signal_state` dict every 10 seconds.
-    Only enters on 3-of-4+ signals with 15m trend alignment. Max loss = premium paid.
+    Only enters on 3-of-4+ signals with Range Gate zone filtering. Max loss = premium paid.
     """
 
     name = StrategyName.OPTIONS_SCALP
@@ -79,15 +80,22 @@ class OptionsScalpStrategy(BaseStrategy):
 
     # ── Premium limits ────────────────────────────────────────────
     OPTIONS_LEVERAGE = 50                # Delta options are 50x leveraged
-    MAX_PREMIUM_CAPITAL_PCT = 20.0       # Max 20% of capital (compared against collateral)
-    MAX_PREMIUM_USD = 2.00               # Hard cap $2 collateral
     MIN_PREMIUM_USD = 0.01               # Skip illiquid < $0.01
 
     # ── Entry ─────────────────────────────────────────────────────
     MIN_SIGNAL_STRENGTH = 3              # 3-of-4 required (was 4 — 3/4+ signals enough)
     SIGNAL_STALENESS_SEC = 15            # Signal must be < 15s old (was 30 — stale entries)
-    CONTRACTS_PER_TRADE = 1              # 1 contract per trade
     MIN_MOMENTUM_PCT = 0.25             # Skip if |momentum_60s| < 0.25%
+
+    # ── Dynamic option sizing ──────────────────────────────────────
+    # Same pair allocation as futures so capital is balanced.
+    OPT_PAIR_ALLOC_PCT: dict[str, float] = {
+        "ETH": 30.0,
+        "BTC": 20.0,
+    }
+    OPT_MAX_COLLATERAL_PCT = 80.0        # never use >80% of balance on 1 option
+    OPT_SURVIVAL_BALANCE = 20.0          # below this, cap allocation at 30%
+    OPT_SURVIVAL_MAX_ALLOC = 30.0
 
     # ── Pullback entry ───────────────────────────────────────────
     PULLBACK_WAIT_SEC = 30              # Wait up to 30s for premium dip
@@ -163,6 +171,7 @@ class OptionsScalpStrategy(BaseStrategy):
         self.option_symbol: str | None = None      # ccxt unified symbol
         self.entry_premium: float = 0.0
         self.entry_time: float = 0.0
+        self._contracts: int = 1                   # dynamic — set by _calculate_option_contracts
         self.highest_premium: float = 0.0
         self._trailing_active: bool = False
         self.strike_price: float = 0.0
@@ -267,13 +276,13 @@ class OptionsScalpStrategy(BaseStrategy):
         self.logger.info(
             "[%s] OPTIONS SCALP ACTIVE — min_strength=%d, "
             "TP=%d%% SL=%d%% Trail=%d%%/%d%% Pullback=%d%% Decay=%d%% "
-            "Timeout=%dm Phase1=%ds MaxPremium=$%.2f%s",
+            "Timeout=%dm Phase1=%ds Alloc=%s%s",
             self.pair, self.MIN_SIGNAL_STRENGTH,
             int(self.TP_PREMIUM_GAIN_PCT), int(self.SL_PREMIUM_LOSS_PCT),
             int(self.TRAILING_ACTIVATE_PCT), int(self.TRAILING_DISTANCE_PCT),
             int(self.PULLBACK_EXIT_PCT), int(self.DECAY_THRESHOLD_PCT),
             self.TIMEOUT_MINUTES, self.PHASE1_HANDS_OFF_SEC,
-            self.MAX_PREMIUM_USD,
+            f"{self.OPT_PAIR_ALLOC_PCT.get(self._base_asset, 20)}%",
             f" | RESTORED: {self.option_side} {self.option_symbol}" if self.in_position else "",
         )
 
@@ -340,9 +349,12 @@ class OptionsScalpStrategy(BaseStrategy):
                     except (ValueError, IndexError):
                         pass
 
+                # Restore contracts from amount column
+                self._contracts = max(1, int(trade.get("amount", 1) or 1))
+
                 self.logger.info(
-                    "[%s] RESTORED from DB: %s %s strike=$%.0f entry=$%.4f peak=$%.4f trail=%s",
-                    self.pair, self.option_side, self.option_symbol,
+                    "[%s] RESTORED from DB: %s x%d %s strike=$%.0f entry=$%.4f peak=$%.4f trail=%s",
+                    self.pair, self.option_side, self._contracts, self.option_symbol,
                     self.strike_price, self.entry_premium, self.highest_premium,
                     self._trailing_active,
                 )
@@ -620,7 +632,7 @@ class OptionsScalpStrategy(BaseStrategy):
                     current_prem = ticker.get("last") or ticker.get("bid") or None
                     if current_prem and entry_prem and entry_prem > 0:
                         pnl_pct = (current_prem - entry_prem) / entry_prem * 100
-                        pnl_usd = (current_prem - entry_prem) * self.CONTRACTS_PER_TRADE
+                        pnl_usd = (current_prem - entry_prem) * self._contracts
             except Exception:
                 pass
 
@@ -759,44 +771,33 @@ class OptionsScalpStrategy(BaseStrategy):
         # 4. Determine option type
         option_type = "call" if side == "long" else "put"
 
-        # 4b. 15m trend conflict gate — don't buy CALLs in bearish, PUTs in bullish
-        if self._scalp:
-            trend_15m = self._scalp._get_15m_trend()
-            rsi_val = signal_state.get("rsi")
-            if option_type == "call" and trend_15m == "bearish":
-                # RSI override: extreme oversold (< 25) allows CALL in bearish
-                if rsi_val is not None and rsi_val < 25:
+        # 4b. Range Gate — zone-based filtering for options
+        _opt_cached = type(self._scalp)._cached_signals.get(self._base_asset, {}) if self._scalp else {}
+        _opt_range_pos = _opt_cached.get("range_position")
+        if _opt_range_pos is not None:
+            if _opt_range_pos <= 0.20:  # LOW ZONE — CALLs favored, PUTs need 3/4
+                if option_type == "put" and strength < 3:
                     self.logger.info(
-                        "[%s] OPTIONS 15m bearish but RSI=%.1f < 25 — CALL override",
-                        self.pair, rsi_val,
-                    )
-                else:
-                    self.logger.info(
-                        "[%s] OPTIONS 15m BEARISH — skipping CALL (RSI=%.1f)",
-                        self.pair, rsi_val or 0,
+                        "[%s] OPT_RANGE_GATE — PUT in LOW_ZONE needs 3/4, got %d/4 (pos=%.2f)",
+                        self.pair, strength, _opt_range_pos,
                     )
                     await self._log_skip(
-                        f"{self.pair} — OPTIONS SKIP: 15m bearish, no CALL",
-                        {"trend": trend_15m, "rsi": rsi_val, "option_type": option_type},
+                        f"{self.pair} — OPT_RANGE_GATE: PUT in LOW_ZONE needs 3/4",
+                        {"range_pos": _opt_range_pos, "strength": strength, "option_type": option_type},
                     )
                     return []
-            elif option_type == "put" and trend_15m == "bullish":
-                # RSI override: extreme overbought (> 75) allows PUT in bullish
-                if rsi_val is not None and rsi_val > 75:
+            elif _opt_range_pos >= 0.80:  # HIGH ZONE — PUTs favored, CALLs need 3/4
+                if option_type == "call" and strength < 3:
                     self.logger.info(
-                        "[%s] OPTIONS 15m bullish but RSI=%.1f > 75 — PUT override",
-                        self.pair, rsi_val,
-                    )
-                else:
-                    self.logger.info(
-                        "[%s] OPTIONS 15m BULLISH — skipping PUT (RSI=%.1f)",
-                        self.pair, rsi_val or 0,
+                        "[%s] OPT_RANGE_GATE — CALL in HIGH_ZONE needs 3/4, got %d/4 (pos=%.2f)",
+                        self.pair, strength, _opt_range_pos,
                     )
                     await self._log_skip(
-                        f"{self.pair} — OPTIONS SKIP: 15m bullish, no PUT",
-                        {"trend": trend_15m, "rsi": rsi_val, "option_type": option_type},
+                        f"{self.pair} — OPT_RANGE_GATE: CALL in HIGH_ZONE needs 3/4",
+                        {"range_pos": _opt_range_pos, "strength": strength, "option_type": option_type},
                     )
                     return []
+            # MID ZONE: both types at current MIN_SIGNAL_STRENGTH (no extra gate)
 
         self.logger.info(
             "[%s] OPTIONS SIGNAL READY: %s %d/4 — checking chain/premium",
@@ -845,18 +846,12 @@ class OptionsScalpStrategy(BaseStrategy):
             )
             return []
 
-        # 8. Collateral budget
-        exchange_capital = self.risk_manager.get_exchange_capital(self._exchange_id)
-        max_collateral = min(
-            exchange_capital * (self.MAX_PREMIUM_CAPITAL_PCT / 100),
-            self.MAX_PREMIUM_USD,
-        )
-
-        # 9. Try ATM first, then walk OTM strikes if too expensive
+        # 8-9. Try ATM first, then walk OTM strikes — dynamic sizing
         strikes_to_try = [atm_strike] + self._get_otm_candidates(atm_strike, option_type)
         selected_strike: float | None = None
         selected_symbol: str | None = None
         premium: float = 0.0
+        opt_contracts: int = 0
         atm_collateral: float | None = None  # track ATM cost for logging
 
         for i, strike in enumerate(strikes_to_try):
@@ -888,40 +883,41 @@ class OptionsScalpStrategy(BaseStrategy):
                 )
                 continue
 
-            # Check collateral fits budget
-            if collateral <= max_collateral:
+            # Dynamic sizing: how many contracts can we afford?
+            n = self._calculate_option_contracts(prem)
+            if n >= 1:
                 selected_strike = strike
                 selected_symbol = symbol
                 premium = prem
+                opt_contracts = n
                 if i > 0:
                     self.logger.info(
-                        "[%s] %s %s: ATM=$%.0f too expensive ($%.2f), "
-                        "selected $%.0f OTM ($%.2f collateral)",
+                        "[%s] %s %s: ATM=$%.0f too expensive, "
+                        "selected $%.0f OTM ($%.4f premium, %d contracts)",
                         self.pair, self._base_asset, option_type.upper(),
-                        atm_strike, atm_collateral or 0,
-                        strike, collateral,
+                        atm_strike, strike, prem, n,
                     )
                 break
 
             self.logger.debug(
-                "[%s] Strike $%.0f collateral $%.4f > max $%.4f — trying OTM",
-                self.pair, strike, collateral, max_collateral,
+                "[%s] Strike $%.0f — can't afford 1 contract (premium=$%.4f, collateral=$%.4f)",
+                self.pair, strike, prem, collateral,
             )
 
         if selected_strike is None or selected_symbol is None:
             if self._tick_count % 30 == 0:
                 self.logger.info(
                     "[%s] No affordable strike within %d OTM — skipping "
-                    "(ATM=$%.0f collateral=$%.4f max=$%.4f)",
+                    "(ATM=$%.0f collateral=$%.4f)",
                     self.pair, self.MAX_OTM_STRIKES, atm_strike,
-                    atm_collateral or 0, max_collateral,
+                    atm_collateral or 0,
                 )
             await self._log_skip(
                 f"{self.pair} — OPTIONS SKIP: no affordable strike within "
                 f"{self.MAX_OTM_STRIKES} OTM (ATM=${atm_strike:.0f} "
-                f"collateral=${atm_collateral or 0:.4f} > ${max_collateral:.4f})",
+                f"collateral=${atm_collateral or 0:.4f})",
                 {"option_type": option_type, "atm_strike": atm_strike,
-                 "atm_collateral": atm_collateral, "max_collateral": max_collateral,
+                 "atm_collateral": atm_collateral,
                  "strength": strength},
             )
             return []
@@ -953,6 +949,7 @@ class OptionsScalpStrategy(BaseStrategy):
             setup_type=setup_type,
             expiry_str=expiry_str,
             strike_label=strike_label,
+            contracts=opt_contracts,
         )
 
     # ==================================================================
@@ -972,6 +969,7 @@ class OptionsScalpStrategy(BaseStrategy):
         setup_type: str,
         expiry_str: str,
         strike_label: str,
+        contracts: int = 1,
     ) -> list[Signal]:
         """Wait up to PULLBACK_WAIT_SEC for premium to dip before entering.
 
@@ -1083,6 +1081,7 @@ class OptionsScalpStrategy(BaseStrategy):
             setup_type=setup_type,
             expiry_str=expiry_str,
             strike_label=strike_label,
+            contracts=contracts,
         )
 
     def _build_entry_signal(
@@ -1097,21 +1096,25 @@ class OptionsScalpStrategy(BaseStrategy):
         setup_type: str,
         expiry_str: str,
         strike_label: str,
+        contracts: int = 1,
     ) -> list[Signal]:
         """Build the entry Signal for an option trade."""
+        # Store contracts for exit sizing
+        self._contracts = contracts
+
         reason = (
             f"OPTIONS {option_type.upper()} | {strength}/4 signals "
             f"({signals_str}) | "
             f"{strike_label} Strike=${selected_strike:.0f} "
             f"Exp={expiry_str} "
-            f"Premium=${premium:.4f}"
+            f"Premium=${premium:.4f} x{contracts}"
         )
         self.logger.info("[%s] OPTIONS ENTRY — %s (setup=%s)", self.pair, reason, setup_type)
 
         return [Signal(
             side="buy",
             price=premium,
-            amount=float(self.CONTRACTS_PER_TRADE),
+            amount=float(contracts),
             order_type="market",
             reason=reason,
             strategy=self.name,
@@ -1121,7 +1124,7 @@ class OptionsScalpStrategy(BaseStrategy):
             exchange_id="delta",
             metadata={
                 "pending_side": option_type,
-                "pending_amount": float(self.CONTRACTS_PER_TRADE),
+                "pending_amount": float(contracts),
                 "option_type": option_type,
                 "strike": selected_strike,
                 "strike_label": strike_label,
@@ -1131,8 +1134,56 @@ class OptionsScalpStrategy(BaseStrategy):
                 "tp_price": premium * (1 + self.TP_PREMIUM_GAIN_PCT / 100),
                 "sl_price": premium * (1 - self.SL_PREMIUM_LOSS_PCT / 100),
                 "setup_type": setup_type,
+                "contracts": contracts,
             },
         )]
+
+    # ==================================================================
+    # DYNAMIC OPTION SIZING
+    # ==================================================================
+
+    def _calculate_option_contracts(self, premium: float) -> int:
+        """Dynamic sizing: contracts based on balance, pair allocation, leverage.
+
+        Formula:
+          collateral_available = balance × alloc_pct × 80% safety cap
+          collateral_per_contract = premium / leverage
+          contracts = floor(collateral_available / collateral_per_contract)
+          Minimum 1, returns 0 if can't afford 1.
+        """
+        import math
+
+        exchange_capital = self.risk_manager.get_exchange_capital(self._exchange_id)
+        if exchange_capital <= 0 or premium <= 0:
+            return 0
+
+        alloc_pct = self.OPT_PAIR_ALLOC_PCT.get(self._base_asset, 20.0)
+
+        # Survival mode: low balance → cap allocation
+        if exchange_capital < self.OPT_SURVIVAL_BALANCE:
+            alloc_pct = min(alloc_pct, self.OPT_SURVIVAL_MAX_ALLOC)
+
+        # Collateral budget (capped at 80% of total balance)
+        collateral_available = exchange_capital * (alloc_pct / 100)
+        max_collateral = exchange_capital * (self.OPT_MAX_COLLATERAL_PCT / 100)
+        collateral_available = min(collateral_available, max_collateral)
+
+        # Collateral per contract at leverage
+        collateral_per_contract = premium / self.OPTIONS_LEVERAGE
+        if collateral_per_contract <= 0:
+            return 0
+
+        contracts = math.floor(collateral_available / collateral_per_contract)
+        contracts = max(contracts, 0)
+
+        self.logger.info(
+            "[%s] OPT_SIZING: %d contracts @ $%.4f "
+            "(collateral=$%.2f, alloc=%.0f%%, bal=$%.2f, per_ct=$%.4f)",
+            self.pair, contracts, premium,
+            collateral_available, alloc_pct, exchange_capital,
+            collateral_per_contract,
+        )
+        return contracts
 
     # ==================================================================
     # RATCHET FLOOR
@@ -1428,7 +1479,7 @@ class OptionsScalpStrategy(BaseStrategy):
         self, current_premium: float, pnl_pct: float, exit_type: str,
     ) -> list[Signal]:
         """Build exit signal for option position."""
-        pnl_usd = (current_premium - self.entry_premium) * self.CONTRACTS_PER_TRADE
+        pnl_usd = (current_premium - self.entry_premium) * self._contracts
         reason = (
             f"Option {exit_type} {self.option_side} | "
             f"${self.entry_premium:.4f} → ${current_premium:.4f} "
@@ -1466,7 +1517,7 @@ class OptionsScalpStrategy(BaseStrategy):
         return [Signal(
             side="sell",
             price=current_premium,
-            amount=float(self.CONTRACTS_PER_TRADE),
+            amount=float(self._contracts),
             order_type="market",
             reason=reason,
             strategy=self.name,
@@ -1554,7 +1605,7 @@ class OptionsScalpStrategy(BaseStrategy):
         pnl_usd = 0.0
         if self.entry_premium > 0:
             pnl_pct = (exit_premium - self.entry_premium) / self.entry_premium * 100
-            pnl_usd = (exit_premium - self.entry_premium) * self.CONTRACTS_PER_TRADE
+            pnl_usd = (exit_premium - self.entry_premium) * self._contracts
 
         # Mark trade closed in DB directly (no exchange order needed)
         if self._db:
@@ -1568,7 +1619,7 @@ class OptionsScalpStrategy(BaseStrategy):
                 if open_trade:
                     from alpha.trade_executor import calc_pnl
                     entry_price = float(open_trade.get("entry_price", self.entry_premium) or self.entry_premium)
-                    amount = open_trade.get("amount", self.CONTRACTS_PER_TRADE)
+                    amount = open_trade.get("amount", self._contracts)
                     leverage = open_trade.get("leverage", self.OPTIONS_LEVERAGE) or 1
 
                     result = calc_pnl(
@@ -1756,12 +1807,13 @@ class OptionsScalpStrategy(BaseStrategy):
             self._opt_mom_dying_since = None
             self._opt_ratchet_floor = 0.0
             self.strike_price = signal.metadata.get("strike", 0)
+            self._contracts = int(signal.metadata.get("contracts", 1) or 1)
             expiry_str = signal.metadata.get("expiry")
             if expiry_str:
                 self.expiry_dt = datetime.fromisoformat(expiry_str)
             self.logger.info(
-                "[%s] OPTION FILLED — %s strike=$%.0f premium=$%.4f exp=%s",
-                self.option_symbol, self.option_side,
+                "[%s] OPTION FILLED — %s x%d strike=$%.0f premium=$%.4f exp=%s",
+                self.option_symbol, self.option_side, self._contracts,
                 self.strike_price, fill_price,
                 self.expiry_dt.strftime("%b %d %H:%M") if self.expiry_dt else "?",
             )
@@ -1779,6 +1831,7 @@ class OptionsScalpStrategy(BaseStrategy):
             self._trailing_active = False
             self.strike_price = 0.0
             self.expiry_dt = None
+            self._contracts = 1
             # Force next check() to immediately write cleared state to dashboard
             self._last_state_write = 0.0
 

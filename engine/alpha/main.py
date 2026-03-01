@@ -650,7 +650,14 @@ class AlphaBot:
 
                 # Log to strategy_log DB table (dashboard reads this) — always "scalp"
                 try:
-                    exchange = "delta" if pair in self.delta_pairs else "binance"
+                    if pair in self.bybit_pairs:
+                        exchange = "bybit"
+                    elif pair in self.delta_pairs:
+                        exchange = "delta"
+                    elif pair in self.kraken_pairs:
+                        exchange = "kraken"
+                    else:
+                        exchange = "binance"
                     if analysis.rsi >= 50:
                         entry_distance_pct = analysis.rsi - 55.0
                     else:
@@ -741,6 +748,7 @@ class AlphaBot:
                     "adx": analysis.adx,
                     "rsi": analysis.rsi,
                     "direction": analysis.direction,
+                    "exchange": exchange,
                 })
 
             rm = self.risk_manager
@@ -985,9 +993,10 @@ class AlphaBot:
             binance_bal = await self._fetch_portfolio_usd(self.binance)
             delta_bal = await self._fetch_portfolio_usd(self.delta) if self.delta else None
             bybit_bal = await self._fetch_portfolio_usd(self.bybit) if self.bybit else None
+            kraken_bal = await self._fetch_portfolio_usd(self.kraken) if self.kraken else None
 
             # Capital = sum of actual exchange balances
-            total_capital = (binance_bal or 0) + (delta_bal or 0) + (bybit_bal or 0)
+            total_capital = (binance_bal or 0) + (delta_bal or 0) + (bybit_bal or 0) + (kraken_bal or 0)
 
             # Cross-check positions against exchange: verify we actually hold coins
             verified_positions = await self._verify_positions_against_exchange()
@@ -1010,6 +1019,32 @@ class AlphaBot:
                                 unrealized_pnl += notional * (pnl_pct / 100)
                                 break
 
+            # Build exchange balances dict
+            exchange_balances: dict[str, float] = {}
+            if binance_bal is not None:
+                exchange_balances["binance"] = binance_bal
+            if delta_bal is not None:
+                exchange_balances["delta"] = delta_bal
+            if bybit_bal is not None:
+                exchange_balances["bybit"] = bybit_bal
+            if kraken_bal is not None:
+                exchange_balances["kraken"] = kraken_bal
+
+            # Build options status per base asset
+            options_status: dict[str, str] = {}
+            for pair, opts in self._options_strategies.items():
+                base = pair.split("/")[0] if "/" in pair else pair[:3]
+                if opts.in_position and opts.option_side:
+                    side_icon = "\U0001f7e2" if opts.option_side == "call" else "\U0001f534"
+                    strike_tag = f"${opts.strike_price:,.0f}" if opts.strike_price else ""
+                    ct_tag = f"x{opts._contracts}" if opts._contracts > 1 else ""
+                    options_status[base] = (
+                        f"{side_icon} {opts.option_side.upper()} {strike_tag} "
+                        f"{ct_tag} \u2192 Holding"
+                    )
+                else:
+                    options_status[base] = "\u23f8 Scanning"
+
             # Send hourly market update (all pairs grouped by exchange)
             if self._latest_analyses:
                 await self.alerts.send_market_update(
@@ -1017,6 +1052,8 @@ class AlphaBot:
                     active_strategies=active_map,
                     capital=total_capital,
                     open_position_count=len(verified_positions),
+                    exchange_balances=exchange_balances,
+                    options_status=options_status if self._options_strategies else None,
                 )
 
             await self.alerts.send_hourly_summary(
@@ -1028,8 +1065,7 @@ class AlphaBot:
                 capital=total_capital,
                 active_strategies=active_map,
                 win_rate_24h=rm.win_rate,
-                binance_balance=binance_bal,
-                delta_balance=delta_bal,
+                exchange_balances=exchange_balances,
                 unrealized_pnl=unrealized_pnl,
             )
 
@@ -2531,8 +2567,13 @@ class AlphaBot:
             ghost_pairs: list[str] = []
             for pos in self.risk_manager.open_positions:
                 scalp = self._get_scalp(pos.pair, exchange=pos.exchange)
-                if scalp is None or not scalp.in_position:
-                    ghost_pairs.append(pos.pair)
+                if scalp is not None and scalp.in_position:
+                    continue  # scalp strategy owns this position
+                # Check options strategies too
+                opts = self._options_strategies.get(pos.pair)
+                if opts is not None and opts.in_position:
+                    continue  # options strategy owns this position
+                ghost_pairs.append(pos.pair)
             for pair in ghost_pairs:
                 logger.warning(
                     "GHOST SWEEP: removing stale open_positions entry for %s "

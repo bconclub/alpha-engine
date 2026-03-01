@@ -93,41 +93,50 @@ class AlertManager:
         active_strategies: dict[str, str | None],
         capital: float,
         open_position_count: int,
+        exchange_balances: dict[str, float] | None = None,
+        options_status: dict[str, str] | None = None,
     ) -> None:
         """Consolidated market update -- all pairs grouped by exchange.
 
-        Each analysis dict: {pair, condition, adx, rsi, direction}
+        Each analysis dict: {pair, condition, adx, rsi, direction, exchange}
         active_strategies:  pair -> strategy name (or None for paused)
+        exchange_balances:  exchange_id -> balance USD
+        options_status:     base_asset -> status string (e.g. "CALL ETH $2450 x5")
         """
         if not analyses:
             return
 
         now = ist_now().strftime("%H:%M IST")
 
-        # Split into Binance (spot) vs Delta (futures)
-        binance_set = set(config.trading.pairs)
-        delta_set = set(config.delta.pairs) if config.delta.api_key else set()
-
-        binance_rows: list[dict[str, Any]] = []
-        delta_rows: list[dict[str, Any]] = []
-
+        # Group by exchange
+        exchange_groups: dict[str, list[dict[str, Any]]] = {}
         for a in analyses:
-            pair = a["pair"]
-            if pair in delta_set:
-                delta_rows.append(a)
-            else:
-                binance_rows.append(a)
+            exch = a.get("exchange", "binance")
+            exchange_groups.setdefault(exch, []).append(a)
+
+        # Display order and labels
+        exchange_labels = {
+            "binance": "BINANCE (Spot 1x)",
+            "bybit": "BYBIT (Futures 20x)",
+            "delta": "DELTA (Futures 20x)",
+            "kraken": "KRAKEN (Futures 20x)",
+        }
 
         lines: list[str] = [
             f"\U0001f4ca <b>MARKET UPDATE</b> \u00b7 {now}",
         ]
 
-        # ── Binance section
-        if binance_rows:
+        for exch_id in ("bybit", "delta", "kraken", "binance"):
+            rows = exchange_groups.get(exch_id, [])
+            if not rows:
+                continue
+            label = exchange_labels.get(exch_id, exch_id.upper())
+            bal = (exchange_balances or {}).get(exch_id)
+            bal_tag = f" \u2014 {format_usd(bal)}" if bal is not None else ""
             lines.append("")
-            lines.append("<b>BINANCE (Spot)</b>")
+            lines.append(f"<b>{label}</b>{bal_tag}")
             lines.append(LINE)
-            for a in binance_rows:
+            for a in rows:
                 short = _pair_short(a["pair"])
                 emoji = _COND_EMOJI.get(a.get("condition", ""), "\u2753")
                 adx = round(a.get("adx", 0))
@@ -137,27 +146,20 @@ class AlertManager:
                     f"{short:<5}{emoji} ADX <code>{adx}</code> RSI <code>{rsi}</code> \u2192 {strat}"
                 )
 
-        # ── Delta section
-        if delta_rows:
+        # ── Options section (Delta options overlay)
+        if options_status:
             lines.append("")
-            lines.append("<b>DELTA (Futures)</b>")
+            lines.append("<b>DELTA (Options 50x)</b>")
             lines.append(LINE)
-            for a in delta_rows:
-                short = _pair_short(a["pair"])
-                emoji = _COND_EMOJI.get(a.get("condition", ""), "\u2753")
-                adx = round(a.get("adx", 0))
-                rsi = round(a.get("rsi", 0))
-                strat = _strat_label(active_strategies.get(a["pair"]))
-                lines.append(
-                    f"{short:<5}{emoji} ADX <code>{adx}</code> RSI <code>{rsi}</code> \u2192 {strat}"
-                )
+            for asset, status in options_status.items():
+                lines.append(f"{asset:<5}{status}")
 
         # ── Footer
         lines.append("")
         lines.append(
-            f"\U0001f4b0 <code>{format_usd(capital)}</code> | Positions: <code>{open_position_count}</code> open"
+            f"\U0001f4b0 <code>{format_usd(capital)}</code> | "
+            f"Positions: <code>{open_position_count}</code> open"
         )
-        lines.append(LINE)
 
         await self._send("\n".join(lines))
 
@@ -201,42 +203,120 @@ class AlertManager:
         capital: float = 0,
         tp_price: float | None = None,
         sl_price: float | None = None,
+        option_meta: dict[str, Any] | None = None,
     ) -> None:
-        """Clean 4-line trade entry notification.
+        """Trade entry notification — futures or options format.
 
-        Format:
+        Futures format:
         🟢 LONG XRP/USD $1.48 →
-        TP $1.51 (+2.0%)
-        SL $1.47 (-0.6%)
-        20x | Scalp | RSI:39 + BB:low
+        TP $1.51 (+2.0%)   SL $1.47 (-0.6%)
+        20x | Scalp | Delta | RSI:39 + BB:low
+
+        Options format:
+        🟢 CALL ETH $2,450 Strike
+        x5 @ $29.60 premium | Exp Mar 02 12:00
+        TP $38.48 (+30%)   SL $20.72 (-30%)
+        50x | Options | Delta | MOM + VOL + RSI
         """
+        if option_meta:
+            await self._send_option_opened(
+                pair, price, amount, strategy, reason, exchange,
+                leverage, tp_price, sl_price, option_meta,
+            )
+            return
+
         pair_short = _pair_short(pair)
         side_label = position_type.upper() if position_type in ("long", "short") else side.upper()
         emoji = "\U0001f7e2" if side_label in ("LONG", "BUY") else "\U0001f534"
 
         # Line 1: emoji SIDE PAIR $price →
+        exch_tag = exchange.capitalize() if exchange != "binance" else "Spot"
         line1 = f"{emoji} <b>{side_label} {pair_short}</b> <code>${price:,.2f}</code> \u2192"
 
-        # Line 2: TP line
+        # Line 2: TP + SL on same line
         lines: list[str] = [line1]
+        tp_sl_parts: list[str] = []
         if tp_price is not None:
             tp_pct = abs((tp_price - price) / price * 100)
-            lines.append(f"TP <code>${tp_price:,.2f}</code> (+{tp_pct:.1f}%)")
-
-        # Line 3: SL line
+            tp_sl_parts.append(f"TP <code>${tp_price:,.2f}</code> (+{tp_pct:.1f}%)")
         if sl_price is not None:
             sl_pct = abs((sl_price - price) / price * 100)
-            lines.append(f"SL <code>${sl_price:,.2f}</code> (-{sl_pct:.1f}%)")
+            tp_sl_parts.append(f"SL <code>${sl_price:,.2f}</code> (-{sl_pct:.1f}%)")
+        if tp_sl_parts:
+            lines.append("   ".join(tp_sl_parts))
 
-        # Line 4: leverage | strategy | signal summary
+        # Line 3: leverage | strategy | exchange | signal summary
         signal_summary = self._parse_signal_summary(reason)
         parts_4: list[str] = []
         if leverage > 1:
             parts_4.append(f"{leverage}x")
         parts_4.append(strategy.capitalize())
+        parts_4.append(exch_tag)
         if signal_summary:
             parts_4.append(signal_summary)
         lines.append(" | ".join(parts_4))
+
+        await self._send("\n".join(lines))
+
+    async def _send_option_opened(
+        self,
+        pair: str,
+        premium: float,
+        amount: float,
+        strategy: str,
+        reason: str,
+        exchange: str,
+        leverage: int,
+        tp_price: float | None,
+        sl_price: float | None,
+        meta: dict[str, Any],
+    ) -> None:
+        """Options-specific entry notification with strike/expiry/contracts."""
+        opt_type = (meta.get("option_type") or "call").upper()
+        strike = meta.get("strike", 0)
+        expiry = meta.get("expiry", "")
+        contracts = meta.get("contracts", int(amount))
+        underlying = meta.get("underlying_pair", pair)
+        base = _pair_short(underlying).split("/")[0]  # ETH, BTC
+
+        emoji = "\U0001f7e2" if opt_type == "CALL" else "\U0001f534"
+
+        # Format expiry nicely: 2026-03-02T12:00:00+00:00 → Mar 02 12:00
+        exp_label = ""
+        if expiry:
+            try:
+                from datetime import datetime
+                dt = datetime.fromisoformat(expiry)
+                exp_label = dt.strftime("%b %d %H:%M")
+            except Exception:
+                exp_label = expiry[:16]
+
+        # Line 1: emoji CALL/PUT BASE $strike Strike
+        line1 = f"{emoji} <b>{opt_type} {base}</b> <code>${strike:,.0f}</code> Strike"
+
+        # Line 2: x5 @ $29.60 premium | Exp Mar 02 12:00
+        line2 = f"x{contracts} @ <code>${premium:,.4f}</code> premium"
+        if exp_label:
+            line2 += f" | Exp {exp_label}"
+
+        # Line 3: TP + SL
+        lines: list[str] = [line1, line2]
+        tp_sl_parts: list[str] = []
+        if tp_price is not None:
+            tp_pct = abs((tp_price - premium) / premium * 100) if premium > 0 else 0
+            tp_sl_parts.append(f"TP <code>${tp_price:,.4f}</code> (+{tp_pct:.0f}%)")
+        if sl_price is not None:
+            sl_pct = abs((sl_price - premium) / premium * 100) if premium > 0 else 0
+            tp_sl_parts.append(f"SL <code>${sl_price:,.4f}</code> (-{sl_pct:.0f}%)")
+        if tp_sl_parts:
+            lines.append("   ".join(tp_sl_parts))
+
+        # Line 4: leverage | Options | exchange | signals
+        signal_summary = self._parse_signal_summary(reason)
+        parts: list[str] = [f"{leverage}x", "Options", exchange.capitalize()]
+        if signal_summary:
+            parts.append(signal_summary)
+        lines.append(" | ".join(parts))
 
         await self._send("\n".join(lines))
 
@@ -322,11 +402,13 @@ class AlertManager:
         capital: float,
         active_strategies: dict[str, str | None],
         win_rate_24h: float,
+        exchange_balances: dict[str, float] | None = None,
+        unrealized_pnl: float = 0.0,
+        # backward compat (ignored)
         binance_balance: float | None = None,
         delta_balance: float | None = None,
-        unrealized_pnl: float = 0.0,
     ) -> None:
-        """Hourly report with real exchange-verified positions and full portfolio value."""
+        """Hourly report with per-exchange breakdown."""
         if open_positions:
             pos_parts = []
             for p in open_positions:
@@ -338,7 +420,6 @@ class AlertManager:
                     part = f"{short} {ptype} on {exch.capitalize()}"
                 else:
                     part = f"{short} on {exch.capitalize()}"
-                # Show held value if available (from exchange verification)
                 if held_value is not None and held_value > 0:
                     part += f" ({format_usd(held_value)})"
                 pos_parts.append(part)
@@ -346,35 +427,26 @@ class AlertManager:
         else:
             pos_str = "<code>0</code>"
 
-        # Active strategies grouped (with position info for scalp)
-        strat_groups: dict[str, list[str]] = {}
-        for pair, strat in active_strategies.items():
-            if strat and strat.startswith("scalp_"):
-                # e.g. "scalp_long" → "Scalp 🟢 LONG"
-                side = strat.split("_", 1)[1].upper()
-                side_icon = "\U0001f7e2" if side == "LONG" else "\U0001f534"
-                name = f"Scalp {side_icon}{side}"
-            elif strat == "scalp":
-                name = "Scalp (scanning)"
-            else:
-                name = (strat or "paused").capitalize()
-            strat_groups.setdefault(name, []).append(_pair_short(pair))
-        strat_line = ", ".join(
-            f"{name} ({', '.join(pairs)})"
-            for name, pairs in strat_groups.items()
-        )
-
         hourly_trades = hourly_wins + hourly_losses
         h_sign = "+" if hourly_pnl >= 0 else ""
         d_sign = "+" if daily_pnl >= 0 else ""
 
-        # Unrealized P&L line (only show when positions are open)
+        # Unrealized P&L line
         u_sign = "+" if unrealized_pnl >= 0 else ""
         unreal_line = (
-            f"\U0001f4ad Unrealized P&L: <code>{u_sign}{format_usd(unrealized_pnl)}</code>"
+            f"\U0001f4ad Unrealized: <code>{u_sign}{format_usd(unrealized_pnl)}</code>"
             if open_positions and unrealized_pnl != 0
             else None
         )
+
+        # Per-exchange capital breakdown
+        bal = exchange_balances or {}
+        exch_labels = {"bybit": "Bybit", "delta": "Delta", "kraken": "Kraken", "binance": "Binance"}
+        cap_parts = []
+        for eid in ("bybit", "delta", "kraken", "binance"):
+            if eid in bal:
+                cap_parts.append(f"{exch_labels[eid]}: {format_usd(bal[eid])}")
+        cap_line = " | ".join(cap_parts) if cap_parts else format_usd(capital)
 
         lines = [
             "\u23f1 <b>HOURLY REPORT</b>",
@@ -388,7 +460,7 @@ class AlertManager:
             lines.append(unreal_line)
         lines += [
             f"\U0001f4b5 Capital: <code>{format_usd(capital)}</code>",
-            f"\U0001f3af Strategies: <code>{strat_line}</code>",
+            f"   <code>{cap_line}</code>",
             f"\U0001f3c6 Win rate (24h): <code>{'N/A' if win_rate_24h < 0 else f'{win_rate_24h:.0f}%'}</code>",
         ]
         await self._send("\n".join(lines))
