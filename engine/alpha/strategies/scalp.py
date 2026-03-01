@@ -3441,12 +3441,25 @@ class ScalpStrategy(BaseStrategy):
                 fade_required = self.MOM_FADE_TREND_CONFIRM if trend_aligned else self.MOM_FADE_CONFIRM_SECONDS
 
             if open_trade:
+                # Live dollar P&L (gross, pre-fee — keeps pnl column fresh for dashboard)
+                coin_amount = self.entry_amount
+                if self.is_futures and self.entry_amount > 0:
+                    from alpha.trade_executor import DELTA_CONTRACT_SIZE
+                    contract_size = DELTA_CONTRACT_SIZE.get(self.pair, 0.01)
+                    coin_amount = self.entry_amount * contract_size
+                if self.position_side == "long":
+                    live_pnl = (current_price - self.entry_price) * coin_amount
+                else:
+                    live_pnl = (self.entry_price - current_price) * coin_amount
+
                 await self.executor.db.update_trade(open_trade["id"], {
                     "position_state": state,
                     "trail_stop_price": round(trail_stop, 8) if trail_stop else None,
                     "current_pnl": round(pnl_pct, 4),
                     "current_price": round(current_price, 8),
                     "peak_pnl": round(peak_pnl, 4),
+                    "pnl": round(live_pnl, 8),
+                    "pnl_pct": round(pnl_pct, 4),
                     "fade_timer_active": fade_timer_active,
                     "fade_elapsed": fade_elapsed if fade_timer_active else None,
                     "fade_required": fade_required if fade_timer_active else None,

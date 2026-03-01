@@ -393,11 +393,20 @@ class OptionsScalpStrategy(BaseStrategy):
                 pair=self.option_symbol, exchange="delta", strategy="options_scalp",
             )
             if open_trade:
+                # Live dollar P&L (gross, pre-fee — keeps pnl column fresh for dashboard)
+                live_pnl = (current_premium - self.entry_premium) * self._contracts
+                # Options at leverage: real wallet P&L = notional / leverage
+                opt_lev = max(int(self.OPTIONS_LEVERAGE or 1), 1)
+                if opt_lev > 1:
+                    live_pnl /= opt_lev
+
                 await self._db.update_trade(open_trade["id"], {
                     "position_state": state,
                     "current_price": round(current_premium, 8),
                     "current_pnl": round(pnl_pct, 4),
                     "peak_pnl": round(peak_pnl, 4),
+                    "pnl": round(live_pnl, 8),
+                    "pnl_pct": round(pnl_pct, 4),
                 })
         except Exception as e:
             self.logger.debug("[%s] position state DB update failed: %s", self.pair, e)

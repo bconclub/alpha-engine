@@ -1180,7 +1180,13 @@ class TradeExecutor:
             return
         try:
             fill_price = order.get("average") or order.get("price") or signal.price
-            filled_amount = order.get("filled") or signal.amount
+            filled_amount = (
+                order.get("filled")
+                or order.get("amount")
+                or signal.amount
+                or signal.metadata.get("pending_amount")
+                or 0
+            )
 
             # For Delta futures: filled_amount is in contracts. Convert to coin for notional calc.
             # For Delta options: 1 contract = 1 unit (no conversion needed)
@@ -1209,11 +1215,15 @@ class TradeExecutor:
             lev = max(int(signal.leverage or 1), 1)
             collateral = round(notional / lev, 8) if lev > 1 else round(notional, 8)
 
+            # Contracts count: from signal metadata (options), or same as filled_amount (futures)
+            contracts = signal.metadata.get("contracts") or filled_amount
+
             trade_data: dict[str, Any] = {
                 "pair": signal.pair,
                 "side": signal.side,
                 "entry_price": fill_price,
                 "amount": filled_amount,
+                "contracts": contracts,
                 "cost": cost,
                 "collateral": collateral,
                 "strategy": signal.strategy.value,
