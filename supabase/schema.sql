@@ -25,6 +25,7 @@ create table if not exists public.trades (
     entry_price   numeric(20,8) not null default 0,
     exit_price    numeric(20,8),
     amount        numeric(20,8) not null default 0,   -- base-currency qty
+    contracts     numeric(20,8),                        -- integer contract count (Delta futures/options)
     cost          numeric(20,8) not null default 0,    -- entry_price * amount (quote value)
 
     -- Classification

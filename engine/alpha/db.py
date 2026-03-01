@@ -159,6 +159,57 @@ class Database:
         result = await loop.run_in_executor(None, _query)
         return result.data[0] if result.data else None
 
+    async def close_duplicate_open_trades(
+        self, pair: str, exchange: str, keep_id: int | None = None,
+    ) -> int:
+        """Close any remaining open trades for a pair+exchange after the primary close.
+
+        This prevents phantom/duplicate open records from accumulating when
+        multiple DB rows exist for the same position (e.g. from backfill SQL
+        or failed-then-retried inserts).
+
+        Returns the number of duplicate rows closed.
+        """
+        if not self.is_connected:
+            return 0
+        loop = asyncio.get_running_loop()
+
+        def _query() -> Any:
+            q = (
+                self._client.table(self.TABLE_TRADES)  # type: ignore[union-attr]
+                .select("id")
+                .eq("pair", pair)
+                .eq("exchange", exchange)
+                .eq("status", "open")
+            )
+            if keep_id is not None:
+                q = q.neq("id", keep_id)
+            return q.execute()
+
+        try:
+            result = await loop.run_in_executor(None, _query)
+            dupes = result.data or []
+            closed = 0
+            for row in dupes:
+                dupe_id = row.get("id")
+                if dupe_id:
+                    await self.update_trade(dupe_id, {
+                        "status": "closed",
+                        "closed_at": iso_now(),
+                        "exit_reason": "DUPLICATE",
+                        "reason": "duplicate_open_record",
+                    })
+                    closed += 1
+            if closed:
+                logger.warning(
+                    "Closed %d duplicate open trade(s) for %s/%s",
+                    closed, pair, exchange,
+                )
+            return closed
+        except Exception as e:
+            logger.error("Failed to close duplicate open trades for %s/%s: %s", pair, exchange, e)
+            return 0
+
     async def cancel_trade(self, order_id: str, reason: str = "cancelled") -> None:
         """Mark a trade as cancelled."""
         if not self.is_connected:

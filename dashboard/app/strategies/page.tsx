@@ -21,6 +21,7 @@ import type { Strategy, Trade, SetupConfig, SignalState } from '@/lib/types';
 const STRATEGIES: Strategy[] = ['scalp', 'options_scalp'];
 
 const SETUP_TYPES = [
+  'ANTIC',
   'RSI_OVERRIDE',
   'BB_SQUEEZE',
   'LIQ_SWEEP',

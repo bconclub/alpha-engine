@@ -1728,7 +1728,7 @@ class AlphaBot:
             except Exception as e:
                 logger.warning("Ghost trade %s: could not fetch exit price: %s", pair_str, e)
 
-            pnl, pnl_pct = calc_pnl(
+            result = calc_pnl(
                 entry_price, exit_price, amount,
                 position_type, leverage,
                 exchange_id, pair_str,
@@ -1738,8 +1738,11 @@ class AlphaBot:
                 "status": "closed",
                 "exit_price": exit_price,
                 "closed_at": iso_now(),
-                "pnl": round(pnl, 8),
-                "pnl_pct": round(pnl_pct, 4),
+                "pnl": round(result.net_pnl, 8),
+                "pnl_pct": round(result.pnl_pct, 4),
+                "gross_pnl": round(result.gross_pnl, 8),
+                "entry_fee": round(result.entry_fee, 8),
+                "exit_fee": round(result.exit_fee, 8),
                 "reason": "ghost_manual_close",
                 "exit_reason": "MANUAL",
                 "position_state": None,
@@ -1747,7 +1750,7 @@ class AlphaBot:
 
             logger.info(
                 "GHOST TRADE CLOSED: %s (trade_id=%s) exit=$%.4f pnl=$%.4f (%.2f%%)",
-                pair_str, trade_id, exit_price, pnl, pnl_pct,
+                pair_str, trade_id, exit_price, result.net_pnl, result.pnl_pct,
             )
             return f"Ghost trade closed: {pair_str} exit=${exit_price:.4f} P&L={pnl_pct:+.2f}%"
 
@@ -2583,6 +2586,78 @@ class AlphaBot:
                 self.risk_manager.record_close(pair, 0.0)
         except Exception:
             logger.exception("Ghost sweep failed")
+
+        # ── DB ORPHAN SWEEP ────────────────────────────────────────────
+        # Close DB records stuck as 'open' when no strategy and no exchange
+        # position exists. This catches phantom rows from backfill SQL,
+        # duplicate inserts, or failed close_trade_in_db calls.
+        try:
+            all_open = await self.db.get_all_open_trades()
+            for trade in all_open:
+                pair = trade.get("pair", "")
+                exchange = trade.get("exchange", "")
+                trade_id = trade.get("id")
+                strategy_name = trade.get("strategy", "")
+                if not pair or not trade_id:
+                    continue
+
+                # Check if any strategy is actively managing this position
+                if strategy_name == "options_scalp":
+                    opts = self._options_strategies.get(
+                        trade.get("pair", "").split("-")[0] if "-" in trade.get("pair", "") else pair
+                    )
+                    if opts and opts.in_position:
+                        continue
+                else:
+                    scalp = self._get_scalp(pair, exchange=exchange)
+                    if scalp and scalp.in_position:
+                        continue
+
+                # No strategy owns this — close it as orphan
+                logger.warning(
+                    "DB ORPHAN SWEEP: closing trade id=%s %s/%s "
+                    "(no strategy tracking, no exchange position)",
+                    trade_id, pair, exchange,
+                )
+                entry_price = float(trade.get("entry_price", 0) or 0)
+                position_type = trade.get("position_type", "spot")
+                leverage = trade.get("leverage", 1) or 1
+                amount = float(trade.get("amount", 0) or 0)
+
+                # Try to get current price for P&L calculation
+                exit_price = entry_price
+                try:
+                    ex = {"delta": self.delta, "bybit": self.bybit,
+                          "kraken": self.kraken, "binance": self.binance}.get(exchange)
+                    if ex:
+                        ticker = await ex.fetch_ticker(pair)
+                        exit_price = float(ticker.get("last", 0) or 0) or entry_price
+                except Exception:
+                    pass  # use entry_price as fallback (0 P&L)
+
+                result = calc_pnl(
+                    entry_price, exit_price, amount,
+                    position_type, leverage,
+                    exchange, pair,
+                )
+                await self.db.update_trade(trade_id, {
+                    "status": "closed",
+                    "exit_price": exit_price,
+                    "closed_at": iso_now(),
+                    "pnl": round(result.net_pnl, 8),
+                    "pnl_pct": round(result.pnl_pct, 4),
+                    "gross_pnl": round(result.gross_pnl, 8),
+                    "entry_fee": round(result.entry_fee, 8),
+                    "exit_fee": round(result.exit_fee, 8),
+                    "exit_reason": "ORPHAN_SWEEP",
+                    "position_state": None,
+                })
+                logger.info(
+                    "DB ORPHAN closed: id=%s %s exit=$%.4f pnl=$%.4f (%.2f%%)",
+                    trade_id, pair, exit_price, pnl, pnl_pct,
+                )
+        except Exception:
+            logger.exception("DB orphan sweep failed")
 
     async def _reconcile_bybit_positions(self) -> None:
         """Reconcile Bybit positions with bot memory.

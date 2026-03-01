@@ -1388,6 +1388,12 @@ class TradeExecutor:
 
             await self.db.update_trade(trade_id, close_data)
 
+            # Close any duplicate open records for same pair/exchange
+            # (prevents phantom rows from backfill SQL or retry inserts)
+            await self.db.close_duplicate_open_trades(
+                signal.pair, signal.exchange_id, keep_id=trade_id,
+            )
+
             logger.info(
                 "Trade closed in DB: id=%s %s %s entry=$%.2f exit=$%.2f "
                 "gross=$%.6f fees=$%.6f net=$%.6f (%.2f%%) [%s]",

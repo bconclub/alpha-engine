@@ -3752,7 +3752,7 @@ class ScalpStrategy(BaseStrategy):
         ONLY the first entry against the dashboard toggle — no fallthrough.
         Priority order (pick the FIRST match):
           1. RSI_OVERRIDE        (RSI < 30 or > 70)
-          2. TIER1_ANTICIPATORY  (T1: tag — anticipatory leading signals)
+          2. ANTIC               (T1: tag — anticipatory leading signals)
           3. ACCEL_ENTRY         (ACCEL: tag — WS acceleration entry)
           4. BB_SQUEEZE          (BBSQZ tag)
           5. MOMENTUM_BURST      (MOM + VOL)
@@ -3780,9 +3780,9 @@ class ScalpStrategy(BaseStrategy):
                 if rsi_val < 30 or rsi_val > 70:
                     return ["RSI_OVERRIDE"]
 
-        # Priority 2: TIER1_ANTICIPATORY — leading signals (T1: prefix)
+        # Priority 2: ANTIC — leading signals (T1: prefix)
         if "T1:" in r:
-            return ["TIER1_ANTICIPATORY"]
+            return ["ANTIC"]
 
         # Priority 3: ACCEL_ENTRY — WS acceleration-based entry
         if "ACCEL:" in r:
