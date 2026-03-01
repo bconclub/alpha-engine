@@ -1248,10 +1248,6 @@ class ScalpStrategy(BaseStrategy):
             elif (pt1_side == "long" and _t1_vel_5s >= self.T1_ACCEL_CONFIRM_VEL) or \
                  (pt1_side == "short" and _t1_vel_5s <= -self.T1_ACCEL_CONFIRM_VEL):
                 # ── T1_ACCEL_CONFIRM: tick velocity confirms direction ──
-                self.logger.info(
-                    "[%s] T1_ACCEL_CONFIRM — velocity=%+.3f%%/5s confirms %s after %.0fs",
-                    self.pair, _t1_vel_5s, pt1_side, pt1_age,
-                )
                 self._entry_path = "tier1"
                 self._tier1_count = pt1["tier1_count"]
                 self._tier2_count = pt1["tier2_count"]
@@ -1260,14 +1256,14 @@ class ScalpStrategy(BaseStrategy):
                 )
                 entry = (pt1_side, pt1["reason"] + f" [ACCEL vel={_t1_vel_5s:+.3f}%] | LEV:{self._trade_leverage}x", True, pt1["strength"])
                 self._pending_tier1 = None
+                self.logger.info(
+                    "[%s] T1_ACCEL_CONFIRM → EXECUTING — velocity=%+.3f%%/5s confirms %s after %.0fs, strength=%d/4",
+                    self.pair, _t1_vel_5s, pt1_side, pt1_age, pt1["strength"],
+                )
 
             elif (pt1_side == "long" and momentum_60s >= self.CONFIRM_MOM_PCT) or \
                  (pt1_side == "short" and momentum_60s <= -self.CONFIRM_MOM_PCT):
                 # ── T1_CONFIRMED: candle momentum in pending direction ──
-                self.logger.info(
-                    "[%s] T1_CONFIRMED — mom=%+.3f%% confirms %s after %.0fs",
-                    self.pair, momentum_60s, pt1_side, pt1_age,
-                )
                 self._entry_path = "tier1"
                 self._tier1_count = pt1["tier1_count"]
                 self._tier2_count = pt1["tier2_count"]
@@ -1276,6 +1272,10 @@ class ScalpStrategy(BaseStrategy):
                 )
                 entry = (pt1_side, pt1["reason"] + f" | LEV:{self._trade_leverage}x", True, pt1["strength"])
                 self._pending_tier1 = None
+                self.logger.info(
+                    "[%s] T1_CONFIRMED → EXECUTING — mom=%+.3f%% confirms %s after %.0fs, strength=%d/4",
+                    self.pair, momentum_60s, pt1_side, pt1_age, pt1["strength"],
+                )
 
             elif (pt1_side == "long" and momentum_60s <= -self.CONFIRM_COUNTER_PCT) or \
                  (pt1_side == "short" and momentum_60s >= self.CONFIRM_COUNTER_PCT):
@@ -1495,78 +1495,81 @@ class ScalpStrategy(BaseStrategy):
                 **self._last_signal_breakdown,
             }
 
-            # ── DECELERATION FILTER: is the move accelerating or exhausting? ──
-            # Compare recent 10s momentum vs prior 10s (10-20s ago).
-            # If the move is decelerating → the 60s momentum is stale, skip.
-            # If accelerating → the move is gaining speed, safe to enter.
-            self._last_momentum_10s = 0.0
-            self._last_momentum_prior_10s = 0.0
-            mom_recent = 0.0
-            mom_prior = 0.0
-            accel_check_valid = False
+            # ── DECELERATION FILTER (MOMENTUM PATH ONLY) ──────────────────
+            # T1 and ACCEL entries have their own confirmation — they enter
+            # BEFORE the move, so decel/sparse checks are wrong for them.
+            if self._entry_path != "tier1":
+                # Compare recent 10s momentum vs prior 10s (10-20s ago).
+                # If the move is decelerating → the 60s momentum is stale, skip.
+                # If accelerating → the move is gaining speed, safe to enter.
+                self._last_momentum_10s = 0.0
+                self._last_momentum_prior_10s = 0.0
+                mom_recent = 0.0
+                mom_prior = 0.0
+                accel_check_valid = False
 
-            prices = self._price_history
-            recent_prices = [(ts, px) for ts, px in prices if now - self.DECEL_RECENT_WINDOW_S <= ts <= now]
-            prior_prices = [(ts, px) for ts, px in prices if now - (self.DECEL_RECENT_WINDOW_S + self.DECEL_PRIOR_WINDOW_S) <= ts < now - self.DECEL_RECENT_WINDOW_S]
+                prices = self._price_history
+                recent_prices = [(ts, px) for ts, px in prices if now - self.DECEL_RECENT_WINDOW_S <= ts <= now]
+                prior_prices = [(ts, px) for ts, px in prices if now - (self.DECEL_RECENT_WINDOW_S + self.DECEL_PRIOR_WINDOW_S) <= ts < now - self.DECEL_RECENT_WINDOW_S]
 
-            if len(recent_prices) >= 2 and len(prior_prices) >= 2:
-                mom_recent = (recent_prices[-1][1] - recent_prices[0][1]) / recent_prices[0][1] * 100
-                mom_prior = (prior_prices[-1][1] - prior_prices[0][1]) / prior_prices[0][1] * 100
-                accel_check_valid = True
-                self._last_momentum_10s = mom_recent
-                self._last_momentum_prior_10s = mom_prior
+                if len(recent_prices) >= 2 and len(prior_prices) >= 2:
+                    mom_recent = (recent_prices[-1][1] - recent_prices[0][1]) / recent_prices[0][1] * 100
+                    mom_prior = (prior_prices[-1][1] - prior_prices[0][1]) / prior_prices[0][1] * 100
+                    accel_check_valid = True
+                    self._last_momentum_10s = mom_recent
+                    self._last_momentum_prior_10s = mom_prior
 
-            # Sparse tick guard: prior_10s == 0.000% means no price change in 10-20s window.
-            # On Delta (~12 ticks/min), this is common. Without prior data we can't
-            # verify acceleration — treat as unreliable and skip.
-            if accel_check_valid and mom_prior == 0.0 and mom_recent != 0.0:
-                self._skip_reason = f"SPARSE_TICK_SKIP (10s={mom_recent:+.3f}% prior_10s=0.000%)"
-                self.logger.info(
-                    "[%s] SPARSE_TICK — 10s=%+.3f%% but prior_10s=0.000%% — cannot verify acceleration, skipping %s",
-                    self.pair, mom_recent, side,
-                )
-                self.last_signal_state = {
-                    "side": side, "reason": reason,
-                    "strength": signal_strength, "trend_15m": trend_15m,
-                    "rsi": rsi_now, "momentum_60s": momentum_60s, "momentum_30s": momentum_30s,
-                    "current_price": current_price, "timestamp": time.monotonic(),
-                    "skip_reason": self._skip_reason,
-                    **self._last_signal_breakdown,
-                }
-                return signals
+                # Sparse tick guard: prior_10s == 0.000% means no price change in 10-20s window.
+                # On Delta (~12 ticks/min), this is common. Without prior data we can't
+                # verify acceleration — treat as unreliable and skip.
+                if accel_check_valid and mom_prior == 0.0 and mom_recent != 0.0:
+                    self._skip_reason = f"SPARSE_TICK_SKIP (10s={mom_recent:+.3f}% prior_10s=0.000%)"
+                    self.logger.info(
+                        "[%s] SPARSE_TICK — 10s=%+.3f%% but prior_10s=0.000%% — cannot verify acceleration, skipping %s",
+                        self.pair, mom_recent, side,
+                    )
+                    self.last_signal_state = {
+                        "side": side, "reason": reason,
+                        "strength": signal_strength, "trend_15m": trend_15m,
+                        "rsi": rsi_now, "momentum_60s": momentum_60s, "momentum_30s": momentum_30s,
+                        "current_price": current_price, "timestamp": time.monotonic(),
+                        "skip_reason": self._skip_reason,
+                        **self._last_signal_breakdown,
+                    }
+                    return signals
 
-            # Floor check: need SOME momentum in entry direction (absolute minimum)
-            floor_fail = False
-            if side == "long" and mom_recent < self.DECEL_MOM_FLOOR_PCT:
-                floor_fail = True
-            elif side == "short" and mom_recent > -self.DECEL_MOM_FLOOR_PCT:
-                floor_fail = True
+                # Floor check: need SOME momentum in entry direction (absolute minimum)
+                floor_fail = False
+                if side == "long" and mom_recent < self.DECEL_MOM_FLOOR_PCT:
+                    floor_fail = True
+                elif side == "short" and mom_recent > -self.DECEL_MOM_FLOOR_PCT:
+                    floor_fail = True
 
-            # Deceleration check: recent must be stronger than prior in entry direction
-            decelerating = False
-            if accel_check_valid and not floor_fail:
-                if side == "long":
-                    decelerating = mom_recent <= mom_prior  # upward move slowing
-                else:
-                    decelerating = mom_recent >= mom_prior  # downward move slowing
+                # Deceleration check: recent must be stronger than prior in entry direction
+                decelerating = False
+                if accel_check_valid and not floor_fail:
+                    if side == "long":
+                        decelerating = mom_recent <= mom_prior  # upward move slowing
+                    else:
+                        decelerating = mom_recent >= mom_prior  # downward move slowing
 
-            if floor_fail or decelerating:
-                tag = "DECEL_SKIP" if decelerating else "MOM_FLOOR"
-                self._skip_reason = f"{tag} (10s={mom_recent:+.3f}% prior_10s={mom_prior:+.3f}%)"
-                self.logger.info(
-                    "[%s] %s — 60s mom=%+.3f%% but 10s=%+.3f%% prior_10s=%+.3f%% — move %s, skipping %s",
-                    self.pair, tag, momentum_60s, mom_recent, mom_prior,
-                    "decelerating" if decelerating else "below floor", side,
-                )
-                self.last_signal_state = {
-                    "side": side, "reason": reason,
-                    "strength": signal_strength, "trend_15m": trend_15m,
-                    "rsi": rsi_now, "momentum_60s": momentum_60s, "momentum_30s": momentum_30s,
-                    "current_price": current_price, "timestamp": time.monotonic(),
-                    "skip_reason": self._skip_reason,
-                    **self._last_signal_breakdown,
-                }
-                return signals
+                if floor_fail or decelerating:
+                    tag = "DECEL_SKIP" if decelerating else "MOM_FLOOR"
+                    self._skip_reason = f"{tag} (10s={mom_recent:+.3f}% prior_10s={mom_prior:+.3f}%)"
+                    self.logger.info(
+                        "[%s] %s — 60s mom=%+.3f%% but 10s=%+.3f%% prior_10s=%+.3f%% — move %s, skipping %s",
+                        self.pair, tag, momentum_60s, mom_recent, mom_prior,
+                        "decelerating" if decelerating else "below floor", side,
+                    )
+                    self.last_signal_state = {
+                        "side": side, "reason": reason,
+                        "strength": signal_strength, "trend_15m": trend_15m,
+                        "rsi": rsi_now, "momentum_60s": momentum_60s, "momentum_30s": momentum_30s,
+                        "current_price": current_price, "timestamp": time.monotonic(),
+                        "skip_reason": self._skip_reason,
+                        **self._last_signal_breakdown,
+                    }
+                    return signals
 
             # ── REVERSAL COOLDOWN: block ALL directions on pair after reversal exit ──
             rev_time = ScalpStrategy._pair_last_reversal_time.get(self._base_asset, 0.0)
