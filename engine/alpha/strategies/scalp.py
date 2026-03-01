@@ -283,7 +283,7 @@ class ScalpStrategy(BaseStrategy):
 
     # ── Entry thresholds — 3-of-4 with 15m trend soft weight ────────────
     # Layer 3 (momentum safety net) — high gates, only catches big moves
-    MOMENTUM_MIN_PCT = 0.20           # 0.20%+ move in 60s (big sustained moves only)
+    MOMENTUM_MIN_PCT = 0.30           # 0.30%+ move in 60s (real momentum, not noise — was 0.20)
     MOMENTUM_30S_MIN_PCT = 0.12      # 30s window threshold (raised from 0.06)
     VOL_SPIKE_RATIO = 1.5             # need real institutional volume (was 0.6)
     RSI_EXTREME_LONG = 40             # Level 5/10 — RSI < 40 = oversold → long (was 35)
@@ -310,7 +310,7 @@ class ScalpStrategy(BaseStrategy):
     TIER1_MIN_SIGNALS = 2             # need 2+ T1 signals for anticipatory entry
 
     # ── TIER 1 CONFIRMATION WINDOW ─────────────────────────────────
-    CONFIRM_MOM_PCT = 0.06            # momentum threshold for tier1 confirmation (was 0.10)
+    CONFIRM_MOM_PCT = 0.15            # momentum threshold for tier1 confirmation (was 0.06 → 0.15)
     CONFIRM_COUNTER_PCT = 0.10        # counter-momentum → immediate rejection (was 0.15)
     T1_ACCEL_CONFIRM_VEL = 0.03      # velocity_5s for acceleration-based T1 confirm
 
@@ -325,7 +325,7 @@ class ScalpStrategy(BaseStrategy):
     # ── MOM-PATH DECELERATION FILTER ─────────────────────────────
     DECEL_RECENT_WINDOW_S = 10        # recent 10s window for acceleration check
     DECEL_PRIOR_WINDOW_S = 10         # prior 10s window (10-20s ago)
-    DECEL_MOM_FLOOR_PCT = 0.05        # minimum 10s momentum in entry direction (absolute floor)
+    DECEL_MOM_FLOOR_PCT = 0.08        # minimum 10s momentum in entry direction (was 0.05 = 1 tick noise)
 
     # ── SIDEWAYS / LOW-VOL RANGE GATE ────────────────────────────
     SIDEWAYS_MOM_GATE = 0.20           # minimum |momentum| during SIDEWAYS regime
@@ -351,7 +351,7 @@ class ScalpStrategy(BaseStrategy):
     ACCEL_MIN_TICKS_SLOW = 1          # Delta (~12 ticks/min, ~1 per 5s)
     ACCEL_VELOCITY_WINDOW_FAST = 5.0  # seconds — standard window
     ACCEL_VELOCITY_WINDOW_SLOW = 10.0 # seconds — wider to capture 2+ ticks
-    ACCEL_MIN_VELOCITY_SLOW = 0.06    # 0.06% over 10s (raised from 0.03%)
+    ACCEL_MIN_VELOCITY_SLOW = 0.10    # 0.10% over 10s (was 0.06 — too sensitive to Delta ticks)
 
     # ── Binance SPOT overrides — wider SL/TP/trail for no-leverage spot ──
     SPOT_SL_PCT = 2.0                 # 2% SL for spot (no leverage, needs room)
@@ -369,9 +369,9 @@ class ScalpStrategy(BaseStrategy):
     SPOT_BREAKEVEN_MIN_PEAK_PCT = 0.30   # peak >= 0.30% to activate
     SPOT_BREAKEVEN_EXIT_BELOW_PCT = 0.05 # exit if current <= 0.05%
 
-    # ── Adaptive widening DISABLED — weak entries after 30min idle were losers
-    IDLE_WIDEN_SECONDS = 30 * 60      # (unused — widening disabled)
-    IDLE_WIDEN_FACTOR = 1.00          # 1.0 = no widening (was 0.80)
+    # ── Adaptive widening — 60min idle, 10% loosening (was disabled, was 30min/20%)
+    IDLE_WIDEN_SECONDS = 60 * 60      # 60 min idle before thresholds loosen (was 30 min)
+    IDLE_WIDEN_FACTOR = 0.90          # 10% loosening (was 0.80=20%, then disabled at 1.0)
 
     # ── Fee awareness (Delta India incl 18% GST) ──────────────────────
     # NOTE: MIN_EXPECTED_MOVE_PCT fee filter REMOVED — it was blocking 385+
@@ -395,12 +395,13 @@ class ScalpStrategy(BaseStrategy):
     MAX_COLLATERAL_PCT = 80.0         # never use more than 80% of balance on 1 position
     MAX_TOTAL_EXPOSURE_PCT = 90.0     # max 90% total collateral across all positions
     SECOND_POS_ALLOC_FACTOR = 0.60    # 2nd position gets 60% of normal allocation
-    # Minimum signal strength per pair (3/4 — filter out weak coin-flip entries)
+    # Minimum signal strength per pair (4/4 — no more coin-flip 3/4 entries)
+    # RSI override (RSI <30 or >70) is the ONLY exception at 3/4.
     PAIR_MIN_STRENGTH: dict[str, int] = {
-        "XRP": 3,    # was 2/4, tightened: 2/4 entries were losers
-        "ETH": 3,    # was 2/4, tightened: multiple -8-9% losses on weak signals
-        "BTC": 3,    # was 2/4, tightened: consistent with all pairs
-        "SOL": 3,    # require 3/4 signals, no weak entries
+        "XRP": 4,    # was 3/4 — too many marginal entries dying at 0.10% peak
+        "ETH": 4,    # was 3/4 — need full confirmation
+        "BTC": 4,    # was 3/4 — consistent with all pairs
+        "SOL": 4,    # was 3/4 — no weak entries
     }
     # Adaptive: track last N trades per pair for win-rate-based adjustment
     PERF_WINDOW = 5                     # look at last 5 trades per pair
@@ -411,7 +412,7 @@ class ScalpStrategy(BaseStrategy):
 
     # ── Warmup — accept weaker signals for first 5 min after startup ────
     WARMUP_SECONDS = 5 * 60            # 5 min warmup: still requires 3/4 (no free passes)
-    WARMUP_MIN_STRENGTH = 3            # during warmup, same 3/4 gate (was 2, let junk in)
+    WARMUP_MIN_STRENGTH = 4            # during warmup, same 4/4 gate (was 3, was 2)
 
     # ── Cooldown / loss protection (PER-PAIR: BTC streak doesn't affect XRP) ─
     SL_COOLDOWN_SECONDS = 60             # 60s pause after SL hit (per pair, was 120s)
@@ -1214,7 +1215,7 @@ class ScalpStrategy(BaseStrategy):
 
 
 
-        # ── Adaptive widening: if idle 30+ min, loosen thresholds 20% ─
+        # ── Adaptive widening: if idle 60+ min, loosen thresholds 10% ─
         idle_seconds = now - self._last_position_exit
         is_widened = idle_seconds >= self.IDLE_WIDEN_SECONDS
 
@@ -1672,13 +1673,15 @@ class ScalpStrategy(BaseStrategy):
                         }
                         return signals
 
-            # ── PER-PAIR STRENGTH GATE: weak pairs need stronger signals ──
-            # During warmup (first 5 min), accept 2/4 for all pairs incl BTC
+            # ── PER-PAIR STRENGTH GATE: 4/4 required, RSI override = 3/4 ──
             in_warmup = (time.monotonic() - self._strategy_start_time) < self.WARMUP_SECONDS
-            if in_warmup:
+            is_rsi_override = "RSI-OVERRIDE" in reason
+            if is_rsi_override:
+                min_strength = 3  # RSI extreme is the ONLY exception to 4/4 gate
+            elif in_warmup:
                 min_strength = self.WARMUP_MIN_STRENGTH
             else:
-                min_strength = self.PAIR_MIN_STRENGTH.get(self._base_asset, 2)
+                min_strength = self.PAIR_MIN_STRENGTH.get(self._base_asset, 4)
             if signal_strength < min_strength:
                 self._skip_reason = f"STRENGTH_GATE ({signal_strength}/4 < {min_strength}/4)"
                 if self._tick_count % 12 == 0:
@@ -1830,11 +1833,11 @@ class ScalpStrategy(BaseStrategy):
     def _effective_thresholds(self, widened: bool = False) -> tuple[float, float, float, float]:
         """Return (momentum, vol_ratio, rsi_long, rsi_short) with optional widening.
 
-        When widened=True (idle 30+ min), thresholds loosen by 20%:
-        - Momentum: 0.08% → 0.064%
-        - Volume: 0.8x → 0.64x
-        - RSI long: 40 → 44 (wider range triggers)
-        - RSI short: 60 → 56 (wider range triggers)
+        When widened=True (idle 60+ min), thresholds loosen by 10%:
+        - Momentum: 0.30% → 0.27%
+        - Volume: 1.5x → 1.35x
+        - RSI long: 40 → 41 (wider range triggers)
+        - RSI short: 60 → 59 (wider range triggers)
         """
         f = self.IDLE_WIDEN_FACTOR if widened else 1.0
         mom = self.MOMENTUM_MIN_PCT * f
@@ -1919,11 +1922,11 @@ class ScalpStrategy(BaseStrategy):
         else:
             mom_strength = "WEAK"
 
-        # ── SIGNAL GATE: always require 3/4 signals ─────────────────────
-        # Level 5/10: base 3/4 signals required. Trend-aligned = 2/4,
-        # counter-trend = 4/4 (set below via regime + 15m gates).
-        required_long = 3
-        required_short = 3
+        # ── SIGNAL GATE: require 4/4 signals (quality over quantity) ──────
+        # Base 4/4 for ALL entries. Trend-aligned can reduce to 3/4.
+        # RSI override (RSI <30/>70) is the ONLY exception at 3/4.
+        required_long = 4
+        required_short = 4
 
         # Weak momentum (0.08-0.12%) = need more confirmation → 4/4
         if mom_strength == "WEAK":
@@ -1954,9 +1957,9 @@ class ScalpStrategy(BaseStrategy):
         # When 15m trend aligns with signal direction, 2/4 signals are enough.
         # Counter-trend stays at 4/4 (set above), neutral stays at 3/4.
         if trend_15m == "bullish":
-            required_long = min(required_long, 2)   # longing with bullish 15m = 2/4
+            required_long = min(required_long, 3)   # longing with bullish 15m = 3/4 (was 2/4)
         elif trend_15m == "bearish":
-            required_short = min(required_short, 2)  # shorting with bearish 15m = 2/4
+            required_short = min(required_short, 3)  # shorting with bearish 15m = 3/4 (was 2/4)
 
         # WEAK momentum in SIDEWAYS already requires 4/4 signals (line above).
         # No hard skip — 4/4 is sufficient protection. Let strong setups through.
