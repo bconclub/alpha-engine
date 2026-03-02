@@ -755,3 +755,19 @@ class AlertManager:
                     )
             except Exception:
                 logger.exception("Telegram retry also failed — message lost")
+
+    async def send_photo(self, photo_url: str, caption: str = "") -> None:
+        """Send a photo/image to Telegram."""
+        if not self._chat_id or not self._bot:
+            await self.connect()
+        if not self._bot:
+            return
+        try:
+            await self._bot.send_photo(
+                chat_id=self._chat_id,
+                photo=photo_url,
+                caption=caption,
+                parse_mode=ParseMode.HTML,
+            )
+        except Exception as e:
+            logger.warning("Telegram send_photo failed: %s", e)
