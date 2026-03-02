@@ -83,6 +83,14 @@ class Database:
         """Mark a trade as closed with exit price and realised P&L."""
         if not self.is_connected:
             return
+        # ── SAFETY: reject $0 exit price — always a bug ──
+        if exit_price <= 0:
+            logger.error(
+                "close_trade REFUSED: exit_price=$%.4f for order_id=%s reason=%s. "
+                "Caller must provide a valid exit price.",
+                exit_price, order_id, reason,
+            )
+            return
         loop = asyncio.get_running_loop()
         data: dict[str, Any] = {
             "exit_price": exit_price,
@@ -111,6 +119,16 @@ class Database:
         if not self.is_connected:
             logger.warning("update_trade: DB not connected, skipping id=%s data=%s", trade_id, data)
             return
+        # ── SAFETY: reject closing with $0 exit price ──
+        if data.get("status") == "closed" and "exit_price" in data:
+            ep = data.get("exit_price", 0)
+            if ep is not None and float(ep) <= 0:
+                logger.error(
+                    "update_trade REFUSED: closing trade id=%s with exit_price=$%.4f. "
+                    "Caller must provide a valid exit price. data=%s",
+                    trade_id, float(ep), data,
+                )
+                return
         loop = asyncio.get_running_loop()
 
         def _do_update() -> Any:

@@ -2967,6 +2967,11 @@ class AlphaBot:
                             except Exception:
                                 pass
 
+                        # ── SAFETY: never close with $0 exit ──
+                        if phantom_exit <= 0:
+                            logger.error("Bybit phantom %s: exit=$0, skipping close", scalp.pair)
+                            continue
+
                         phantom_pnl, phantom_pnl_pct = calc_pnl(
                             entry_px, phantom_exit, phantom_amount,
                             pos_type, trade_lev, "bybit", scalp.pair,
@@ -3274,6 +3279,11 @@ class AlphaBot:
                                 phantom_exit = float(ticker.get("last", 0) or 0) or entry_px
                             except Exception:
                                 pass
+
+                        # ── SAFETY: never close with $0 exit ──
+                        if phantom_exit <= 0:
+                            logger.error("Kraken phantom %s: exit=$0, skipping close", scalp.pair)
+                            continue
 
                         phantom_pnl, phantom_pnl_pct = calc_pnl(
                             entry_px, phantom_exit, phantom_amount,
@@ -3671,6 +3681,11 @@ class AlphaBot:
                             except Exception:
                                 pass
 
+                        # ── SAFETY: never close with $0 exit ──
+                        if phantom_exit <= 0:
+                            logger.error("Delta phantom %s: exit=$0, skipping close", scalp.pair)
+                            continue
+
                         phantom_pnl, phantom_pnl_pct = calc_pnl(
                             entry_px, phantom_exit, phantom_amount,
                             pos_type, trade_lev, "delta", scalp.pair,
@@ -3798,6 +3813,11 @@ class AlphaBot:
                                 phantom_exit = float(ticker.get("last", 0) or 0) or entry_px
                             except Exception:
                                 pass
+
+                        # ── SAFETY: never close with $0 exit ──
+                        if phantom_exit <= 0:
+                            logger.error("Binance phantom %s: exit=$0, skipping close", scalp.pair)
+                            continue
 
                         phantom_pnl, phantom_pnl_pct = calc_pnl(
                             entry_px, phantom_exit, phantom_amount,

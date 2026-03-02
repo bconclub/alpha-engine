@@ -4107,6 +4107,14 @@ class ScalpStrategy(BaseStrategy):
         peak_pnl must be pre-computed by the caller BEFORE _record_scalp_result
         resets entry_price/highest_since_entry/lowest_since_entry.
         """
+        # ── SAFETY: never create exit signal with price=0 ──
+        if price <= 0:
+            self.logger.error(
+                "[%s] EXIT SIGNAL price=0! Using entry_price $%.4f as fallback. reason=%s",
+                self.pair, self.entry_price, reason,
+            )
+            price = self.entry_price if self.entry_price > 0 else 1.0  # absolute last resort
+
         amount = self.entry_amount
         if amount <= 0:
             exchange_capital = self.risk_manager.get_exchange_capital(self._exchange_id)

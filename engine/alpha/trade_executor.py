@@ -94,6 +94,11 @@ def calc_pnl(
     Fee rates are per-side (e.g. 0.0005 = 0.05%).  Pass 0.0 to skip fees.
     """
     if entry_price <= 0 or exit_price <= 0:
+        logger.warning(
+            "calc_pnl: INVALID PRICE — entry=$%.4f exit=$%.4f pair=%s. "
+            "Returning zeros. Caller MUST validate prices before calling.",
+            entry_price, exit_price, pair,
+        )
         return PnLResult(0.0, 0.0, 0.0, 0.0, 0.0)
 
     # Options P&L: entry/exit prices are premiums, 1 contract = 1 unit
@@ -392,6 +397,17 @@ class TradeExecutor:
                     exit_price = await self._fetch_actual_exit_price(
                         signal, position_type, entry_price,
                     )
+
+                    # ── SAFETY: never close with exit_price=0 ──
+                    if exit_price <= 0:
+                        logger.error(
+                            "[%s] POSITION_GONE exit_price=0 — using entry_price $%.4f",
+                            signal.pair, entry_price,
+                        )
+                        exit_price = entry_price  # 0 P&L is better than $0 exit
+                    if exit_price <= 0:
+                        logger.error("[%s] POSITION_GONE — both exit AND entry are $0, refusing to close", signal.pair)
+                        return
 
                     # Calculate real P&L
                     pnl, pnl_pct = calc_pnl(
@@ -1307,6 +1323,27 @@ class TradeExecutor:
         try:
             fill_price = order.get("average") or order.get("price") or signal.price
             filled_amount = order.get("filled") or signal.amount
+
+            # ── SAFETY: never close with exit_price=0 ──
+            if not fill_price or float(fill_price) <= 0:
+                logger.error(
+                    "[%s] EXIT PRICE IS ZERO — order=%s signal.price=%s. "
+                    "Fetching ticker as emergency fallback.",
+                    signal.pair, order.get("id"), signal.price,
+                )
+                try:
+                    exchange = self._get_exchange(signal)
+                    ticker = await exchange.fetch_ticker(signal.pair)
+                    fill_price = float(ticker.get("last", 0) or 0)
+                except Exception as e:
+                    logger.error("[%s] Emergency ticker fetch failed: %s", signal.pair, e)
+                if not fill_price or float(fill_price) <= 0:
+                    logger.error(
+                        "[%s] ALL EXIT PRICE FALLBACKS FAILED — refusing to close with $0",
+                        signal.pair,
+                    )
+                    return None
+            fill_price = float(fill_price)
 
             # Find the open trade for this pair + exchange
             open_trade = await self.db.get_open_trade(
