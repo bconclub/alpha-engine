@@ -99,6 +99,10 @@ class AlphaBot:
         # Track last analysis cycle time for diagnostics
         self._last_cycle_time: float = time.monotonic()
 
+        # Orphan grace: first-seen time for untracked positions (key: "exchange:pair")
+        self._position_first_seen: dict[str, float] = {}
+        self.ORPHAN_GRACE_S = 120  # seconds before orphan close fires
+
     @property
     def all_pairs(self) -> list[str]:
         """All tracked pairs across all exchanges."""
@@ -2602,18 +2606,32 @@ class AlphaBot:
                     continue
 
                 # Check if any strategy is actively managing this position
+                fs_key = f"{exchange}:{pair}"
                 if strategy_name == "options_scalp":
                     opts = self._options_strategies.get(
                         trade.get("pair", "").split("-")[0] if "-" in trade.get("pair", "") else pair
                     )
                     if opts and opts.in_position:
+                        self._position_first_seen.pop(fs_key, None)
                         continue
                 else:
                     scalp = self._get_scalp(pair, exchange=exchange)
                     if scalp and scalp.in_position:
+                        self._position_first_seen.pop(fs_key, None)
                         continue
 
-                # No strategy owns this — close it as orphan
+                # No strategy owns this — check grace period before closing
+                if fs_key not in self._position_first_seen:
+                    self._position_first_seen[fs_key] = time.monotonic()
+                age = time.monotonic() - self._position_first_seen[fs_key]
+                if age < self.ORPHAN_GRACE_S:
+                    logger.info(
+                        "ORPHAN_GRACE: skipping DB trade id=%s %s/%s (age %.0fs < %ds)",
+                        trade_id, pair, exchange, age, self.ORPHAN_GRACE_S,
+                    )
+                    continue
+                self._position_first_seen.pop(fs_key, None)
+
                 logger.warning(
                     "DB ORPHAN SWEEP: closing trade id=%s %s/%s "
                     "(no strategy tracking, no exchange position)",
@@ -2703,6 +2721,7 @@ class AlphaBot:
             scalp = self._get_scalp(pair, exchange="bybit")
 
             if epos and scalp and scalp.in_position:
+                self._position_first_seen.pop(f"bybit:{pair}", None)
                 continue  # ALL GOOD
 
             if epos and (not scalp or not scalp.in_position):
@@ -2779,6 +2798,19 @@ class AlphaBot:
                         restored = True
 
                 if not restored:
+                    # ── Grace period: don't close newly-detected positions ──
+                    fs_key = f"bybit:{pair}"
+                    if fs_key not in self._position_first_seen:
+                        self._position_first_seen[fs_key] = time.monotonic()
+                    age = time.monotonic() - self._position_first_seen[fs_key]
+                    if age < self.ORPHAN_GRACE_S:
+                        logger.info(
+                            "ORPHAN_GRACE: skipping %s (age %.0fs < %ds)",
+                            pair, age, self.ORPHAN_GRACE_S,
+                        )
+                        continue
+                    self._position_first_seen.pop(fs_key, None)
+
                     # ── CASE 1: True ORPHAN — close it ─────────────────
                     logger.warning(
                         "ORPHAN DETECTED: %s %s %.6f coins @ $%.2f — "
@@ -2872,6 +2904,13 @@ class AlphaBot:
                     "but Bybit has NO position! Clearing.",
                     scalp.pair, scalp.position_side, scalp.entry_price,
                 )
+                # Cancel any stale open orders for this pair (unfilled limit entries)
+                try:
+                    await self.bybit.cancel_all_orders(scalp.pair)
+                    logger.info("PHANTOM: cancelled all open orders for %s on Bybit", scalp.pair)
+                except Exception as e:
+                    logger.debug("Cancel orders for %s on Bybit: %s", scalp.pair, e)
+
                 try:
                     await self.alerts.send_orphan_alert(
                         pair=scalp.pair,
@@ -2903,6 +2942,7 @@ class AlphaBot:
                         pos_type = open_trade.get("position_type", "long")
                         phantom_amount = open_trade.get("amount", 0)
                         phantom_exit = entry_px
+                        phantom_reason = "phantom_cleared"
 
                         try:
                             recent_trades = await self.bybit.fetch_my_trades(scalp.pair, limit=20)
@@ -2932,12 +2972,14 @@ class AlphaBot:
                             pos_type, trade_lev, "bybit", scalp.pair,
                         )
                         phantom_pnl_for_rm = phantom_pnl
-                        phantom_reason = "phantom_cleared"
-                        phantom_exit_reason = "PHANTOM"
+                        _bybit_exit_map = {
+                            "CLOSED_BY_EXCHANGE": "CLOSED_BY_EXCHANGE",
+                        }
+                        phantom_exit_reason = _bybit_exit_map.get(phantom_reason, "PHANTOM")
                         if order_id:
                             await self.db.close_trade(
                                 order_id, phantom_exit, phantom_pnl, phantom_pnl_pct,
-                                reason=phantom_reason,
+                                reason="phantom_cleared",
                                 exit_reason=phantom_exit_reason,
                             )
                         logger.info(
@@ -2990,6 +3032,7 @@ class AlphaBot:
             scalp = self._get_scalp(pair, exchange="kraken")
 
             if epos and scalp and scalp.in_position:
+                self._position_first_seen.pop(f"kraken:{pair}", None)
                 continue  # ALL GOOD
 
             if epos and (not scalp or not scalp.in_position):
@@ -3066,6 +3109,19 @@ class AlphaBot:
                         restored = True
 
                 if not restored:
+                    # ── Grace period: don't close newly-detected positions ──
+                    fs_key = f"kraken:{pair}"
+                    if fs_key not in self._position_first_seen:
+                        self._position_first_seen[fs_key] = time.monotonic()
+                    age = time.monotonic() - self._position_first_seen[fs_key]
+                    if age < self.ORPHAN_GRACE_S:
+                        logger.info(
+                            "ORPHAN_GRACE: skipping %s (age %.0fs < %ds)",
+                            pair, age, self.ORPHAN_GRACE_S,
+                        )
+                        continue
+                    self._position_first_seen.pop(fs_key, None)
+
                     # ── CASE 1: True ORPHAN — close it ─────────────────
                     logger.warning(
                         "ORPHAN DETECTED: %s %s %.6f coins @ $%.2f — "
@@ -3159,6 +3215,13 @@ class AlphaBot:
                     "but Kraken has NO position! Clearing.",
                     scalp.pair, scalp.position_side, scalp.entry_price,
                 )
+                # Cancel any stale open orders for this pair (unfilled limit entries)
+                try:
+                    await self.kraken.cancel_all_orders(scalp.pair)
+                    logger.info("PHANTOM: cancelled all open orders for %s on Kraken", scalp.pair)
+                except Exception as e:
+                    logger.debug("Cancel orders for %s on Kraken: %s", scalp.pair, e)
+
                 try:
                     await self.alerts.send_orphan_alert(
                         pair=scalp.pair,
@@ -3190,7 +3253,6 @@ class AlphaBot:
                         pos_type = open_trade.get("position_type", "long")
                         phantom_amount = open_trade.get("amount", 0)
                         phantom_exit = entry_px
-
                         try:
                             recent_trades = await self.kraken.fetch_my_trades(scalp.pair, limit=20)
                             if recent_trades:
@@ -3218,13 +3280,11 @@ class AlphaBot:
                             pos_type, trade_lev, "kraken", scalp.pair,
                         )
                         phantom_pnl_for_rm = phantom_pnl
-                        phantom_reason = "phantom_cleared"
-                        phantom_exit_reason = "PHANTOM"
                         if order_id:
                             await self.db.close_trade(
                                 order_id, phantom_exit, phantom_pnl, phantom_pnl_pct,
-                                reason=phantom_reason,
-                                exit_reason=phantom_exit_reason,
+                                reason="phantom_cleared",
+                                exit_reason="PHANTOM",
                             )
                         logger.info(
                             "Phantom trade %s closed: exit=$%.2f pnl=$%.4f (%.2f%%)",
@@ -3304,6 +3364,7 @@ class AlphaBot:
 
             if epos and scalp and scalp.in_position:
                 # ALL GOOD — exchange has it, bot is managing it
+                self._position_first_seen.pop(f"delta:{pair}", None)
                 continue
 
             if epos and (not scalp or not scalp.in_position):
@@ -3416,6 +3477,19 @@ class AlphaBot:
                             )
                         continue
 
+                    # ── Grace period: don't close newly-detected positions ──
+                    fs_key = f"delta:{pair}"
+                    if fs_key not in self._position_first_seen:
+                        self._position_first_seen[fs_key] = time.monotonic()
+                    age = time.monotonic() - self._position_first_seen[fs_key]
+                    if age < self.ORPHAN_GRACE_S:
+                        logger.info(
+                            "ORPHAN_GRACE: skipping %s (age %.0fs < %ds)",
+                            pair, age, self.ORPHAN_GRACE_S,
+                        )
+                        continue
+                    self._position_first_seen.pop(fs_key, None)
+
                     # ── CASE 1: True ORPHAN — no DB trade, close it ────────
                     logger.warning(
                         "ORPHAN DETECTED: %s %s %.0f contracts @ $%.2f — "
@@ -3516,6 +3590,13 @@ class AlphaBot:
                     "but exchange has NO position! Clearing.",
                     scalp.pair, scalp.position_side, scalp.entry_price,
                 )
+                # Cancel any stale open orders for this pair (unfilled limit entries)
+                try:
+                    await self.delta.cancel_all_orders(scalp.pair)
+                    logger.info("PHANTOM: cancelled all open orders for %s on Delta", scalp.pair)
+                except Exception as e:
+                    logger.debug("Cancel orders for %s on Delta: %s", scalp.pair, e)
+
                 try:
                     await self.alerts.send_orphan_alert(
                         pair=scalp.pair,
@@ -3583,7 +3664,6 @@ class AlphaBot:
                         except Exception as e:
                             logger.debug("Could not fetch trade history for %s: %s", scalp.pair, e)
 
-                        # Fallback: current ticker if no fill found
                         if phantom_exit == entry_px:
                             try:
                                 ticker = await self.delta.fetch_ticker(scalp.pair)
@@ -3597,7 +3677,7 @@ class AlphaBot:
                         )
                         phantom_pnl_for_rm = phantom_pnl
                         trade_id = open_trade.get("id")
-                        _phantom_exit_map = {"phantom_cleared": "PHANTOM", "SL_EXCHANGE": "SL_EXCHANGE",
+                        _phantom_exit_map = {"SL_EXCHANGE": "SL_EXCHANGE",
                                              "TP_EXCHANGE": "TP_EXCHANGE", "CLOSED_BY_EXCHANGE": "CLOSED_BY_EXCHANGE"}
                         phantom_exit_reason = _phantom_exit_map.get(phantom_reason, "PHANTOM")
                         if order_id:

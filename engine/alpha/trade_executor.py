@@ -392,7 +392,6 @@ class TradeExecutor:
                     exit_price = await self._fetch_actual_exit_price(
                         signal, position_type, entry_price,
                     )
-                    exit_source = "trade_history" if exit_price != signal.price else "signal"
 
                     # Calculate real P&L
                     pnl, pnl_pct = calc_pnl(
@@ -412,9 +411,9 @@ class TradeExecutor:
                     })
                     logger.info(
                         "[%s] Trade %s marked closed (position_gone) "
-                        "entry=$%.4f exit=$%.4f pnl=$%.4f (%.2f%%) [exit_src=%s]",
+                        "entry=$%.4f exit=$%.4f pnl=$%.4f (%.2f%%)",
                         signal.pair, open_trade["id"],
-                        entry_price, exit_price, pnl, pnl_pct, exit_source,
+                        entry_price, exit_price, pnl, pnl_pct,
                     )
                     actually_closed = True
 
@@ -449,7 +448,9 @@ class TradeExecutor:
         the real fill price is in the exchange's recent trades — not signal.price
         (which is just the current market price when the bot noticed).
 
-        Returns the actual fill price if found, otherwise falls back to signal.price.
+        Falls back to ticker last price, then signal.price if all else fails.
+        NOTE: fetch_my_trades may not return the right fills for many reasons
+        (pagination, timing, API limits). Absence of fills does NOT mean ghost.
         """
         try:
             exchange = self._get_exchange(signal)
@@ -473,15 +474,18 @@ class TradeExecutor:
                         )
                         return fill_price
 
-            # No closing fills found — try ticker as second fallback
-            ticker = await exchange.fetch_ticker(signal.pair)
-            last_price = float(ticker.get("last", 0) or 0)
-            if last_price > 0:
-                logger.info(
-                    "[%s] No fill found, using ticker last=$%.4f (vs signal $%.4f)",
-                    signal.pair, last_price, signal.price,
-                )
-                return last_price
+            # No closing fills found — fall back to ticker
+            logger.info(
+                "[%s] No closing fills found — falling back to ticker price",
+                signal.pair,
+            )
+            try:
+                ticker = await exchange.fetch_ticker(signal.pair)
+                ticker_price = float(ticker.get("last", 0) or 0)
+                if ticker_price > 0:
+                    return ticker_price
+            except Exception:
+                pass
 
         except Exception as e:
             logger.warning(
@@ -1039,7 +1043,7 @@ class TradeExecutor:
                             "[%s] create_order(symbol=%s, type=limit, side=%s, amount=%s, price=%.2f, params=%s)",
                             signal.pair, signal.pair, signal.side, order_amount, signal.price, params,
                         )
-                        order = await exchange.create_order(
+                        _limit_entry_order = await exchange.create_order(
                             symbol=signal.pair,
                             type="limit",
                             side=signal.side,
@@ -1047,6 +1051,40 @@ class TradeExecutor:
                             price=signal.price,
                             params=params,
                         )
+                        # ── LIMIT ENTRY: wait for fill, cancel if unfilled ──
+                        # Limit entries (ANTIC) may never fill if price moves away.
+                        # Wait 5s, check fill status. If not filled, cancel.
+                        if not is_exit:
+                            _le_id = _limit_entry_order.get("id")
+                            logger.info(
+                                "[%s] Limit entry placed: %s %.0f @ $%.2f (order=%s) — waiting 5s for fill",
+                                signal.pair, signal.side, order_amount, signal.price, _le_id,
+                            )
+                            await asyncio.sleep(5)
+                            try:
+                                _le_updated = await exchange.fetch_order(_le_id, signal.pair)
+                                _le_status = _le_updated.get("status", "")
+                                _le_filled = float(_le_updated.get("filled", 0) or 0)
+                            except Exception:
+                                _le_status = "unknown"
+                                _le_filled = 0
+                            if _le_status == "closed" or _le_filled >= order_amount:
+                                logger.info("[%s] Limit entry FILLED (maker fee)", signal.pair)
+                                order = _le_updated
+                            else:
+                                # Not filled — cancel and abort
+                                logger.warning(
+                                    "[%s] Limit entry NOT filled after 5s (status=%s, filled=%.0f) — cancelling",
+                                    signal.pair, _le_status, _le_filled,
+                                )
+                                try:
+                                    await exchange.cancel_order(_le_id, signal.pair)
+                                    logger.info("[%s] Limit entry order %s cancelled", signal.pair, _le_id)
+                                except Exception as cancel_err:
+                                    logger.warning("[%s] Cancel limit entry failed: %s", signal.pair, cancel_err)
+                                return None
+                        else:
+                            order = _limit_entry_order
                     break
                 except (ccxt.NetworkError, ccxt.ExchangeNotAvailable) as e:
                     last_error = e

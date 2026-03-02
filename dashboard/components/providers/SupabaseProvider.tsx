@@ -319,6 +319,7 @@ function SupabaseProviderInner({ children }: { children: ReactNode }) {
         const { data, error } = await client!
           .from('trades')
           .select('*')
+          .neq('status', 'cancelled')
           .order('opened_at', { ascending: false })
           .range(from, from + PAGE - 1);
         if (error) { console.error('[Alpha] trades page error:', error.message); break; }
@@ -420,6 +421,7 @@ function SupabaseProviderInner({ children }: { children: ReactNode }) {
       .channel('alpha-dashboard')
       .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'trades' }, (payload) => {
         const t = normalizeTrade(payload.new);
+        if (t.status === 'cancelled') return; // ghost/voided trade — skip
         setTrades((prev) => [t, ...prev]);
         fetchViews();
 
@@ -441,6 +443,12 @@ function SupabaseProviderInner({ children }: { children: ReactNode }) {
       })
       .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'trades' }, (payload) => {
         const updated = normalizeTrade(payload.new);
+        if (updated.status === 'cancelled') {
+          // Ghost/voided trade — remove from state entirely
+          setTrades((prev) => prev.filter((t) => t.id !== updated.id));
+          fetchViews();
+          return;
+        }
         setTrades((prev) => prev.map((t) => (t.id === updated.id ? updated : t)));
         fetchViews();
 
