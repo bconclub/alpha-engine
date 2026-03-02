@@ -337,6 +337,9 @@ class ScalpStrategy(BaseStrategy):
     RANGE_EXTREME_PCT = 0.20           # bottom/top 20% of range = extreme zone
     RANGE_DEAD_FLAT_PCT = 0.05         # range < 0.05% of price = dead flat, skip gate
 
+    # ── TREND REVERSAL DETECTION ──────────────────────────────────
+    REVERSAL_MOM_PCT = 0.20           # counter-trend entry needs 0.20%+ momentum as reversal proof
+
     # ── 5-MINUTE COUNTER-TREND FILTER (secondary, when 15m=neutral) ─
     COUNTER_TREND_SOFT_PCT = 0.15     # require 4/4 signals when 5m opposes direction
     COUNTER_TREND_HARD_PCT = 0.40     # block entry entirely when 5m strongly opposes
@@ -1398,23 +1401,29 @@ class ScalpStrategy(BaseStrategy):
                     "favored 3/4" if range_min_strength == 3 else "standard",
                 )
 
-            # ── TRENDING REGIME GATE: block counter-trend entries ─────────
-            # In a strong trend, mean-reversion entries (shorts in uptrend,
-            # longs in downtrend) lose consistently. Hard block for weak
-            # signals, require 4/4 for strong ones.
+            # ── TRENDING REGIME GATE: counter-trend needs reversal proof ──
+            # Don't hard-block counter-trend — if the trend IS reversing, we
+            # should reverse with it.  Require strong momentum in the entry
+            # direction as proof the reversal is real (not a pullback).
             _counter_trend = (
                 (self._market_regime == "TRENDING_UP" and side == "short")
                 or (self._market_regime == "TRENDING_DOWN" and side == "long")
             )
             if _counter_trend:
-                if signal_strength < 4:
+                # Momentum must be strong in entry direction = reversal confirmation
+                _reversal_mom = (
+                    (side == "short" and momentum_60s <= -self.REVERSAL_MOM_PCT)
+                    or (side == "long" and momentum_60s >= self.REVERSAL_MOM_PCT)
+                )
+                if not _reversal_mom:
                     self._skip_reason = (
-                        f"TREND_REGIME_BLOCK ({side} vs {self._market_regime}, "
-                        f"need 4/4 got {signal_strength}/4)"
+                        f"TREND_REGIME ({side} vs {self._market_regime}, "
+                        f"mom={momentum_60s:+.3f}% need {self.REVERSAL_MOM_PCT}%+ for reversal)"
                     )
                     self.logger.info(
-                        "[%s] TREND_REGIME_BLOCK — %s blocked in %s (need 4/4, got %d/4)",
-                        self.pair, side.upper(), self._market_regime, signal_strength,
+                        "[%s] TREND_REGIME — %s needs reversal momentum (%.3f%% < %.2f%%) in %s",
+                        self.pair, side.upper(), abs(momentum_60s),
+                        self.REVERSAL_MOM_PCT, self._market_regime,
                     )
                     self.last_signal_state = {
                         "side": side, "reason": reason,
@@ -1425,6 +1434,11 @@ class ScalpStrategy(BaseStrategy):
                         **self._last_signal_breakdown,
                     }
                     return signals
+                # Reversal momentum present — let it through
+                self.logger.info(
+                    "[%s] TREND_REVERSAL — %s allowed in %s (reversal mom=%+.3f%%)",
+                    self.pair, side.upper(), self._market_regime, momentum_60s,
+                )
 
             # ── SIDEWAYS REGIME GATE: require 4/4 + minimum momentum ──
             if self._market_regime == "SIDEWAYS" and (signal_strength < 4 or abs(momentum_60s) < self.SIDEWAYS_MOM_GATE):
@@ -2019,9 +2033,9 @@ class ScalpStrategy(BaseStrategy):
         # ── REGIME-BASED SIGNAL ADJUSTMENT ─────────────────────────────
         # Counter-trend trades need extra confirmation (4/4)
         if self._market_regime == "TRENDING_UP":
-            required_short = max(required_short, 4)  # shorting against trend = 4/4
+            required_short = max(required_short, 3)  # counter-trend needs 3/4 (reversal gate handles the rest)
         elif self._market_regime == "TRENDING_DOWN":
-            required_long = max(required_long, 4)  # longing against trend = 4/4
+            required_long = max(required_long, 3)  # counter-trend needs 3/4 (reversal gate handles the rest)
 
         # (15m trend gate removed — replaced by Range Gate in main entry path)
 
