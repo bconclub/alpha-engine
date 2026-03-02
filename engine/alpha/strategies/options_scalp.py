@@ -59,14 +59,14 @@ IST = timezone(timedelta(hours=5, minutes=30))
 
 
 class OptionsScalpStrategy(BaseStrategy):
-    """Buy CALLs/PUTs on strong momentum signals from the scalp strategy.
+    """Buy CALLs/PUTs on momentum signals from the scalp strategy.
 
-    Reads the scalp strategy's `last_signal_state` dict every 10 seconds.
-    Only enters on 3-of-4+ signals with Range Gate zone filtering. Max loss = premium paid.
+    Reads the scalp strategy's `last_signal_state` dict every 5 seconds.
+    Enters on 2-of-4+ signals. Low brokerage, capped loss = premium paid.
     """
 
     name = StrategyName.OPTIONS_SCALP
-    check_interval_sec = 10  # 10-second ticks
+    check_interval_sec = 5  # 5-second ticks (was 10 — catch fresh signals faster)
 
     # ── Option chain refresh ──────────────────────────────────────
     CHAIN_REFRESH_INTERVAL = 30 * 60     # Refresh every 30 min
@@ -83,9 +83,9 @@ class OptionsScalpStrategy(BaseStrategy):
     MIN_PREMIUM_USD = 0.01               # Skip illiquid < $0.01
 
     # ── Entry ─────────────────────────────────────────────────────
-    MIN_SIGNAL_STRENGTH = 3              # 3-of-4 required (was 4 — 3/4+ signals enough)
-    SIGNAL_STALENESS_SEC = 15            # Signal must be < 15s old (was 30 — stale entries)
-    MIN_MOMENTUM_PCT = 0.25             # Skip if |momentum_60s| < 0.25%
+    MIN_SIGNAL_STRENGTH = 2              # 2-of-4 required (was 3 — options are capped-loss, be aggressive)
+    SIGNAL_STALENESS_SEC = 30            # Signal must be < 30s old (was 15 — too tight with 5s check cycle)
+    MIN_MOMENTUM_PCT = 0.15             # Skip if |momentum_60s| < 0.15% (was 0.25 — too restrictive)
 
     # ── Dynamic option sizing ──────────────────────────────────────
     # Same pair allocation as futures so capital is balanced.
@@ -98,9 +98,9 @@ class OptionsScalpStrategy(BaseStrategy):
     OPT_SURVIVAL_MAX_ALLOC = 30.0
 
     # ── Pullback entry ───────────────────────────────────────────
-    PULLBACK_WAIT_SEC = 30              # Wait up to 30s for premium dip
-    PULLBACK_DIP_PCT = 5.0             # Min dip to trigger entry
-    PULLBACK_SKIP_RISE_PCT = 5.0       # Skip if premium rose this much
+    PULLBACK_WAIT_SEC = 15              # Wait up to 15s for premium dip (was 30 — move is over by then)
+    PULLBACK_DIP_PCT = 3.0             # Min dip to trigger entry (was 5 — too rare)
+    PULLBACK_SKIP_RISE_PCT = 15.0      # Skip if premium rose this much (was 5 — rising = move happening!)
     PULLBACK_POLL_SEC = 2              # Check every 2s during pullback wait
 
     # ── Exit thresholds (tuned for momentum scalps) ────────────────
@@ -694,7 +694,7 @@ class OptionsScalpStrategy(BaseStrategy):
     # ==================================================================
 
     async def _check_option_entry(self) -> list[Signal]:
-        """Check scalp's signal state for 3/4+ momentum, buy option."""
+        """Check scalp's signal state for 2/4+ momentum, buy option."""
         # 0. POSITION_GONE cooldown — no new entries for 60s after position disappeared
         if time.monotonic() < self._position_gone_cooldown_until:
             remaining = self._position_gone_cooldown_until - time.monotonic()
@@ -705,18 +705,20 @@ class OptionsScalpStrategy(BaseStrategy):
                 )
             return []
 
-        # 1. Market regime gate — block VOLATILE, allow TRENDING + SIDEWAYS
+        # 1. Market regime gate — allow ALL regimes for options
+        # Options have capped downside (max loss = premium) so volatility
+        # is actually beneficial — bigger moves = bigger option gains.
+        # Only log regime for context, never block.
         if self._market_analyzer:
             analysis = self._market_analyzer.last_analysis_for(self.pair)
-            if analysis and analysis.condition == MarketCondition.VOLATILE:
+            if analysis:
                 now = time.monotonic()
-                if now - self._last_regime_log >= 60:
+                if now - self._last_regime_log >= 120:
                     self._last_regime_log = now
                     self.logger.info(
-                        "[%s] OPTIONS REGIME SKIP: %s (need non-VOLATILE)",
+                        "[%s] OPTIONS regime: %s (all regimes allowed)",
                         self.pair, analysis.condition.value,
                     )
-                return []
 
         # 2. Read scalp strategy's latest signal
         if not self._scalp or not hasattr(self._scalp, "last_signal_state"):
@@ -780,33 +782,19 @@ class OptionsScalpStrategy(BaseStrategy):
         # 4. Determine option type
         option_type = "call" if side == "long" else "put"
 
-        # 4b. Range Gate — zone-based filtering for options
+        # 4b. Range Gate — zone-based filtering for options (soft)
+        # Counter-zone options (PUTs in low, CALLs in high) log warning
+        # but don't block — options have capped loss, let them fire.
         _opt_cached = type(self._scalp)._cached_signals.get(self._base_asset, {}) if self._scalp else {}
         _opt_range_pos = _opt_cached.get("range_position")
         if _opt_range_pos is not None:
-            if _opt_range_pos <= 0.20:  # LOW ZONE — CALLs favored, PUTs need 3/4
-                if option_type == "put" and strength < 3:
-                    self.logger.info(
-                        "[%s] OPT_RANGE_GATE — PUT in LOW_ZONE needs 3/4, got %d/4 (pos=%.2f)",
-                        self.pair, strength, _opt_range_pos,
-                    )
-                    await self._log_skip(
-                        f"{self.pair} — OPT_RANGE_GATE: PUT in LOW_ZONE needs 3/4",
-                        {"range_pos": _opt_range_pos, "strength": strength, "option_type": option_type},
-                    )
-                    return []
-            elif _opt_range_pos >= 0.80:  # HIGH ZONE — PUTs favored, CALLs need 3/4
-                if option_type == "call" and strength < 3:
-                    self.logger.info(
-                        "[%s] OPT_RANGE_GATE — CALL in HIGH_ZONE needs 3/4, got %d/4 (pos=%.2f)",
-                        self.pair, strength, _opt_range_pos,
-                    )
-                    await self._log_skip(
-                        f"{self.pair} — OPT_RANGE_GATE: CALL in HIGH_ZONE needs 3/4",
-                        {"range_pos": _opt_range_pos, "strength": strength, "option_type": option_type},
-                    )
-                    return []
-            # MID ZONE: both types at current MIN_SIGNAL_STRENGTH (no extra gate)
+            _zone_warning = None
+            if _opt_range_pos <= 0.20 and option_type == "put":
+                _zone_warning = f"PUT in LOW_ZONE (pos={_opt_range_pos:.2f})"
+            elif _opt_range_pos >= 0.80 and option_type == "call":
+                _zone_warning = f"CALL in HIGH_ZONE (pos={_opt_range_pos:.2f})"
+            if _zone_warning:
+                self.logger.info("[%s] OPT_RANGE note: %s — entering anyway", self.pair, _zone_warning)
 
         self.logger.info(
             "[%s] OPTIONS SIGNAL READY: %s %d/4 — checking chain/premium",
