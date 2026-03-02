@@ -1077,15 +1077,6 @@ class AlphaBot:
             self._hourly_pnl = 0.0
             self._hourly_wins = 0
             self._hourly_losses = 0
-
-            # ── Meme bot: send a crypto meme every 4 hours ──
-            try:
-                from alpha.meme_bot import send_meme
-                hour = int(time.strftime("%H"))
-                if hour % 4 == 0:  # 00:00, 04:00, 08:00, 12:00, 16:00, 20:00
-                    await send_meme(bot=self.alerts._bot, chat_id=self.alerts._chat_id)
-            except Exception:
-                pass  # meme failure should never affect trading
         except Exception:
             logger.exception("Error sending hourly report")
 

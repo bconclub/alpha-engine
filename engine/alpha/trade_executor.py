@@ -1605,6 +1605,17 @@ class TradeExecutor:
                 position_type=signal.position_type,
                 exit_reason=signal.reason,
             )
+
+            # ── Meme bot: send a meme/joke after losing trades ──
+            if pnl < 0:
+                try:
+                    from alpha.meme_bot import send_meme
+                    await send_meme(
+                        bot=self.alerts._bot,
+                        chat_id=self.alerts._chat_id,
+                    )
+                except Exception:
+                    pass  # meme failure should never affect trading
         except Exception:
             logger.exception("Failed to send trade closed alert")
 
