@@ -1398,6 +1398,34 @@ class ScalpStrategy(BaseStrategy):
                     "favored 3/4" if range_min_strength == 3 else "standard",
                 )
 
+            # ── TRENDING REGIME GATE: block counter-trend entries ─────────
+            # In a strong trend, mean-reversion entries (shorts in uptrend,
+            # longs in downtrend) lose consistently. Hard block for weak
+            # signals, require 4/4 for strong ones.
+            _counter_trend = (
+                (self._market_regime == "TRENDING_UP" and side == "short")
+                or (self._market_regime == "TRENDING_DOWN" and side == "long")
+            )
+            if _counter_trend:
+                if signal_strength < 4:
+                    self._skip_reason = (
+                        f"TREND_REGIME_BLOCK ({side} vs {self._market_regime}, "
+                        f"need 4/4 got {signal_strength}/4)"
+                    )
+                    self.logger.info(
+                        "[%s] TREND_REGIME_BLOCK — %s blocked in %s (need 4/4, got %d/4)",
+                        self.pair, side.upper(), self._market_regime, signal_strength,
+                    )
+                    self.last_signal_state = {
+                        "side": side, "reason": reason,
+                        "strength": signal_strength, "trend_15m": trend_15m,
+                        "rsi": rsi_now, "momentum_60s": momentum_60s, "momentum_30s": momentum_30s,
+                        "current_price": current_price, "timestamp": time.monotonic(),
+                        "skip_reason": self._skip_reason,
+                        **self._last_signal_breakdown,
+                    }
+                    return signals
+
             # ── SIDEWAYS REGIME GATE: require 4/4 + minimum momentum ──
             if self._market_regime == "SIDEWAYS" and (signal_strength < 4 or abs(momentum_60s) < self.SIDEWAYS_MOM_GATE):
                 self._skip_reason = (
@@ -2338,6 +2366,14 @@ class ScalpStrategy(BaseStrategy):
         can_short = self.is_futures and config.delta.enable_shorting
         mom_abs = abs(momentum_60s)
 
+        # ── REGIME GATE: don't generate counter-trend T1 signals ────────
+        # ANTIC signals (BB high, RSI 62-68) are mean-reversion — they fire
+        # constantly during trends and lose every time.
+        if self._market_regime == "TRENDING_UP":
+            can_short = False  # block ALL short T1 signals in uptrend
+        elif self._market_regime == "TRENDING_DOWN":
+            pass  # allow shorts, but block longs below
+
         # BB position for direction inference
         bb_range = bb_upper - bb_lower if bb_upper > bb_lower else 1.0
         bb_position = (price - bb_lower) / bb_range  # 0.0 = lower, 1.0 = upper
@@ -2350,19 +2386,20 @@ class ScalpStrategy(BaseStrategy):
         in_squeeze = bb_inside_kc or self._squeeze_tick_count > 0
 
         # ── Compute TIER 1 signals with direction ──────────────────────
+        can_long = self._market_regime != "TRENDING_DOWN"
         t1_long: list[str] = []
         t1_short: list[str] = []
 
         # T1-1: Volume Anticipation — high volume, no momentum yet
         if vol_ratio >= self.TIER1_VOL_RATIO and mom_abs < self.TIER1_VOL_MAX_MOM:
-            if bb_position <= 0.30:
+            if bb_position <= 0.30 and can_long:
                 t1_long.append(f"T1:VOL_ANTIC:{vol_ratio:.1f}x+BBlow")
             elif bb_position >= 0.70 and can_short:
                 t1_short.append(f"T1:VOL_ANTIC:{vol_ratio:.1f}x+BBhigh")
             else:
                 # Volume loading but BB mid — use EMA for direction
                 if ema_9 > 0 and ema_21 > 0:
-                    if ema_9 > ema_21:
+                    if ema_9 > ema_21 and can_long:
                         t1_long.append(f"T1:VOL_ANTIC:{vol_ratio:.1f}x+EMA↑")
                     elif ema_9 < ema_21 and can_short:
                         t1_short.append(f"T1:VOL_ANTIC:{vol_ratio:.1f}x+EMA↓")
@@ -2370,7 +2407,7 @@ class ScalpStrategy(BaseStrategy):
         # T1-2: BB Squeeze — volatility compression before breakout
         if in_squeeze:
             if ema_9 > 0 and ema_21 > 0:
-                if ema_9 > ema_21:
+                if ema_9 > ema_21 and can_long:
                     t1_long.append(f"T1:BBSQZ+EMA↑")
                 elif ema_9 < ema_21 and can_short:
                     t1_short.append(f"T1:BBSQZ+EMA↓")
@@ -2378,7 +2415,7 @@ class ScalpStrategy(BaseStrategy):
         # T1-3: RSI Approach Zones — not yet extreme, approaching reversal
         rsi_l_low, rsi_l_high = self.TIER1_RSI_APPROACH_LONG
         rsi_s_low, rsi_s_high = self.TIER1_RSI_APPROACH_SHORT
-        if rsi_l_low <= rsi_now <= rsi_l_high:
+        if rsi_l_low <= rsi_now <= rsi_l_high and can_long:
             t1_long.append(f"T1:RSI_APPROACH:{rsi_now:.0f}")
         if rsi_s_low <= rsi_now <= rsi_s_high and can_short:
             t1_short.append(f"T1:RSI_APPROACH:{rsi_now:.0f}")
